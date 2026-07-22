@@ -1,0 +1,9 @@
+# Pinned dependencies for Find My Highlights (Python 3.11)
+# Full pip freeze — install with: pip install -r requirements.txt
+iniconfig==2.3.0
+numpy==2.4.6
+opencv-python==5.0.0.93
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.1.1
