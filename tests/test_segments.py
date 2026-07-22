@@ -104,6 +104,27 @@ def test_total_duration():
     assert total_duration([]) == 0.0
 
 
+def test_dual_sustain_extends_but_never_opens():
+    t = np.arange(0, 20, 0.1)
+    open_s = np.zeros_like(t)
+    open_s[(t >= 2) & (t <= 4)] = 1.0          # motion burst 2-4
+    sustain = open_s.copy()
+    sustain[(t >= 4) & (t <= 6)] = 0.4          # sustain-only signal 4-6
+    sustain[(t >= 14) & (t <= 16)] = 1.0        # sustain high with NO open signal
+    segs = scores_to_segments(t, open_s, cfg(), sustain_scores=sustain)
+    assert len(segs) == 1                       # 14-16 must NOT open a segment
+    a, b = segs[0]
+    assert abs(a - 2.0) < 0.2
+    assert b > 5.9                              # exit delayed by sustain signal
+
+
+def test_dual_equals_single_when_sustain_is_same():
+    t = np.arange(0, 10, 0.1)
+    s = np.where((t >= 3) & (t <= 5), 1.0, 0.0)
+    assert (scores_to_segments(t, s, cfg(), sustain_scores=s)
+            == scores_to_segments(t, s, cfg()))
+
+
 def test_smooth_scores_preserves_length_and_mean():
     t = np.arange(0, 10, 0.1)
     s = np.random.RandomState(0).rand(len(t))

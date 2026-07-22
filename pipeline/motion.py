@@ -34,6 +34,11 @@ class MotionConfig:
     camera_motion_px: float = 3.0
     # Border fraction ignored after warp compensation (warp edge artifacts).
     border_frac: float = 0.03
+    # Coarse spatial grid (cols x rows) of per-block moving-pixel fractions,
+    # emitted alongside the scalar score so downstream fusion can ask WHERE
+    # the motion was (e.g. inside a person's bounding box).
+    grid_cols: int = 16
+    grid_rows: int = 9
 
 
 @dataclass
@@ -41,8 +46,12 @@ class MotionResult:
     times: np.ndarray          # seconds, one entry per analyzed frame pair
     scores: np.ndarray         # fraction of pixels moving (0..1), camera-compensated
     camera_shift: np.ndarray   # global translation magnitude per frame pair (px)
+    grids: np.ndarray          # (n, grid_rows, grid_cols) per-block moving fractions
     fps: float                 # source video fps
     duration: float            # seconds
+    frame_size: tuple          # original (width, height)
+    analysis_size: tuple       # downscaled (width, height) used for analysis
+    border_px: tuple           # (bw, bh) border trimmed from analysis frame
     config: MotionConfig = field(default_factory=MotionConfig)
 
 
@@ -62,7 +71,8 @@ def compute_motion(video_path: str, config: MotionConfig | None = None,
     duration = n_frames / fps if n_frames else 0.0
     step = max(1, round(fps / cfg.sample_fps))
 
-    times, scores, shifts = [], [], []
+    times, scores, shifts, grids = [], [], [], []
+    frame_size = analysis_size = border_px = None
     prev = None
     prev_t = 0.0
     idx = 0
@@ -100,10 +110,18 @@ def compute_motion(video_path: str, config: MotionConfig | None = None,
             bh = int(diff.shape[0] * cfg.border_frac)
             bw = int(diff.shape[1] * cfg.border_frac)
             core = diff[bh:diff.shape[0] - bh, bw:diff.shape[1] - bw]
-            moving_frac = float(np.mean(core > cfg.pixel_diff_thresh))
+            mask = (core > cfg.pixel_diff_thresh).astype(np.float32)
+            moving_frac = float(np.mean(mask))
+            grid = cv2.resize(mask, (cfg.grid_cols, cfg.grid_rows),
+                              interpolation=cv2.INTER_AREA)
             times.append(prev_t)
             scores.append(moving_frac)
             shifts.append(shift_mag)
+            grids.append(grid)
+            if frame_size is None:
+                frame_size = (w, h)
+                analysis_size = (gray_f.shape[1], gray_f.shape[0])
+                border_px = (bw, bh)
 
         prev = gray_f
         prev_t = t
@@ -115,5 +133,7 @@ def compute_motion(video_path: str, config: MotionConfig | None = None,
         raise ValueError(f"no analyzable frames in video: {video_path}")
     return MotionResult(
         times=np.asarray(times), scores=np.asarray(scores),
-        camera_shift=np.asarray(shifts), fps=fps,
-        duration=duration or (times[-1] if times else 0.0), config=cfg)
+        camera_shift=np.asarray(shifts), grids=np.asarray(grids),
+        fps=fps, duration=duration or (times[-1] if times else 0.0),
+        frame_size=frame_size, analysis_size=analysis_size,
+        border_px=border_px, config=cfg)

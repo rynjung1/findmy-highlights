@@ -46,23 +46,38 @@ def smooth_scores(times: np.ndarray, scores: np.ndarray,
     return np.convolve(scores, kernel, mode="same")
 
 
-def scores_to_segments(times, scores, config: SegmentConfig | None = None):
-    """Return a list of (start_s, end_s) candidate action segments."""
+def scores_to_segments(times, scores, config: SegmentConfig | None = None,
+                       sustain_scores=None):
+    """Return a list of (start_s, end_s) candidate action segments.
+
+    If `sustain_scores` is given, hysteresis becomes two-signal: a segment
+    OPENS only when `scores` crosses enter_thresh, but stays open until
+    `sustain_scores` falls below exit_thresh. Used by fusion so auxiliary
+    signals (person boxes, plate occupancy) can hold a live play open past
+    a motion lull, but can never open a segment on their own (measured on
+    the reference clips: letting them open segments only inflated flagged
+    time, it never added a play that motion hadn't already found).
+    """
     cfg = config or SegmentConfig()
     times = np.asarray(times, dtype=float)
     scores = np.asarray(scores, dtype=float)
     if len(times) == 0:
         return []
-    sm = smooth_scores(times, scores, cfg.smooth_window_s)
+    sm_open = smooth_scores(times, scores, cfg.smooth_window_s)
+    if sustain_scores is None:
+        sm_sustain = sm_open
+    else:
+        sustain_scores = np.asarray(sustain_scores, dtype=float)
+        sm_sustain = smooth_scores(times, sustain_scores, cfg.smooth_window_s)
 
     segments = []
     open_start = None
-    for t, s in zip(times, sm):
+    for t, so, ss in zip(times, sm_open, sm_sustain):
         if open_start is None:
-            if s >= cfg.enter_thresh:
+            if so >= cfg.enter_thresh:
                 open_start = t
         else:
-            if s < cfg.exit_thresh:
+            if ss < cfg.exit_thresh:
                 segments.append((open_start, t))
                 open_start = None
     if open_start is not None:

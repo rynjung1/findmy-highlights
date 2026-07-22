@@ -22,6 +22,7 @@ node_modules/
 # Generated output
 output/
 uploads/
+.cache/
 
 # macOS
 .DS_Store

@@ -10,7 +10,8 @@
     {"id": "e4", "window": [120, 127], "type": "pitch", "required": true,
      "note": "ball visible near white-shirt batter ~122-124; no swing"},
     {"id": "e5", "window": [137, 148], "type": "hit_and_run", "required": true,
-     "note": "batter load/swing ~139-143, plate empty and fielders/runner moving by ~144"},
+     "check_continuity": true,
+     "note": "batter load/swing ~139-143, plate empty and fielders/runner moving by ~144; continuity-checked because Phase 3 play-extension depends on the signal holding through this defensive play"},
     {"id": "e6", "window": [168, 177], "type": "at_bat_activity", "required": false,
      "note": "batter settling into stance, bat raised, possible practice swings ~174"}
   ]

@@ -1,0 +1,211 @@
+"""Unit tests for signal fusion: ZOH alignment, additive score guarantee,
+plate occupancy, and the veto rule with its safety net. Pure numpy."""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline.fusion import (FusionConfig, PlateZone, apply_veto,
+                             boxes_to_grid_mask, compute_occupancy, fuse,
+                             vetoed_overlapping_required, FusedResult)
+
+# Geometry used throughout: 1920x1080 source, 480x270 analysis, no border,
+# 16x9 grid -> each grid cell is 120x120 source px.
+FRAME = (1920, 1080)
+ANALYSIS = (480, 270)
+BORDER = (0, 0)
+GRID = (9, 16)
+
+
+def make_motion(n=100, dt=0.1, base=0.0):
+    times = np.arange(n) * dt
+    scores = np.full(n, base)
+    grids = np.zeros((n, *GRID))
+    return times, scores, grids
+
+
+def centered_box(cx, cy, w=80, h=200):
+    return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+
+
+ZONE = PlateZone(center_xy=(1147, 840), radius_px=280)
+
+
+def fuse_simple(times, scores, grids, det_times, det_boxes, zone=None, cfg=None):
+    return fuse(times, scores, grids, FRAME, ANALYSIS, BORDER,
+                det_times, det_boxes, zone, cfg or FusionConfig())
+
+
+# ---------- additive guarantee ----------
+
+def test_combined_never_below_motion():
+    times, scores, grids = make_motion(50)
+    rng = np.random.RandomState(0)
+    scores[:] = rng.rand(50) * 0.05
+    grids[:] = rng.rand(50, *GRID) * 0.1
+    det_times = list(np.arange(0, 5, 1.0))
+    det_boxes = [[centered_box(400, 500)] for _ in det_times]
+    fused = fuse_simple(times, scores, grids, det_times, det_boxes, ZONE)
+    assert np.all(fused.combined >= fused.motion - 1e-12)
+
+
+def test_person_motion_adds_to_score():
+    times, scores, grids = make_motion(10)
+    scores[:] = 0.01
+    grids[:, 4, 4] = 0.5  # motion in cell (r4, c4) ~ source px (480-600, 480-600)
+    det_times = [0.0]
+    det_boxes = [[centered_box(540, 540)]]  # box over that cell
+    fused = fuse_simple(times, scores, grids, det_times, det_boxes, None,
+                        FusionConfig(staleness_s=100))
+    assert np.all(fused.combined > fused.motion)
+    assert np.all(fused.person_motion > 0)
+
+
+# ---------- ZOH staleness ----------
+
+def test_stale_detection_falls_back_to_motion_only():
+    times, scores, grids = make_motion(100)  # 0..9.9s
+    det_times = [0.0]                        # only one detection at t=0
+    det_boxes = [[centered_box(540, 540)]]
+    fused = fuse_simple(times, scores, grids, det_times, det_boxes, ZONE,
+                        FusionConfig(staleness_s=0.75))
+    late = fused.times > 1.0
+    assert not fused.det_valid[late].any()      # stale beyond bound
+    assert fused.covered[late].all()            # protective default
+    assert np.all(fused.combined[late] == fused.motion[late])
+
+
+def test_no_detections_at_all_is_pure_motion():
+    times, scores, grids = make_motion(20, base=0.02)
+    fused = fuse_simple(times, scores, grids, [], [])
+    assert np.all(fused.combined == fused.motion)
+    assert fused.covered.all()
+    assert not fused.det_valid.any()
+
+
+# ---------- occupancy ----------
+
+def test_stationary_person_in_zone_is_occupied():
+    det_times = [0.0, 1.0, 2.0]
+    b = centered_box(*ZONE.center_xy)
+    det_boxes = [[b], [b], [b]]
+    occ = compute_occupancy(det_times, det_boxes, ZONE, stationary_v=0.3)
+    assert not occ[0]          # no predecessor sample yet
+    assert occ[1] and occ[2]
+
+
+def test_running_person_in_zone_not_occupied():
+    det_times = [0.0, 1.0]
+    # moves 400px in 1s with 200px box height -> 2 box-heights/s >> 0.3
+    det_boxes = [[centered_box(1000, 840)], [centered_box(1400, 840)]]
+    zone = PlateZone(center_xy=(1400, 840), radius_px=280)
+    occ = compute_occupancy(det_times, det_boxes, zone, stationary_v=0.3)
+    assert not occ.any()
+
+
+def test_occupied_state_survives_fast_movement_in_zone():
+    # batter settles (stationary), then strides fast but stays in zone:
+    # hysteresis must hold the occupied state through the stride
+    det_times = [0.0, 1.0, 2.0]
+    b_settled = centered_box(*ZONE.center_xy)
+    b_stride = centered_box(ZONE.center_xy[0] + 250, ZONE.center_xy[1])
+    occ = compute_occupancy(det_times, [[b_settled], [b_settled], [b_stride]],
+                            ZONE, stationary_v=0.3)
+    assert occ[1]      # entered while stationary
+    assert occ[2]      # held during fast in-zone movement
+
+
+def test_occupied_state_clears_when_zone_empties():
+    det_times = [0.0, 1.0, 2.0]
+    b = centered_box(*ZONE.center_xy)
+    far = centered_box(200, 200)
+    occ = compute_occupancy(det_times, [[b], [b], [far]], ZONE,
+                            stationary_v=0.3)
+    assert occ[1] and not occ[2]
+
+
+def test_person_outside_zone_not_occupied():
+    det_times = [0.0, 1.0]
+    b = centered_box(200, 200)
+    occ = compute_occupancy(det_times, [[b], [b]], ZONE, stationary_v=0.3)
+    assert not occ.any()
+
+
+def test_occupancy_adds_boost():
+    times, scores, grids = make_motion(30, base=0.001)
+    det_times = list(np.arange(0.0, 3.5, 1.0))
+    b = centered_box(*ZONE.center_xy)
+    det_boxes = [[b] for _ in det_times]
+    cfg = FusionConfig(w_occupancy=0.004, staleness_s=0.75)
+    fused = fuse_simple(times, scores, grids, det_times, det_boxes, ZONE, cfg)
+    assert fused.occupied.any()
+    boosted = fused.combined[fused.occupied]
+    assert np.allclose(boosted, 0.001 + 0.004)
+
+
+# ---------- box -> grid mapping ----------
+
+def test_box_grid_mask_marks_correct_cells():
+    mask = boxes_to_grid_mask([centered_box(540, 540, 100, 100)],
+                              FRAME, ANALYSIS, BORDER, GRID)
+    assert mask[4, 4]
+    assert not mask[0, 0]
+    assert not mask[8, 15]
+
+
+def test_box_grid_mask_out_of_frame_clipped():
+    mask = boxes_to_grid_mask([[-500, -500, -100, -100]],
+                              FRAME, ANALYSIS, BORDER, GRID)
+    assert not mask.any()
+
+
+# ---------- veto ----------
+
+def veto_fixture(covered_pattern, det_valid_pattern):
+    n = len(covered_pattern)
+    times = np.arange(n) * 1.0
+    return FusedResult(
+        times=times, combined=np.ones(n), motion=np.ones(n),
+        person_motion=np.zeros(n),
+        occupied=np.zeros(n, dtype=bool),
+        covered=np.array(covered_pattern, dtype=bool),
+        det_valid=np.array(det_valid_pattern, dtype=bool))
+
+
+def test_veto_drops_fully_uncovered_segment():
+    fused = veto_fixture([False] * 10, [True] * 10)
+    kept, vetoed = apply_veto([(2.0, 7.0)], fused)
+    assert kept == [] and vetoed == [(2.0, 7.0)]
+
+
+def test_one_covered_sample_prevents_veto():
+    cov = [False] * 10
+    cov[5] = True
+    fused = veto_fixture(cov, [True] * 10)
+    kept, vetoed = apply_veto([(2.0, 7.0)], fused)
+    assert kept == [(2.0, 7.0)] and vetoed == []
+
+
+def test_one_stale_sample_prevents_veto():
+    valid = [True] * 10
+    valid[4] = False   # stale sample inside segment -> covered=True protectively
+    cov = [False] * 10
+    cov[4] = True      # fusion sets covered True when det invalid
+    fused = veto_fixture(cov, valid)
+    kept, vetoed = apply_veto([(2.0, 7.0)], fused)
+    assert kept == [(2.0, 7.0)] and vetoed == []
+
+
+def test_veto_safety_net_flags_required_overlap():
+    bad = vetoed_overlapping_required(
+        [(10.0, 15.0), (30.0, 32.0)],
+        [{"id": "e9", "window": [14, 20]}])
+    assert bad == [((10.0, 15.0), "e9")]
+
+
+def test_veto_safety_net_clean_when_no_overlap():
+    assert vetoed_overlapping_required(
+        [(30.0, 32.0)], [{"id": "e9", "window": [14, 20]}]) == []

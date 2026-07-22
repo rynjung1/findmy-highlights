@@ -1,0 +1,12 @@
+{
+  "frame_size": [
+    1920,
+    1080
+  ],
+  "plate_xy": [
+    1147.0,
+    840.0
+  ],
+  "zone_radius_px": 280.0,
+  "created_from": "clip_60.mkv"
+}

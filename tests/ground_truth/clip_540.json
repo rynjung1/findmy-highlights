@@ -8,7 +8,8 @@
     {"id": "e2", "window": [44, 57], "type": "pitch_swing_run", "required": true,
      "note": "ball visible ~47, swing ~49, batter running ~50, fielding through ~56"},
     {"id": "e3", "window": [79, 91], "type": "hit_and_run", "required": true,
-     "note": "runners advancing and fielders converging ~82-88; contact just before ~82"},
+     "check_continuity": true,
+     "note": "runners advancing and fielders converging ~82-88; contact just before ~82; continuity-checked because Phase 3 play-extension depends on the signal holding through this defensive play"},
     {"id": "e4", "window": [177, 184], "type": "swing", "required": true,
      "note": "clear swing motion at ~181"}
   ]

@@ -33,13 +33,42 @@ Built so far:
   merges near-adjacent segments, and drops sub-second blips. Thresholds are
   deliberately permissive: over-flagging is acceptable, missing a play is
   not. Pure logic, fully unit-tested without video.
+- **Person detection** (`pipeline/detection.py`) — RF-DETR Base
+  (Apache-2.0, code and weights) detects players on frames sampled at
+  ~1 fps, run at 1120px input resolution (validated to catch distant
+  fielders down to ~19px tall). Results are cached in `.cache/` keyed by
+  file + config, so re-runs are free.
+- **Plate calibration** (`scripts/calibrate.py`) — one-time manual step per
+  camera setup marking where home plate is (see Setup below). Enables the
+  plate-occupancy signal.
+- **Signal fusion** (`pipeline/fusion.py`) — aligns the ~10 Hz motion
+  signal with the ~1 Hz detections (zero-order hold with a staleness
+  bound), then scores additively: motion + a boost for motion inside
+  person boxes + a small boost while a roughly-stationary person occupies
+  the plate zone. Segmentation uses dual hysteresis: only motion can OPEN
+  a segment; the fused score can hold one open (protecting a play tail
+  where fielders are still converging). A segment is vetoed only when
+  detection is certain no person was ever near its motion — proven to
+  fire correctly on constructed person-free footage (`tests/test_veto_e2e.py`),
+  and the regression suite fails hard if a veto ever touches a known real
+  play.
+
+  **Honest Phase 2 finding:** on the reference footage, person detection
+  did not improve the keep/cut decision. Motion-only already had full
+  recall (every real play), the veto never fires on real clips (measured:
+  no person-free motion run longer than 0.6s — essentially all motion on
+  a rec field is human), and the fused signals *increase* flagged time
+  (they hold segments open longer). The measured value of person/plate
+  signals on this footage is (a) holding one defensive-play tail open
+  that motion alone dropped (clip_60 146-148s), and (b) the
+  plate-occupancy timeline, which is the input Phase 3's at-bat boundary
+  logic needs. The original hypothesis — person detection discriminates
+  real plays from milling — is false for this footage, because the
+  milling is also people. The discrimination has to come from game
+  context (plate occupancy over time), which is Phase 3.
 - **CLI** (`scripts/detect.py`) — run detection on one video, print
-  candidate segments as timestamps (or JSON with `--json`).
-
-Planned pieces:
-
-- **Player/object detection signal** (Phase 2) to discriminate real plays
-  from generic milling that motion alone can't tell apart.
+  candidate segments as timestamps (or JSON with `--json`);
+  `--motion-only` gives the Phase 1 baseline.
 - **Manifest** — a JSON record of every candidate segment (timestamps, source
   file, detection score, kept/cut status). The single source of truth tying
   detection, editing, and export together.
@@ -82,6 +111,23 @@ One-time setup on a fresh machine:
 
 All dependency versions are pinned exactly in `requirements.txt`. Do not
 install packages into system/global Python.
+
+5. **Calibrate the plate zone** (one-time, per camera setup — clips shot
+   from the same mounted camera share one calibration):
+
+   ```sh
+   # interactive: opens a window, click home plate, press 's' to save
+   ./venv/bin/python scripts/calibrate.py path/to/any_clip_from_that_camera.mkv
+
+   # or non-interactive with known pixel coordinates
+   ./venv/bin/python scripts/calibrate.py path/to/clip.mkv --set 1147,840
+   ```
+
+   This writes `calibration.json` next to the video. Without it the
+   pipeline still runs, but the plate-occupancy signal is disabled (a
+   warning is printed). The first pretrained-model download (~355 MB)
+   happens automatically on first detection run and is cached under
+   `~/.roboflow/`.
 
 ## How to run it
 
@@ -140,11 +186,15 @@ never mutated directly, which is what makes restoring a cut segment lossless.
   confirmed real plays (swing, hit, run, pitch) that the detector must
   capture; non-required events are borderline moments (practice swings,
   warm-up throws) reported for information but not counted against recall.
-- **Regression script** (`scripts/regression.py`) runs detection on every
-  reference clip and reports per clip: recall on required events (must be
-  100%), borderline capture, and how much total footage was flagged
-  (over-inclusion — expected to be high in Phase 1, reported so changes
-  can be compared). Exits non-zero if any required event is missed.
+- **Regression script** (`scripts/regression.py`) runs both the
+  motion-only baseline and the fused pipeline on every reference clip and
+  reports recall on required events, borderline capture, and flagged
+  footage for each. It exits non-zero if: the fused pipeline misses any
+  required event; fused recall drops below the motion-only baseline; a
+  vetoed segment overlaps a required event (safety net — a distant or
+  occluded fielder must never silently erase a real play); or a
+  defensive-play window marked `check_continuity` in the ground truth is
+  not covered by one contiguous kept segment.
 - The edge cases covered so far: a video with no motion at all, a
   fraction-of-a-second video, a missing file, and a corrupt file (the last
   two fail with a clean error rather than crashing).
