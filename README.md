@@ -17,12 +17,29 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 
 ## Architecture overview
 
-*(To be filled in as components are built.)*
+Built so far:
 
-Planned pieces and how they connect:
+- **Motion detection** (`pipeline/motion.py`) — scans a video at ~10
+  samples/sec, downscales each frame, estimates the global camera
+  translation between consecutive frames with phase correlation and removes
+  it, then measures what fraction of pixels still changed. That residual is
+  localized motion: players moving, a swing, a run. A camera pan therefore
+  does not read as action (with one known limitation: if the frame is
+  otherwise featureless, a single large moving object can be mistaken for
+  camera motion — not a realistic condition for game footage).
+- **Segment extraction** (`pipeline/segments.py`) — smooths the motion
+  scores, applies hysteresis thresholding (a segment opens at a higher
+  threshold than it closes at, so brief dips mid-play don't split it),
+  merges near-adjacent segments, and drops sub-second blips. Thresholds are
+  deliberately permissive: over-flagging is acceptable, missing a play is
+  not. Pure logic, fully unit-tested without video.
+- **CLI** (`scripts/detect.py`) — run detection on one video, print
+  candidate segments as timestamps (or JSON with `--json`).
 
-- **Detection pipeline** — analyzes video with OpenCV (motion intensity, later
-  a pretrained player/object detector) and flags candidate action segments.
+Planned pieces:
+
+- **Player/object detection signal** (Phase 2) to discriminate real plays
+  from generic milling that motion alone can't tell apart.
 - **Manifest** — a JSON record of every candidate segment (timestamps, source
   file, detection score, kept/cut status). The single source of truth tying
   detection, editing, and export together.
@@ -68,7 +85,15 @@ install packages into system/global Python.
 
 ## How to run it
 
-*(To be filled in — no runnable pipeline or UI exists yet.)*
+No UI or backend yet — the pipeline runs from the command line:
+
+```sh
+# detect candidate action segments in one video
+./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv
+
+# same, as JSON
+./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv --json
+```
 
 ## How the manifest works
 
@@ -99,13 +124,27 @@ never mutated directly, which is what makes restoring a cut segment lossless.
 
 ## Testing
 
-*(To be filled in as the test suite is built.)*
+```sh
+# unit tests (segment logic + synthetic-video edge cases; no real footage needed)
+./venv/bin/python -m pytest tests/
 
-- Unit tests (pytest) will live in `/tests`, covering manifest read/write,
-  segment merge/padding math, multi-file ordering, and status updates.
-- A small set of reference sample clips (kept outside version control) with
-  hand-written ground-truth annotations serve as the fixed yardstick for
-  detection quality.
-- A regression script will run the full detection pipeline against every
-  reference clip and report recall (known plays captured) and rough
-  over-inclusion, with recall weighted more heavily.
+# detection regression against the reference clips
+./venv/bin/python scripts/regression.py
+```
+
+- **Reference clips** live in `reference_clips/` (gitignored — video files
+  are never committed). Currently three 190-second softball clips.
+- **Ground truth** lives in `tests/ground_truth/*.json`, one file per clip,
+  hand-annotated by frame-level visual review. Each lists action *events*
+  with a time window, a type, and a `required` flag: required events are
+  confirmed real plays (swing, hit, run, pitch) that the detector must
+  capture; non-required events are borderline moments (practice swings,
+  warm-up throws) reported for information but not counted against recall.
+- **Regression script** (`scripts/regression.py`) runs detection on every
+  reference clip and reports per clip: recall on required events (must be
+  100%), borderline capture, and how much total footage was flagged
+  (over-inclusion — expected to be high in Phase 1, reported so changes
+  can be compared). Exits non-zero if any required event is missed.
+- The edge cases covered so far: a video with no motion at all, a
+  fraction-of-a-second video, a missing file, and a corrupt file (the last
+  two fail with a clean error rather than crashing).

@@ -1,0 +1,15 @@
+{
+  "clip": "clip_540.mkv",
+  "duration": 190.0,
+  "notes": "Two clear plays in the first half, a long quiet stretch (~96-168) with only milling and walking, then a clear swing near the end. The fielding movement around t=8-16 could be the tail of a play that started before the clip; marked borderline.",
+  "events": [
+    {"id": "e1", "window": [6, 18], "type": "fielding_activity", "required": false,
+     "note": "fielders bending/moving around the infield; possibly end of an earlier play"},
+    {"id": "e2", "window": [44, 57], "type": "pitch_swing_run", "required": true,
+     "note": "ball visible ~47, swing ~49, batter running ~50, fielding through ~56"},
+    {"id": "e3", "window": [79, 91], "type": "hit_and_run", "required": true,
+     "note": "runners advancing and fielders converging ~82-88; contact just before ~82"},
+    {"id": "e4", "window": [177, 184], "type": "swing", "required": true,
+     "note": "clear swing motion at ~181"}
+  ]
+}

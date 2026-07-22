@@ -1,0 +1,17 @@
+{
+  "clip": "clip_300.mkv",
+  "duration": 190.0,
+  "notes": "This clip is dominated by one long at-bat (batter at the plate from t=0 to roughly t=66) followed by a batter change and a second at-bat, then a long milling/transition stretch with warm-up throwing. Only two moments show a confirmed ball in flight; stance/load motions without a visible ball are marked borderline.",
+  "events": [
+    {"id": "e1", "window": [14, 26], "type": "at_bat_activity", "required": false,
+     "note": "batter load/ready positions ~16-24, pitches likely but no ball confirmed"},
+    {"id": "e2", "window": [55, 67], "type": "pitch", "required": true,
+     "note": "batter loads ~59-62, ball visible arriving at batter ~63"},
+    {"id": "e3", "window": [76, 96], "type": "at_bat_activity", "required": false,
+     "note": "new batter arrives ~76, in stance with ready/load motions through 96"},
+    {"id": "e4", "window": [122, 129], "type": "pitch", "required": true,
+     "note": "ball clearly visible in the air ~125, batter takes the pitch"},
+    {"id": "e5", "window": [144, 160], "type": "warmup_throws", "required": false,
+     "note": "overhand throwing/catch near the plate area ~148-158; not a game play"}
+  ]
+}
