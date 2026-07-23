@@ -15,6 +15,41 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 (whiff vs. hit vs. called strike) is explicitly out of scope for now; see
 [Known limitations](#known-limitations--non-goals-for-this-version).
 
+## Current status
+
+**Phases 0-4 complete and approved.** Detection pipeline (motion → person
+detection → play extension → padding), the manifest, and multi-file
+handling all work end-to-end and are covered by 120 unit tests + 2 e2e
+tests (`pytest tests/` and `pytest tests/ -m e2e`). Phase 5 (stitch kept
+segments into one output video) is next and hasn't been started.
+
+Open items:
+- No full-length (30-60+ min) real video has been run through the
+  pipeline yet — needed before Phase 5's checkpoint to catch
+  performance/memory issues, per the project spec.
+- No committed multi-file regression fixture. Multi-file logic was
+  validated against real footage the user supplied directly (not
+  committed — video files are gitignored), so a fresh clone can run the
+  synthetic-metadata multi-file tests but can't re-run that exact
+  end-to-end validation without the same source files.
+- Manual "cut a kept segment" (the reverse of restore) is intentionally
+  not built yet — see Known limitations.
+
+Notes for whoever picks this up next:
+- **The priority rule governs every threshold in this codebase**: never
+  miss a real play; when a detection decision is borderline, err toward
+  keeping it. If you're tuning anything, tune against recall first.
+- `pipeline/run.py`'s `process_video()` is the one implementation of
+  "process a single file" — both `scripts/detect.py` (one file) and
+  `scripts/detect_multi.py` (many) call it. Don't duplicate pipeline
+  logic in a script.
+- A file boundary is a hard boundary by design (see Known limitations) —
+  this is deliberate, not a bug to "fix" later.
+- `reference_clips/*.mkv` and any other test video files are gitignored
+  and not in the repo. If you need them, ask the user; several were
+  provided over the course of Phases 1-4 and then intentionally not
+  committed.
+
 ## Architecture overview
 
 Built so far:
