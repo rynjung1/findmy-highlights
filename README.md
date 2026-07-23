@@ -277,12 +277,48 @@ local timestamps happen to look adjacent.
 
 ## Known limitations / non-goals for this version
 
-- **No real multi-file reference set yet.** Phase 4's multi-file logic is
-  unit-tested against synthetic metadata and was manually validated
-  end-to-end against a real two-file set split from an existing reference
-  clip, but a committed multi-file regression fixture (with ground truth,
-  like `reference_clips/`) is still pending real footage with an actual
-  recording gap between files.
+- **A real play split across a file boundary becomes two separate
+  segments, not one continuous one.** Per the Phase 3/4 design decision,
+  play extension and at-bat state never cross a file boundary — so if
+  recording genuinely stops mid-play (not just between innings) and
+  resumes in a new file, each half is detected and kept independently:
+  the first file's segment truncates at its own end (correctly, not
+  dropping any footage — see the fix below), and the second file opens
+  its own fresh segment picking up the rest. This fragmentation is
+  visible and reviewable in the manifest as two distinct `kept` entries
+  (confirmed against a real test case: a hit-with-runners-advancing play
+  from `clip_540`'s ground truth, split at t=85, appears as one segment
+  ending at `boundary_test_part1.mkv`'s own true end and a second segment
+  opening at `boundary_test_part2.mkv`'s start) — nothing is silently
+  lost — but the two halves are not automatically stitched back into one
+  continuous highlight clip. That's accepted for v1.
+- **Fixed: a video's `duration` was sometimes reported longer than what
+  was actually decodable**, because it was read from the container's
+  `CAP_PROP_FRAME_COUNT` unconditionally. Found via the boundary-split
+  test case above (a file produced by splitting another at a
+  non-keyframe point can end up with a frame count the container claims
+  but never actually decodes: observed, 4080 frames/85.08s claimed, only
+  3861 frames/80.52s retrievable) — trusting the nominal value made the
+  manifest report several seconds of confirmed "cut" dead time that had
+  in fact never been analyzed at all. `pipeline/motion.py` now caps
+  `duration` at the last frame genuinely retrieved. This turned out to
+  affect the three original reference clips too, by a smaller margin
+  (~4.1-4.7s each) — likely the same container/frame-rate quirk at a
+  smaller scale — so every clip's reported duration is now a few seconds
+  shorter and more accurate than in the Phase 1-3 checkpoints. Recall and
+  continuity on all reference clips are unaffected (`scripts/regression.py`
+  still passes in full); only the never-real "dead time" past each file's
+  true end changed.
+- **Multi-file testing uses real files, not committed ones.** Four
+  multi-file test sets (a clean two-file pair with a real ~4-minute
+  offset, an ambiguous pair 4 seconds apart, and the boundary-split pair
+  above) were provided and used to validate ordering, the manifest, and
+  boundary behavior end-to-end — see `pipeline/multifile.py`,
+  `pipeline/calibration.py`, and the `test_multifile*`/`test_calibration.py`
+  suites for what's unit-tested from this. The actual video files aren't
+  committed (gitignored, like all reference clips), so a fresh checkout
+  can run the synthetic-metadata unit tests but not re-run this exact
+  end-to-end validation without the same source files.
 - **No outcome classification (Tier 2).** v1 keeps every action segment,
   including missed swings. Telling a whiff from a hit is a later, harder
   problem.

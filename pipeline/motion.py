@@ -131,9 +131,28 @@ def compute_motion(video_path: str, config: MotionConfig | None = None,
     cap.release()
     if not times:
         raise ValueError(f"no analyzable frames in video: {video_path}")
+
+    # CAP_PROP_FRAME_COUNT is container metadata and can overstate what's
+    # actually decodable — observed on a file produced by splitting
+    # another video at a non-keyframe boundary (stream-copied, no
+    # re-encode): container claimed 4080 frames / 85.08s, only 3861
+    # frames / 80.52s actually decoded. Trusting the nominal value there
+    # would make the manifest claim ~4.7s of real "cut" dead time that
+    # was never actually analyzed — never analyzed footage must never be
+    # reported as confirmed dead time. `prev_t` is the timestamp of the
+    # last frame genuinely retrieved, so it's the authoritative ceiling.
+    actual_duration = prev_t
+    if duration and duration > actual_duration + 1.0:
+        import warnings
+        warnings.warn(
+            f"{video_path}: container reports {duration:.1f}s but only "
+            f"{actual_duration:.1f}s was actually decodable; using the "
+            f"decodable duration", stacklevel=2)
+    final_duration = min(duration, actual_duration) if duration else actual_duration
+
     return MotionResult(
         times=np.asarray(times), scores=np.asarray(scores),
         camera_shift=np.asarray(shifts), grids=np.asarray(grids),
-        fps=fps, duration=duration or (times[-1] if times else 0.0),
+        fps=fps, duration=final_duration,
         frame_size=frame_size, analysis_size=analysis_size,
         border_px=border_px, config=cfg)

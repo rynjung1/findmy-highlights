@@ -76,3 +76,57 @@ def test_corrupt_file_raises_cleanly(tmp_path):
     p.write_bytes(b"this is not a video file at all" * 100)
     with pytest.raises((IOError, ValueError)):
         compute_motion(str(p))
+
+
+def test_duration_uses_actually_decoded_frames_not_container_metadata(
+        tmp_path, monkeypatch):
+    """Regression test for a real bug found via a user-provided test file:
+    a video split from another with ffmpeg's stream copy at a non-keyframe
+    point can end up with CAP_PROP_FRAME_COUNT overstating what actually
+    decodes (observed: container claimed 4080 frames/85.08s, only 3861
+    frames/80.52s were retrievable). Trusting the nominal count made
+    compute_motion() report a duration ~4.7s longer than anything was ever
+    analyzed for — which the manifest then rendered as confirmed dead time
+    that was, in fact, never-analyzed footage. duration must never exceed
+    what grab()/retrieve() actually produced.
+
+    Reproduced here by wrapping a real (correctly-encoded) capture and
+    lying specifically about CAP_PROP_FRAME_COUNT — the real pathology is
+    codec/container-specific and didn't reproduce with a simple synthetic
+    re-encode, but this isolates exactly the logic the fix depends on:
+    grab() truthfully running out before the inflated count is reached.
+    """
+    p = tmp_path / "video.mp4"
+    write_video(p, static_frames(60), fps=30)  # ~2.0s of real content
+
+    real_capture_cls = cv2.VideoCapture
+
+    class LyingCapture:
+        def __init__(self, path):
+            self._real = real_capture_cls(path)
+
+        def isOpened(self):
+            return self._real.isOpened()
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FRAME_COUNT:
+                return 90.0  # claims 50% more frames than actually exist
+            return self._real.get(prop)
+
+        def grab(self):
+            return self._real.grab()      # truthfully exhausts at ~60
+
+        def retrieve(self):
+            return self._real.retrieve()
+
+        def release(self):
+            self._real.release()
+
+    monkeypatch.setattr(cv2, "VideoCapture", LyingCapture)
+    result = compute_motion(str(p))
+    monkeypatch.setattr(cv2, "VideoCapture", real_capture_cls)
+
+    nominal_duration = 90 / 30  # what the lying frame count implies: 3.0s
+    assert result.duration < nominal_duration
+    assert result.duration <= 2.1  # must reflect what was actually decoded
+    assert result.duration >= result.times[-1]
