@@ -9,10 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.refine import (RefineConfig, departure_times, extend_segments,
                              pad_and_merge, refine_segments)
+from pipeline.settle import SettleConfig
 
-CFG = RefineConfig(settle_low=0.002, min_quiet_s=1.5, trail_cap_s=12.0,
-                   occupancy_lookback_s=5.0, departure_slack_s=2.0,
-                   pre_pad_s=4.0, post_pad_s=2.0, final_merge_gap_s=1.0)
+CFG = RefineConfig(settle=SettleConfig(threshold=0.002, min_quiet_s=1.5),
+                   trail_cap_s=12.0, occupancy_lookback_s=5.0,
+                   departure_slack_s=2.0, pre_pad_s=4.0, post_pad_s=2.0,
+                   final_merge_gap_s=1.0)
 
 
 def motion(n=200, dt=0.1, base=0.001):
@@ -74,6 +76,36 @@ def test_extension_respects_trail_cap():
     out = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 40.0, CFG)
     (_, e), = out
     assert abs(e - 17.0) < 0.2       # 5.0 + trail_cap 12.0
+
+
+def test_trail_cap_origin_is_raw_end_not_a_moving_target():
+    # oscillating activity that individually never reaches min_quiet_s
+    # (each dip is 1.0s, below the 1.5s debounce) — repeated near-misses
+    # must not drift cap_end forward; it stays anchored to the RAW
+    # segment end b, regardless of how much "almost settled" scanning
+    # happens in between
+    t, m = motion(n=400, base=0.0025)
+    for k in range(6, 17, 2):           # 1.0s quiet gaps every 2s, 6..16
+        m[(t >= k) & (t < k + 1.0)] = 0.0005
+    out = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 40.0, CFG)
+    (_, e), = out
+    cap_end = 5.0 + CFG.trail_cap_s      # == 17.0
+    assert e <= cap_end + 0.15           # never exceeds the cap
+    assert abs(e - cap_end) < 0.3        # and reaches ~exactly the cap,
+                                          # since nothing ever settles
+
+
+def test_trail_cap_scales_with_raw_end_not_extension_start():
+    # same oscillation pattern, but the raw segment ends later — cap_end
+    # must shift with it, proving cap_end is derived from b each call
+    t, m = motion(n=400, base=0.0025)
+    for k in range(11, 22, 2):
+        m[(t >= k) & (t < k + 1.0)] = 0.0005
+    out = extend_segments([(2.0, 10.0)], t, m, [9.0], [], 40.0, CFG)
+    (_, e), = out
+    cap_end = 10.0 + CFG.trail_cap_s     # == 22.0
+    assert e <= cap_end + 0.15
+    assert abs(e - cap_end) < 0.3
 
 
 def test_atbat_fire_closes_extension_early():

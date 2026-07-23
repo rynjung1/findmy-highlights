@@ -55,6 +55,7 @@ def run(video: str, motion_only: bool):
     from pipeline.fusion import compute_occupancy
     from pipeline.refine import RefineConfig, refine_segments
     from pipeline.segments import smooth_scores
+    from pipeline.settle import SettleConfig
 
     vp = Path(video)
     zone = load_zone(vp)
@@ -72,15 +73,18 @@ def run(video: str, motion_only: bool):
 
     sm = smooth_scores(motion.times, motion.scores,
                        SegmentConfig().smooth_window_s)
+    # one SettleConfig, shared explicitly between the at-bat detector and
+    # play extension so "has motion settled" can't silently drift apart
+    settle_cfg = SettleConfig()
     if zone is not None:
         occ = compute_occupancy(det.times, det.boxes, zone, 0.30)
         fires = atbat_start_times(det.times, occ, motion.times, sm,
-                                  AtBatConfig())
+                                  AtBatConfig(settle=settle_cfg))
     else:
         occ = [False] * len(det.times)
         fires = []
     final = refine_segments(kept, motion.times, sm, det.times, occ, fires,
-                            motion.duration, RefineConfig())
+                            motion.duration, RefineConfig(settle=settle_cfg))
     return final, vetoed, motion.duration, motion
 
 

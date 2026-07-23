@@ -10,9 +10,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.atbat import AtBatConfig, atbat_start_times
+from pipeline.settle import SettleConfig
 
 CFG = AtBatConfig(vacancy_arm_s=2.0, sustain_s=4.0, occ_frac=0.8,
-                  settle_thresh=0.003)
+                  settle=SettleConfig(threshold=0.003, min_quiet_s=1.5))
 
 
 def timeline(n=60):
@@ -64,12 +65,18 @@ def test_short_flicker_vacancy_does_not_rearm():
 def test_fire_waits_for_settle_via_rearm():
     det_t, m_t = timeline(40)
     # plate re-occupied at t=10 while motion is still hot until t=18;
-    # pending re-arm must delay the fire until the settle, not skip it
+    # pending re-arm must delay the fire until settled, not skip it.
+    # Under the shared settle definition (settled BY THE END of the
+    # sustain window, tolerating that its earlier part was still busy —
+    # the same semantics play extension uses), the first window that ends
+    # with >= min_quiet_s of trailing quiet is [16, 20] (hot until 18,
+    # quiet 18-20 = 2.0s >= min_quiet_s), so the fire lands at t=16, not
+    # only once the ENTIRE window is quiet (which would be t=18+).
     occ = occ_from_runs(det_t, [(10, 35)])
     motion = motion_profile(m_t, [(0, 18)])
     fires = atbat_start_times(det_t, occ, m_t, motion, CFG)
     assert len(fires) == 1
-    assert 17.0 <= fires[0] <= 20.0
+    assert 15.5 <= fires[0] <= 20.0
 
 
 def test_no_fire_when_occupancy_never_sustained():

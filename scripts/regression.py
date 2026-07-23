@@ -103,6 +103,7 @@ def main() -> None:
         from pipeline.detection import DetectionConfig, detect_persons
         from pipeline.fusion import compute_occupancy
         from pipeline.refine import RefineConfig, refine_segments
+        from pipeline.settle import SettleConfig
         det = detect_persons(str(clip_path), DetectionConfig(),
                              cache_dir=str(CACHE_DIR))
         fused = fuse(motion.times, motion.scores, motion.grids,
@@ -112,15 +113,18 @@ def main() -> None:
         raw_kept, vetoed = apply_veto(raw, fused)
         sm_motion = smooth_scores(motion.times, motion.scores,
                                   seg_cfg.smooth_window_s)
+        # one SettleConfig shared explicitly between both consumers
+        settle_cfg = SettleConfig()
         if zone is not None:
             occ = compute_occupancy(det.times, det.boxes, zone, 0.30)
             fires = atbat_start_times(det.times, occ, motion.times, sm_motion,
-                                      AtBatConfig())
+                                      AtBatConfig(settle=settle_cfg))
         else:
             occ = [False] * len(det.times)
             fires = []
         kept = refine_segments(raw_kept, motion.times, sm_motion, det.times,
-                               occ, fires, motion.duration, RefineConfig())
+                               occ, fires, motion.duration,
+                               RefineConfig(settle=settle_cfg))
         fus_rec, fus_tot, fus_missed = recall_line("refined", kept, truth,
                                                    motion.duration)
         print(f"    at-bat fires: {[round(f, 1) for f in fires]}")

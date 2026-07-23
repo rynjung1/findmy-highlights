@@ -12,35 +12,31 @@ EXTENSION (the keep-through-the-defensive-play rule): if a batter departed
 the plate around a segment (occupancy ended inside it, or shortly before
 it opened — a hit often vacates the plate in the quiet instant before the
 running/fielding burst opens the segment), the play may still be live when
-raw motion drops below the exit threshold. The segment is held open while
-smoothed motion stays above a lower settle floor, closing early if the
-at-bat-start signal fires (next batter settled in => play over), and never
-extending more than trail_cap_s past the raw end. End-of-file closes
-everything — segments cannot stay open to EOF by default; the cap fires
-first in any quiet ending.
+raw motion drops below the exit threshold. The segment is held open until
+pipeline.settle.settled_mask says motion has genuinely settled (the SAME
+settle logic pipeline/atbat.py uses to decide a new at-bat has begun — they
+must agree on this, or the extension could hold a segment open past the
+exact point the at-bat detector already considers safe to close), closing
+early if the at-bat-start signal fires, and never extending more than
+trail_cap_s past the raw end. End-of-file closes everything — segments
+cannot stay open to EOF by default; the cap fires first in any quiet
+ending.
 
 PADDING: pre_pad/post_pad seconds so cuts never clip into a play's run-up
 or tail; clamped to the clip bounds. Padded segments that touch are merged.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from pipeline.segments import merge_segments
+from pipeline.settle import SettleConfig, last_active_time, settled_mask
 
 
 @dataclass
 class RefineConfig:
-    settle_low: float = 0.002       # extension holds while smoothed motion >= this
-    # Real defensive-play motion is not monotonic — it dips (ball in the
-    # air, a fielder set) and resumes (throw, tag, relay). Measured on
-    # clip_60's trouble spot: a 0.9s dip at 146.1-147.0 is followed by
-    # real throwing motion at 147.0-148+. Ending extension at the FIRST
-    # low sample cuts the play; requiring quiet to be SUSTAINED for this
-    # long before ending bridges real dips without running forever on
-    # background noise (which never stays this quiet for this long).
-    min_quiet_s: float = 1.5
+    settle: SettleConfig = field(default_factory=SettleConfig)
     trail_cap_s: float = 12.0       # hard cap on extension past the raw end
     occupancy_lookback_s: float = 5.0  # departure this long before open still counts
     # Occupancy is a lagging signal (the zone reads occupied while anyone —
@@ -83,17 +79,20 @@ def extend_segments(segments, motion_times, motion_smooth, departures,
             out.append((a, b))
             continue
         cap_end = min(b + cfg.trail_cap_s, duration)
-        e = b
-        quiet_start = None
         idx = (motion_times > b) & (motion_times <= cap_end)
-        for t, s in zip(motion_times[idx], motion_smooth[idx]):
-            if s >= cfg.settle_low:
-                e = float(t)
-                quiet_start = None
-            elif quiet_start is None:
-                quiet_start = t
-            elif t - quiet_start >= cfg.min_quiet_s:
-                break  # sustained quiet: play is genuinely over
+        wt, ws = motion_times[idx], motion_smooth[idx]
+        if len(wt) == 0:
+            e = b
+        else:
+            settled = settled_mask(wt, ws, cfg.settle)
+            settled_at = np.nonzero(settled)[0]
+            # scan only up to (and including) the first settled sample —
+            # mirrors the old loop's early break, so activity found AFTER
+            # the play is already judged over can't re-extend it
+            scan_end = int(settled_at[0]) + 1 if len(settled_at) else len(wt)
+            e = last_active_time(wt[:scan_end], ws[:scan_end], cfg.settle)
+            if e is None:
+                e = b
         fire = next((f for f in sorted(atbat_fires) if b < f <= cap_end), None)
         if fire is not None:
             e = min(e, fire) if e > b else e

@@ -16,15 +16,20 @@ Design safeguards (validated against real footage):
   (measured failure of the single-instant variant: clip_540's at-bat at
   t=32, clip_300's batter change at t=73).
 - SUSTAIN + SETTLE: a fire needs occupancy across >= occ_frac of the next
-  sustain_s seconds AND smoothed motion below settle_thresh across that
-  window. A batter stepping out and back mid-at-bat while anything is
-  still happening cannot fire; when everything has settled, firing is
-  harmless (nothing pending to consume it).
+  sustain_s seconds AND motion settled (pipeline.settle.settled_mask) by
+  the end of that window — the SAME settle logic and threshold that
+  pipeline/refine.py uses to decide a play-extension may end, so the two
+  mechanisms can't disagree about what "settled" means. A batter stepping
+  out and back mid-at-bat while anything is still happening cannot fire;
+  when everything has settled, firing is harmless (nothing pending to
+  consume it).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
+
+from pipeline.settle import SettleConfig, is_settled_at_end
 
 
 @dataclass
@@ -32,7 +37,7 @@ class AtBatConfig:
     vacancy_arm_s: float = 2.0    # continuous vacancy needed to arm
     sustain_s: float = 4.0        # re-occupancy must hold this long
     occ_frac: float = 0.8         # fraction of sustain window occupied
-    settle_thresh: float = 0.003  # smoothed motion ceiling (== exit_thresh)
+    settle: SettleConfig = field(default_factory=SettleConfig)
 
 
 def atbat_start_times(det_times, occupied, motion_times, motion_smooth,
@@ -63,8 +68,12 @@ def atbat_start_times(det_times, occupied, motion_times, motion_smooth,
         widx = (det_times >= t) & (det_times <= w_end)
         frac = float(np.mean(occupied[widx])) if widx.any() else 0.0
         midx = (motion_times >= t) & (motion_times <= w_end)
+        # require actual motion data in the window — is_settled_at_end
+        # treats empty input as settled (nothing to wait out), which is
+        # the right default for extension but wrong here: no data should
+        # never be read as "confirmed quiet, safe to fire"
         settled = bool(midx.any()) and \
-            float(motion_smooth[midx].max()) < cfg.settle_thresh
+            is_settled_at_end(motion_times[midx], motion_smooth[midx], cfg.settle)
         if frac >= cfg.occ_frac and settled:
             fires.append(float(t))
             armed = False

@@ -62,27 +62,54 @@ Built so far:
   milling — is false for this footage, because the milling is also
   people. The discrimination has to come from game context (plate
   occupancy over time), which is Phase 3.
+- **Shared settle logic** (`pipeline/settle.py`) — both play extension and
+  at-bat detection need to answer the same question, "has the field been
+  quiet for a sustained period?", and must agree on the answer: a segment
+  extension and the at-bat detector independently deciding "settled" means
+  different things is exactly how one mechanism could hold a segment open
+  past the point the other already considers it safe to close. This is the
+  single implementation both consume — one threshold, one duration, one
+  debounce that tolerates a brief above-threshold blip without resetting a
+  real quiet stretch (the fix for the extension bug below). `RefineConfig`
+  and `AtBatConfig` each hold a `SettleConfig`; the pipeline wiring
+  constructs exactly one and passes it to both, so the numbers can't drift
+  apart between the two call sites.
 - **At-bat boundary detection** (`pipeline/atbat.py`) — decides when a new
   batter has genuinely started, so a live play can be safely closed.
   Fires only when: the plate was vacant for a while (arms the detector),
-  then re-occupied in a *sustained* way (≥80% of a 4s window) *and* field
-  motion has settled. A pending re-arm keeps evaluating through a busy
-  re-occupancy instant rather than giving up (a genuine at-bat start
-  during a still-busy transition would otherwise be missed). Validated
-  against real footage: correctly ignores mid-at-bat step-outs (a batter
-  leaving and returning to the box) and a constructed multi-step-out
-  sequence (`tests/test_atbat.py`), and correctly identifies a real batter
-  change in clip_300 found during this analysis (see ground truth `e6`).
+  then re-occupied in a *sustained* way (≥80% of a 4s window) *and* motion
+  has settled (by `pipeline/settle.py`, as of the window's end). A pending
+  re-arm keeps evaluating through a busy re-occupancy instant rather than
+  giving up (a genuine at-bat start during a still-busy transition would
+  otherwise be missed). Validated against real footage: correctly ignores
+  mid-at-bat step-outs (a batter leaving and returning to the box) and a
+  constructed multi-step-out sequence (`tests/test_atbat.py`), and
+  correctly identifies a real batter change in clip_300 found during this
+  analysis (see ground truth `e6`).
 - **Segment refinement** (`pipeline/refine.py`) — replaces Phase 2's
   score-level sustain with an explicit play-extension step: a segment that
-  closes on raw motion is held open, while motion stays above a lower
-  settle floor (bridging real dips — a ball in the air, a fielder set —
-  without runaway extension on background noise, via a sustained-quiet
-  debounce) up to a capped trail duration, closing early if the at-bat
-  detector fires. Padding (pre/post) and a final merge follow. One
-  mechanism now owns the segment boundary — the old dual-hysteresis
+  closes on raw motion is held open until `pipeline/settle.py` says motion
+  has genuinely settled, up to a capped trail duration, closing early if
+  the at-bat detector fires. Padding (pre/post) and a final merge follow.
+  One mechanism now owns the segment boundary — the old dual-hysteresis
   sustain path still exists in `pipeline/segments.py` (parameterized,
   unit-tested) but nothing feeds it in the live pipeline.
+
+  **A real bug caught by testing against real footage, not synthetic
+  cases:** the first version of extension ended at the *first* motion
+  sample below the settle floor. Real defensive-play motion isn't
+  monotonic — it dips (ball in the air, a fielder set) and resumes (a
+  throw, a relay) — so this cut plays short by as little as 0.1s after the
+  raw segment end. The fix (a sustained-quiet debounce: only end the
+  extension after quiet holds continuously for `min_quiet_s`) was
+  validated three ways before being trusted: a targeted unit test
+  reproducing the exact dip-then-resume shape; a diff against the old
+  buggy logic on all three reference clips, confirming the same pattern
+  (and the fix's effect) existed in clip_300 and clip_540 too, not only
+  where it was first noticed; and a frame-by-frame visual check of every
+  newly-included time range, confirming each one is real field activity
+  (a relay throw, a bat pickup, a batter's warm-up swings) rather than
+  noise the debounce was fooled by.
 - **Manifest** (`pipeline/manifest.py`) — builds the spec's manifest
   structure from final kept segments (gaps become `cut` entries covering
   the whole timeline exactly once), with save/load and `kept`/`cut`
