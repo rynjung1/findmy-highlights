@@ -113,11 +113,54 @@ Built so far:
 - **Manifest** (`pipeline/manifest.py`) — builds the spec's manifest
   structure from final kept segments (gaps become `cut` entries covering
   the whole timeline exactly once), with save/load and `kept`/`cut`
-  status toggling for the future Edit Log.
-- **CLI** (`scripts/detect.py`) — run detection on one video, print
-  candidate segments as timestamps (or JSON with `--json`), and
-  `--manifest PATH` to write a manifest;
-  `--motion-only` gives the Phase 1 baseline.
+  status toggling for the future Edit Log. Extended for multi-file:
+  `build_multi_file_manifest()` builds across several files at once;
+  every segment's `start_s`/`end_s` stay LOCAL to its own `source_file`
+  (matching the spec's example), and an explicit `source_file_index`
+  locks in processing order — nothing has to re-derive order by sorting
+  filenames or re-probing timestamps later. `kept_spans_by_file()` reads
+  spans back grouped by file, merging only *within* a file; spans from
+  different files are never merged into one, even when their local
+  timestamps would look numerically adjacent, since they're different
+  pieces of video that need independent seeking. `build_manifest()`'s
+  original single-file signature is untouched — the existing 11 tests
+  pass unmodified.
+- **Multi-file ordering** (`pipeline/multifile.py`) — orders input files
+  by capture-time metadata (ffprobe's `creation_time` tag) and reports
+  real gaps between them. That signal is trusted only when it's
+  unambiguous: present on every file, and far enough apart (default
+  5s minimum) that measurement noise couldn't flip two files' order, and
+  physically consistent (a file can't plausibly start before the previous
+  one's own duration would have finished). Otherwise ordering is **not
+  guessed** — `scripts/detect_multi.py` refuses to proceed and asks for
+  an explicit `--order` confirmation, per the project rule that ordering
+  falls back to asking, not assuming. Also flags mismatched resolution or
+  frame rate across files (Phase 5's problem to resolve at stitch time).
+- **Calibration resolution** (`pipeline/calibration.py`) — one
+  `calibration.json` covers every file in a batch by default (the
+  zero-friction path: click the plate once). A per-file override
+  (`<stem>.calibration.json`, produced by re-running `scripts/calibrate.py`
+  with `--output` against just the file whose camera moved) takes
+  priority for that file specifically — no new tooling needed.
+- **Shared per-file pipeline core** (`pipeline/run.py`) — `process_video()`
+  is the exact same motion → veto → extension → padding pipeline whether
+  called once (`scripts/detect.py`) or once per file in a batch
+  (`scripts/detect_multi.py`). This is also what makes the file-boundary
+  rule structural rather than a convention to remember: each call gets
+  its own fresh motion/detection/occupancy arrays and an at-bat detector
+  that arms fresh at that call's own t=0, with no parameter or shared
+  state through which one file's trailing condition could reach the
+  next. Proven, not just argued: `tests/test_multifile_boundary.py` runs
+  two adversarially-constructed per-file timelines back to back (file A
+  ending mid-play with motion still hot; file B opening in a state that
+  would reveal any leaked "still extending" or "already fired" flag) and
+  confirms neither call's result depends on having seen the other, or on
+  which one ran first.
+- **CLI** (`scripts/detect.py` for one file, `scripts/detect_multi.py` for
+  several) — print candidate segments as timestamps (or JSON with
+  `--json` for the single-file CLI), and `--manifest PATH` to write a
+  manifest; `--motion-only` gives the Phase 1 baseline.
+
 Planned pieces:
 
 - **Backend API** — a small local service wrapping the pipeline: upload,
@@ -193,6 +236,16 @@ No UI or backend yet — the pipeline runs from the command line:
 
 # Phase 1 baseline (motion only, no person detection or play extension)
 ./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv --motion-only
+
+# multiple files as one game timeline (order auto-detected from file
+# metadata; a calibration.json in the same folder covers all of them)
+./venv/bin/python scripts/detect_multi.py game_part1.mkv game_part2.mkv --manifest out/game_manifest.json
+
+# if ordering is ambiguous, detect_multi.py refuses and asks for this:
+./venv/bin/python scripts/detect_multi.py game_part1.mkv game_part2.mkv --order game_part1.mkv,game_part2.mkv
+
+# per-file calibration override, e.g. if the camera moved between files
+./venv/bin/python scripts/calibrate.py game_part2.mkv --set 900,700 --output game_part2.calibration.json
 ```
 
 ## How the manifest works
@@ -210,14 +263,22 @@ action) and `kept_spans()` returns the current kept spans with adjacent
 ones merged — that's what a re-export would render. Nothing here mutates
 video files; the manifest is the only thing that changes on restore.
 
-Every processed video (or multi-file group) gets a manifest listing every
-candidate segment found during detection, with its timestamp range, source
-file, detection score, and a `kept`/`cut` status. The final output is always
-regenerated from the manifest's current `kept` segments — video files are
-never mutated directly, which is what makes restoring a cut segment lossless.
+For multiple files, `build_multi_file_manifest()` builds one manifest
+across all of them: every segment stays timestamped LOCAL to its own
+source file (never a global concatenated clock), plus an explicit
+`source_file_index` that locks in processing order. `kept_spans_by_file()`
+reads spans back grouped by file — never merging across a file boundary,
+since two different files are never one continuous span even if their
+local timestamps happen to look adjacent.
 
 ## Known limitations / non-goals for this version
 
+- **No real multi-file reference set yet.** Phase 4's multi-file logic is
+  unit-tested against synthetic metadata and was manually validated
+  end-to-end against a real two-file set split from an existing reference
+  clip, but a committed multi-file regression fixture (with ground truth,
+  like `reference_clips/`) is still pending real footage with an actual
+  recording gap between files.
 - **No outcome classification (Tier 2).** v1 keeps every action segment,
   including missed swings. Telling a whiff from a hit is a later, harder
   problem.
@@ -277,3 +338,21 @@ never mutated directly, which is what makes restoring a cut segment lossless.
   photo crop riding the same motion) to give the veto positive-case
   evidence beyond "it never misfired" — the reference clips alone never
   exercise it (longest person-free motion run measured: 0.6s).
+- **Multi-file tests** (no committed multi-file reference set yet — see
+  Known limitations): `tests/test_multifile.py` covers file ordering
+  against synthetic metadata (clean ordering, missing metadata, two files
+  whose timestamps are too close to trust, physically-implausible
+  overlapping timestamps, mismatched resolution/fps) plus a real-ffprobe
+  smoke test against tiny ffmpeg-generated clips; `tests/test_calibration.py`
+  covers shared-vs-per-file-override resolution;
+  `tests/test_manifest_multifile.py` covers file-order locking and —
+  specifically requested — that a segment sitting right at a file
+  boundary can be individually restored/toggled without disturbing its
+  neighbor in the other file, through an actual save/load round trip;
+  `tests/test_multifile_boundary.py` proves no extension/at-bat state
+  leaks between two files processed back to back. All of this was also
+  manually verified end-to-end against a real two-file set (split from a
+  reference clip with `ffmpeg`, real `creation_time` gaps, shuffled input
+  order, an ambiguous-timestamp variant, and a per-file calibration
+  override) before being trusted — not committed, since it was scratch
+  validation data, but the same checks are why these tests exist.

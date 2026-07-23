@@ -17,11 +17,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.motion import compute_motion
-from pipeline.segments import SegmentConfig, scores_to_segments, total_duration
+from pipeline.calibration import resolve_zone
+from pipeline.run import DEFAULT_CACHE_DIR, process_video
+from pipeline.segments import SegmentConfig, total_duration
 
-ROOT = Path(__file__).resolve().parent.parent
-CACHE_DIR = ROOT / ".cache" / "detections"
+CACHE_DIR = DEFAULT_CACHE_DIR
 
 
 def fmt_ts(seconds: float) -> str:
@@ -30,62 +30,13 @@ def fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{int(m):02d}:{s:06.3f}"
 
 
-def load_zone(video_path: Path):
-    from pipeline.fusion import PlateZone
-    calib_file = video_path.parent / "calibration.json"
-    if not calib_file.exists():
-        return None
-    c = json.loads(calib_file.read_text())
-    return PlateZone(center_xy=tuple(c["plate_xy"]),
-                     radius_px=c["zone_radius_px"])
-
-
 def run(video: str, motion_only: bool):
-    """Full pipeline: motion -> veto -> play extension -> padding.
+    """Thin CLI wrapper: resolve calibration, run the shared pipeline.
     Returns (final_segments, vetoed, duration, motion_result)."""
-    from pipeline.fusion import apply_veto, fuse
-
-    motion = compute_motion(video)
-    if motion_only:
-        segs = scores_to_segments(motion.times, motion.scores, SegmentConfig())
-        return segs, [], motion.duration, motion
-
-    from pipeline.atbat import AtBatConfig, atbat_start_times
-    from pipeline.detection import DetectionConfig, detect_persons
-    from pipeline.fusion import compute_occupancy
-    from pipeline.refine import RefineConfig, refine_segments
-    from pipeline.segments import smooth_scores
-    from pipeline.settle import SettleConfig
-
-    vp = Path(video)
-    zone = load_zone(vp)
-    if zone is None:
-        print(f"warning: no calibration.json next to {video}; "
-              f"plate-occupancy signals disabled", file=sys.stderr)
-    det = detect_persons(video, DetectionConfig(), cache_dir=str(CACHE_DIR))
-    fused = fuse(motion.times, motion.scores, motion.grids,
-                 motion.frame_size, motion.analysis_size, motion.border_px,
-                 det.times, det.boxes, zone)
-    # motion alone owns segment open AND raw exit (Phase 3 replaced the
-    # Phase 2 score-sustain with the explicit play-extension below)
-    raw = scores_to_segments(motion.times, motion.scores, SegmentConfig())
-    kept, vetoed = apply_veto(raw, fused)
-
-    sm = smooth_scores(motion.times, motion.scores,
-                       SegmentConfig().smooth_window_s)
-    # one SettleConfig, shared explicitly between the at-bat detector and
-    # play extension so "has motion settled" can't silently drift apart
-    settle_cfg = SettleConfig()
-    if zone is not None:
-        occ = compute_occupancy(det.times, det.boxes, zone, 0.30)
-        fires = atbat_start_times(det.times, occ, motion.times, sm,
-                                  AtBatConfig(settle=settle_cfg))
-    else:
-        occ = [False] * len(det.times)
-        fires = []
-    final = refine_segments(kept, motion.times, sm, det.times, occ, fires,
-                            motion.duration, RefineConfig(settle=settle_cfg))
-    return final, vetoed, motion.duration, motion
+    zone = None if motion_only else resolve_zone(video)
+    warn = (lambda msg: print(f"warning: {msg}", file=sys.stderr))
+    return process_video(video, zone, motion_only, cache_dir=CACHE_DIR,
+                         warn=warn)
 
 
 def main() -> None:
