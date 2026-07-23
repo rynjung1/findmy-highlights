@@ -2,6 +2,10 @@
   "clip": "clip_60.mkv",
   "duration": 190.0,
   "notes": "Annotated by frame-by-frame visual review (contact sheets at 0.5-1 fps plus cropped 1 fps strips around each event). Times are approximate (±2s); event windows are sized to absorb that uncertainty. 'required: true' events are clearly real action and count toward recall; 'required: false' events are borderline (stance fidgeting, practice motions) — informational only, but per the never-miss rule the detector SHOULD usually catch them too. CORRECTED after owner review: t~26-49 was originally annotated as a swing (~33) plus hit-and-run (~40); the owner identified it as players throwing the ball around, and a wider-view re-check confirmed overhead throwing motions and casual jogging, not an at-bat.",
+  "atbat_expectations": {
+    "no_fire_within": [[137, 148]],
+    "note": "the hit-and-run play window; the batter's frozen pre-pitch stance at ~137-139 must not read as a new at-bat"
+  },
   "events": [
     {"id": "e1", "window": [0, 7], "type": "at_bat_activity", "required": false,
      "note": "clip opens mid-at-bat, batter in stance with movement; no confirmed swing"},

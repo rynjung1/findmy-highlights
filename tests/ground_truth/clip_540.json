@@ -2,6 +2,10 @@
   "clip": "clip_540.mkv",
   "duration": 190.0,
   "notes": "Two clear plays in the first half, a long quiet stretch (~96-168) with only milling and walking, then a clear swing near the end. The fielding movement around t=8-16 could be the tail of a play that started before the clip; marked borderline.",
+  "atbat_expectations": {
+    "no_fire_within": [[79, 93]],
+    "note": "the hit-with-runners play; a fire here would cut the defensive tail — the multi-cycle occupancy flickers at 67-77 must not defeat this"
+  },
   "events": [
     {"id": "e1", "window": [6, 18], "type": "fielding_activity", "required": false,
      "note": "fielders bending/moving around the infield; possibly end of an earlier play"},

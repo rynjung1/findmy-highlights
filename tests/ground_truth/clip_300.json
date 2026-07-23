@@ -2,6 +2,10 @@
   "clip": "clip_300.mkv",
   "duration": 190.0,
   "notes": "This clip is dominated by one long at-bat (batter at the plate from t=0 to roughly t=66) followed by a batter change and a second at-bat, then a long milling/transition stretch with warm-up throwing. Only two moments show a confirmed ball in flight; stance/load motions without a visible ball are marked borderline.",
+  "atbat_expectations": {
+    "fire_within": [[104, 112]],
+    "note": "frame-verified batter change ~105-112 (new batter picks up the dropped bat) must produce an at-bat-start fire"
+  },
   "events": [
     {"id": "e1", "window": [14, 26], "type": "at_bat_activity", "required": false,
      "note": "batter load/ready positions ~16-24, pitches likely but no ball confirmed"},
@@ -10,7 +14,8 @@
     {"id": "e3", "window": [76, 96], "type": "at_bat_activity", "required": false,
      "note": "new batter arrives ~76, in stance with ready/load motions through 96"},
     {"id": "e6", "window": [95, 103], "type": "hit_and_run", "required": true,
-     "note": "swing/contact ~97, batter drops bat and runs ~98, fielding through ~102; FOUND LATE during Phase 3 safeguard analysis (originally under-annotated as part of borderline e3) — the at-bat-start FIRE at t=107 led to frame review that revealed this play"},
+     "check_continuity": true,
+     "note": "swing/contact ~97, batter drops bat and runs ~98, fielding through ~102; FOUND LATE during Phase 3 safeguard analysis (originally under-annotated as part of borderline e3) — the at-bat-start FIRE at t=107 led to frame review that revealed this play; continuity-checked because the swing sits in a raw-detection coverage gap that pre-padding must close"},
     {"id": "e4", "window": [122, 129], "type": "pitch", "required": true,
      "note": "ball clearly visible in the air ~125, batter takes the pitch"},
     {"id": "e5", "window": [144, 160], "type": "warmup_throws", "required": false,

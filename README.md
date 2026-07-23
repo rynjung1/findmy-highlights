@@ -45,33 +45,54 @@ Built so far:
   signal with the ~1 Hz detections (zero-order hold with a staleness
   bound), then scores additively: motion + a boost for motion inside
   person boxes + a small boost while a roughly-stationary person occupies
-  the plate zone. Segmentation uses dual hysteresis: only motion can OPEN
-  a segment; the fused score can hold one open (protecting a play tail
-  where fielders are still converging). A segment is vetoed only when
-  detection is certain no person was ever near its motion — proven to
-  fire correctly on constructed person-free footage (`tests/test_veto_e2e.py`),
-  and the regression suite fails hard if a veto ever touches a known real
-  play.
+  the plate zone. A segment is vetoed only when detection is certain no
+  person was ever near its motion — proven to fire correctly on
+  constructed person-free footage (`tests/test_veto_e2e.py`), and the
+  regression suite fails hard if a veto ever touches a known real play.
 
   **Honest Phase 2 finding:** on the reference footage, person detection
   did not improve the keep/cut decision. Motion-only already had full
   recall (every real play), the veto never fires on real clips (measured:
   no person-free motion run longer than 0.6s — essentially all motion on
-  a rec field is human), and the fused signals *increase* flagged time
-  (they hold segments open longer). The measured value of person/plate
-  signals on this footage is (a) holding one defensive-play tail open
-  that motion alone dropped (clip_60 146-148s), and (b) the
-  plate-occupancy timeline, which is the input Phase 3's at-bat boundary
-  logic needs. The original hypothesis — person detection discriminates
-  real plays from milling — is false for this footage, because the
-  milling is also people. The discrimination has to come from game
-  context (plate occupancy over time), which is Phase 3.
+  a rec field is human), and the fused signals *increase* flagged time if
+  used to hold segments open indiscriminately. The measured value of
+  person/plate signals on this footage is the **plate-occupancy
+  timeline**: the input Phase 3's at-bat boundary logic needs. The
+  original hypothesis — person detection discriminates real plays from
+  milling — is false for this footage, because the milling is also
+  people. The discrimination has to come from game context (plate
+  occupancy over time), which is Phase 3.
+- **At-bat boundary detection** (`pipeline/atbat.py`) — decides when a new
+  batter has genuinely started, so a live play can be safely closed.
+  Fires only when: the plate was vacant for a while (arms the detector),
+  then re-occupied in a *sustained* way (≥80% of a 4s window) *and* field
+  motion has settled. A pending re-arm keeps evaluating through a busy
+  re-occupancy instant rather than giving up (a genuine at-bat start
+  during a still-busy transition would otherwise be missed). Validated
+  against real footage: correctly ignores mid-at-bat step-outs (a batter
+  leaving and returning to the box) and a constructed multi-step-out
+  sequence (`tests/test_atbat.py`), and correctly identifies a real batter
+  change in clip_300 found during this analysis (see ground truth `e6`).
+- **Segment refinement** (`pipeline/refine.py`) — replaces Phase 2's
+  score-level sustain with an explicit play-extension step: a segment that
+  closes on raw motion is held open, while motion stays above a lower
+  settle floor (bridging real dips — a ball in the air, a fielder set —
+  without runaway extension on background noise, via a sustained-quiet
+  debounce) up to a capped trail duration, closing early if the at-bat
+  detector fires. Padding (pre/post) and a final merge follow. One
+  mechanism now owns the segment boundary — the old dual-hysteresis
+  sustain path still exists in `pipeline/segments.py` (parameterized,
+  unit-tested) but nothing feeds it in the live pipeline.
+- **Manifest** (`pipeline/manifest.py`) — builds the spec's manifest
+  structure from final kept segments (gaps become `cut` entries covering
+  the whole timeline exactly once), with save/load and `kept`/`cut`
+  status toggling for the future Edit Log.
 - **CLI** (`scripts/detect.py`) — run detection on one video, print
-  candidate segments as timestamps (or JSON with `--json`);
+  candidate segments as timestamps (or JSON with `--json`), and
+  `--manifest PATH` to write a manifest;
   `--motion-only` gives the Phase 1 baseline.
-- **Manifest** — a JSON record of every candidate segment (timestamps, source
-  file, detection score, kept/cut status). The single source of truth tying
-  detection, editing, and export together.
+Planned pieces:
+
 - **Backend API** — a small local service wrapping the pipeline: upload,
   process, progress, manifest read/update, re-export.
 - **Frontend Home view** — upload files, watch progress, play/download the
@@ -134,16 +155,33 @@ install packages into system/global Python.
 No UI or backend yet — the pipeline runs from the command line:
 
 ```sh
-# detect candidate action segments in one video
+# detect final (extended, padded) action segments in one video
 ./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv
 
 # same, as JSON
 ./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv --json
+
+# also write a manifest (see "How the manifest works" below)
+./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv --manifest out/clip_60_manifest.json
+
+# Phase 1 baseline (motion only, no person detection or play extension)
+./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv --motion-only
 ```
 
 ## How the manifest works
 
-*(To be filled in when manifest generation lands.)*
+`pipeline/manifest.py` builds the manifest described in the project spec
+from the pipeline's final kept segments: every span of the source video is
+listed exactly once, either as a detected `kept` segment or a `cut` gap
+between them — so the manifest's segments always cover the whole timeline
+with no overlaps or holes. Each entry has an id, a source file, a
+timestamp range (both as an `"HH:MM:SS.mmm"` string and as float seconds),
+a detection score, and a `status` of `kept` or `cut`.
+
+`set_status()` flips a segment's status (the future Edit Log's restore
+action) and `kept_spans()` returns the current kept spans with adjacent
+ones merged — that's what a re-export would render. Nothing here mutates
+video files; the manifest is the only thing that changes on restore.
 
 Every processed video (or multi-file group) gets a manifest listing every
 candidate segment found during detection, with its timestamp range, source
@@ -171,30 +209,44 @@ never mutated directly, which is what makes restoring a cut segment lossless.
 ## Testing
 
 ```sh
-# unit tests (segment logic + synthetic-video edge cases; no real footage needed)
+# unit tests (pure logic + synthetic-video edge cases; no real footage needed)
 ./venv/bin/python -m pytest tests/
 
-# detection regression against the reference clips
+# end-to-end tests that run real model inference (slower; excluded by default)
+./venv/bin/python -m pytest tests/ -m e2e
+
+# full detection regression against the reference clips
 ./venv/bin/python scripts/regression.py
 ```
 
 - **Reference clips** live in `reference_clips/` (gitignored — video files
-  are never committed). Currently three 190-second softball clips.
+  are never committed). Currently three 190-second softball clips, with a
+  shared `calibration.json` for the plate zone.
 - **Ground truth** lives in `tests/ground_truth/*.json`, one file per clip,
   hand-annotated by frame-level visual review. Each lists action *events*
   with a time window, a type, and a `required` flag: required events are
   confirmed real plays (swing, hit, run, pitch) that the detector must
   capture; non-required events are borderline moments (practice swings,
   warm-up throws) reported for information but not counted against recall.
+  An optional `atbat_expectations` block pins frame-verified windows where
+  the at-bat-start detector must (`fire_within`) or must not
+  (`no_fire_within`) fire — e.g. a real batter change vs. a mid-at-bat
+  step-out that looks similar in the raw occupancy signal.
 - **Regression script** (`scripts/regression.py`) runs both the
-  motion-only baseline and the fused pipeline on every reference clip and
-  reports recall on required events, borderline capture, and flagged
-  footage for each. It exits non-zero if: the fused pipeline misses any
-  required event; fused recall drops below the motion-only baseline; a
-  vetoed segment overlaps a required event (safety net — a distant or
-  occluded fielder must never silently erase a real play); or a
-  defensive-play window marked `check_continuity` in the ground truth is
-  not covered by one contiguous kept segment.
+  motion-only baseline and the full refined pipeline (motion → veto →
+  play extension → padding) on every reference clip and reports recall,
+  borderline capture, and flagged footage for each. It exits non-zero if:
+  the refined pipeline misses any required event; refined recall drops
+  below the motion-only baseline; a vetoed segment overlaps a required
+  event (safety net — a distant or occluded fielder must never silently
+  erase a real play); a defensive-play window marked `check_continuity`
+  is not covered by one contiguous kept segment; or an at-bat fire/no-fire
+  expectation is violated.
 - The edge cases covered so far: a video with no motion at all, a
   fraction-of-a-second video, a missing file, and a corrupt file (the last
   two fail with a clean error rather than crashing).
+- `tests/test_veto_e2e.py` runs real model inference against constructed
+  footage (a wind-blown-branch analog with no person, and a real-person
+  photo crop riding the same motion) to give the veto positive-case
+  evidence beyond "it never misfired" — the reference clips alone never
+  exercise it (longest person-free motion run measured: 0.6s).

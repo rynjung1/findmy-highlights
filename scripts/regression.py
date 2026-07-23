@@ -1,8 +1,8 @@
 """Detection regression: run the pipeline on every reference clip and score
 it against the hand-written ground truth.
 
-Per clip this reports, for BOTH the motion-only baseline and the fused
-pipeline (motion + person detection + plate occupancy):
+Per clip this reports, for BOTH the motion-only baseline and the refined
+pipeline (motion -> veto -> play extension via at-bat boundaries -> padding):
   - recall on REQUIRED events — must be 100% for the fused pipeline.
   - capture of borderline (non-required) events — informational.
   - over-inclusion (flagged seconds / clip seconds).
@@ -99,22 +99,47 @@ def main() -> None:
                 failures.append(f"{truth['clip']}: motion-only missed events")
             continue
 
+        from pipeline.atbat import AtBatConfig, atbat_start_times
         from pipeline.detection import DetectionConfig, detect_persons
+        from pipeline.fusion import compute_occupancy
+        from pipeline.refine import RefineConfig, refine_segments
         det = detect_persons(str(clip_path), DetectionConfig(),
                              cache_dir=str(CACHE_DIR))
         fused = fuse(motion.times, motion.scores, motion.grids,
                      motion.frame_size, motion.analysis_size, motion.border_px,
                      det.times, det.boxes, zone)
-        # dual hysteresis: motion opens segments, the fused score sustains
-        segs = scores_to_segments(fused.times, fused.motion, seg_cfg,
-                                  sustain_scores=fused.combined)
-        kept, vetoed = apply_veto(segs, fused)
-        fus_rec, fus_tot, fus_missed = recall_line("fused", kept, truth,
+        raw = scores_to_segments(motion.times, motion.scores, seg_cfg)
+        raw_kept, vetoed = apply_veto(raw, fused)
+        sm_motion = smooth_scores(motion.times, motion.scores,
+                                  seg_cfg.smooth_window_s)
+        if zone is not None:
+            occ = compute_occupancy(det.times, det.boxes, zone, 0.30)
+            fires = atbat_start_times(det.times, occ, motion.times, sm_motion,
+                                      AtBatConfig())
+        else:
+            occ = [False] * len(det.times)
+            fires = []
+        kept = refine_segments(raw_kept, motion.times, sm_motion, det.times,
+                               occ, fires, motion.duration, RefineConfig())
+        fus_rec, fus_tot, fus_missed = recall_line("refined", kept, truth,
                                                    motion.duration)
+        print(f"    at-bat fires: {[round(f, 1) for f in fires]}")
         for a, b in kept:
             print(f"       seg {a:7.1f} - {b:7.1f}  ({b - a:5.1f}s)")
         for a, b in vetoed:
             print(f"       VETOED {a:7.1f} - {b:7.1f}  (no person near motion)")
+
+        # pinned at-bat expectations (frame-verified fire / no-fire windows)
+        exp = truth.get("atbat_expectations", {})
+        for lo, hi in exp.get("fire_within", []):
+            if not any(lo <= f <= hi for f in fires):
+                failures.append(f"{truth['clip']}: expected at-bat fire in "
+                                f"[{lo},{hi}], fires={fires}")
+        for lo, hi in exp.get("no_fire_within", []):
+            bad = [f for f in fires if lo <= f <= hi]
+            if bad:
+                failures.append(f"{truth['clip']}: forbidden at-bat fire(s) "
+                                f"{bad} inside [{lo},{hi}]")
 
         required = [e for e in truth["events"] if e["required"]]
 
@@ -134,7 +159,7 @@ def main() -> None:
         # failure 4: contiguous kept-segment coverage of flagged
         # defensive-play windows (see docstring for why this is
         # segment-level, not raw-score-level)
-        sm = smooth_scores(fused.times, fused.combined, seg_cfg.smooth_window_s)
+        sm = sm_motion
         for e in truth["events"]:
             if not e.get("check_continuity"):
                 continue
