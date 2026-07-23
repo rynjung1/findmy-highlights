@@ -132,10 +132,14 @@ Built so far:
   5s minimum) that measurement noise couldn't flip two files' order, and
   physically consistent (a file can't plausibly start before the previous
   one's own duration would have finished). Otherwise ordering is **not
-  guessed** — `scripts/detect_multi.py` refuses to proceed and asks for
-  an explicit `--order` confirmation, per the project rule that ordering
-  falls back to asking, not assuming. Also flags mismatched resolution or
-  frame rate across files (Phase 5's problem to resolve at stitch time).
+  guessed**, but this is explicitly not a dead end: `resolve_order()`
+  raises `AmbiguousOrderError` carrying a suggested order, and
+  `scripts/detect_multi.py` turns that into an error message with the
+  exact `--order file1,file2,...` command to re-run — the "ask the user
+  to confirm/reorder" fallback the project spec calls for, unit-tested
+  (`test_resolve_order_*` in `tests/test_multifile.py`) rather than only
+  checked by hand. Also flags mismatched resolution or frame rate across
+  files (Phase 5's problem to resolve at stitch time).
 - **Calibration resolution** (`pipeline/calibration.py`) — one
   `calibration.json` covers every file in a batch by default (the
   zero-friction path: click the plate once). A per-file override

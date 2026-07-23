@@ -5,10 +5,15 @@ Usage:
 
 Ordering is determined from file creation-time metadata. If that signal
 is missing or ambiguous (two files whose timestamps are implausibly close
-for footage this long — see pipeline/multifile.py), this script REFUSES
-to guess: it prints the ambiguity reason and the order you'd need to
-confirm, and exits non-zero. Pass --order file1.mkv,file2.mkv,... with the
-confirmed order to proceed explicitly.
+for footage this long — see pipeline/multifile.py), this script does NOT
+guess: it prints the ambiguity reason and a suggested order, and exits
+non-zero — but this is not a dead end. Pass
+--order file1.mkv,file2.mkv,... with your confirmed order (the exact
+command is printed for you) to proceed explicitly; this is the "ask the
+user to confirm/reorder" fallback the project spec calls for. Passing
+--order also skips automatic metadata probing entirely (including the
+mismatched-resolution/fps and gap-detection warnings below) — an explicit
+order is taken as full confirmation, not second-guessed.
 
 Per the Phase 3/4 design decision, a file boundary is always a hard
 boundary: play extension and at-bat state never cross it, regardless of
@@ -31,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.calibration import resolve_zone
 from pipeline.manifest import build_multi_file_manifest, save_manifest
-from pipeline.multifile import order_files
+from pipeline.multifile import AmbiguousOrderError, order_files, resolve_order
 from pipeline.run import DEFAULT_CACHE_DIR, process_video
 from pipeline.segments import SegmentConfig, smooth_scores, total_duration
 
@@ -54,21 +59,20 @@ def main() -> None:
     ap.add_argument("--manifest", metavar="PATH")
     args = ap.parse_args()
 
-    if args.order:
-        ordered_paths = [p.strip() for p in args.order.split(",")]
-        missing = set(ordered_paths) ^ set(args.videos)
-        if missing:
-            sys.exit(f"--order must list exactly the given videos; "
-                     f"mismatch: {missing}")
-    else:
-        result = order_files(args.videos)
-        if result.ambiguous:
-            sys.exit(
-                f"file order is ambiguous: {result.reason}\n"
-                f"best-effort guess: {', '.join(result.ordered_paths)}\n"
-                f"re-run with --order {','.join(result.ordered_paths)} "
-                f"(or your own confirmed order) to proceed")
-        ordered_paths = result.ordered_paths
+    result = None if args.order else order_files(args.videos)
+    try:
+        ordered_paths = resolve_order(args.videos, args.order, result)
+    except ValueError as e:
+        sys.exit(str(e))
+    except AmbiguousOrderError as e:
+        sys.exit(
+            f"{e}\n"
+            f"this is NOT a dead end: re-run with\n"
+            f"  --order {','.join(e.suggested_order)}\n"
+            f"(substituting your own confirmed order if the suggestion "
+            f"above is wrong) to proceed")
+
+    if result is not None:
         if result.mismatched_resolution or result.mismatched_fps:
             print(f"warning: input files have mismatched "
                  f"{'resolution' if result.mismatched_resolution else ''}"

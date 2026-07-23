@@ -8,8 +8,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.multifile import (AMBIGUITY_THRESHOLD_S, FileInfo, order_infos,
-                                probe_file)
+import pytest
+
+from pipeline.multifile import (AMBIGUITY_THRESHOLD_S, AmbiguousOrderError,
+                                FileInfo, order_infos, probe_file,
+                                resolve_order)
 
 BASE = datetime(2026, 6, 1, 18, 0, 0)
 
@@ -115,6 +118,66 @@ def test_overlapping_creation_times_still_flagged_via_deltas():
             info("b.mp4", 1)]  # b starts only 1 min after a, but a runs 60 min
     r = order_infos(infos)
     assert r.ambiguous
+
+
+# --- resolve_order: the actual "confirm/reorder" mechanism, not just the
+# ambiguity signal. This is what scripts/detect_multi.py's CLI calls, and
+# what proves the ambiguous case is not a dead end. ---
+
+def test_resolve_order_uses_automatic_when_unambiguous():
+    infos = [info("b.mp4", 35), info("a.mp4", 0)]
+    r = order_infos(infos)
+    assert resolve_order(["b.mp4", "a.mp4"], None, r) == ["a.mp4", "b.mp4"]
+
+
+def test_resolve_order_raises_actionable_error_when_ambiguous():
+    infos = [info("a.mp4", 0), info("b.mp4", 0,
+                                    creation_time_override=BASE + timedelta(seconds=1))]
+    r = order_infos(infos)
+    with pytest.raises(AmbiguousOrderError) as exc_info:
+        resolve_order(["a.mp4", "b.mp4"], None, r)
+    err = exc_info.value
+    # the exception must carry enough for the caller to offer a real path
+    # forward, not just say "no" — a suggested order to confirm or override
+    assert err.reason
+    assert set(err.suggested_order) == {"a.mp4", "b.mp4"}
+    assert "a.mp4" in str(err) and "b.mp4" in str(err)
+
+
+def test_resolve_order_explicit_order_overrides_ambiguity():
+    # THE key behavior for point 3: even when automatic ordering is
+    # ambiguous, passing an explicit order proceeds — there is always a
+    # way forward, the tool just won't guess on your behalf
+    infos = [info("a.mp4", 0), info("b.mp4", 0,
+                                    creation_time_override=BASE + timedelta(seconds=1))]
+    r = order_infos(infos)
+    assert resolve_order(["a.mp4", "b.mp4"], "b.mp4,a.mp4", r) \
+        == ["b.mp4", "a.mp4"]
+
+
+def test_resolve_order_explicit_order_works_without_any_metadata_at_all():
+    # explicit order must work even when order_files() was never called /
+    # metadata couldn't be read at all (result=None) — the user's own
+    # confirmation is sufficient on its own, no probing required
+    assert resolve_order(["x.mp4", "y.mp4"], "y.mp4,x.mp4", None) \
+        == ["y.mp4", "x.mp4"]
+
+
+def test_resolve_order_explicit_order_mismatch_raises_value_error():
+    infos = [info("a.mp4", 0), info("b.mp4", 35)]
+    r = order_infos(infos)
+    with pytest.raises(ValueError, match="mismatch"):
+        resolve_order(["a.mp4", "b.mp4"], "a.mp4,c.mp4", r)
+
+
+def test_resolve_order_explicit_order_missing_file_raises():
+    with pytest.raises(ValueError):
+        resolve_order(["a.mp4", "b.mp4"], "a.mp4", None)
+
+
+def test_resolve_order_explicit_order_extra_file_raises():
+    with pytest.raises(ValueError):
+        resolve_order(["a.mp4", "b.mp4"], "a.mp4,b.mp4,c.mp4", None)
 
 
 # --- real ffprobe smoke test (needs ffmpeg on PATH, no reference clips) ---

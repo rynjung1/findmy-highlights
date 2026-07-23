@@ -94,6 +94,51 @@ def test_second_file_atbat_detector_starts_fresh_not_mid_fire():
     assert fires_b[0] < 5.0
 
 
+def test_pending_rearm_at_file_end_does_not_carry_into_next_file():
+    """Specifically targets the PENDING RE-ARM mechanism (atbat.py's
+    "once armed, every occupied sample is evaluated until the detector
+    fires or the plate empties again"), not just general armed/unarmed
+    state.
+
+    File A: the plate is occupied continuously from t=5 all the way to
+    its LAST sample, with motion never settling — so the detector is
+    armed and re-evaluating on every one of those occupied samples
+    (genuinely "pending": neither firing nor going back to vacant) right
+    up until the file simply ends mid-evaluation. This is the specific
+    state a naive "carry a pending flag/counter forward" bug would leak.
+
+    File B: opens with the plate ALSO occupied from t=0, but with motion
+    already quiet. If file B's detector starts fresh (armed=True, no
+    memory of file A's stalled evaluation), it fires quickly once
+    occupancy sustains. If file A's pending state had somehow leaked
+    (e.g. as "already mid-evaluation, don't restart the sustain window"),
+    the fire timing or presence would differ from processing file B in
+    isolation — which the third assertion checks directly.
+    """
+    duration_a = 15.0
+    final_a, fires_a = process_file(duration_a,
+                                    motion_hot_ranges=[(5.0, 15.0)],  # never settles
+                                    occ_ranges=[(5.0, 15.0)])          # occupied to EOF
+    # precondition: file A really was left pending — armed, occupied,
+    # unresolved — not vacant and not fired
+    assert fires_a == [], \
+        "test setup invalid: file A must end without ever firing"
+
+    duration_b = 15.0
+    final_b, fires_b = process_file(duration_b,
+                                    motion_hot_ranges=[],
+                                    occ_ranges=[(0.0, 15.0)])
+    assert fires_b, "file B must fire on its own fresh evaluation"
+
+    # the decisive check: file B processed after a "pending" file A must
+    # be IDENTICAL to file B processed completely alone
+    final_b_alone, fires_b_alone = process_file(duration_b,
+                                                motion_hot_ranges=[],
+                                                occ_ranges=[(0.0, 15.0)])
+    assert fires_b == fires_b_alone
+    assert final_b == final_b_alone
+
+
 def test_processing_order_of_files_does_not_change_either_result():
     # Process file A then B, and separately B then A (as if the two
     # scripts/detect_multi.py loop iterations happened in the other

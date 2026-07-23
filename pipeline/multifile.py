@@ -41,6 +41,21 @@ class FileInfo:
     creation_time: datetime | None  # None if missing/unparseable
 
 
+class AmbiguousOrderError(Exception):
+    """Raised when automatic ordering can't be trusted and no explicit
+    order was given. Carries enough detail for a caller (CLI, future API)
+    to present a real, actionable "confirm or reorder" prompt — this must
+    never be a dead end, per the project rule that ordering falls back to
+    asking the user, not assuming."""
+
+    def __init__(self, reason: str, suggested_order: list[str]):
+        self.reason = reason
+        self.suggested_order = suggested_order
+        super().__init__(
+            f"file order is ambiguous: {reason}; "
+            f"suggested order: {', '.join(suggested_order)}")
+
+
 @dataclass
 class OrderResult:
     ordered_paths: list[str]         # best-effort order (may be ambiguous)
@@ -188,3 +203,36 @@ def order_infos(infos: list[FileInfo]) -> OrderResult:
         mismatched_resolution=len(widths) > 1 or len(heights) > 1,
         mismatched_fps=len(fpses) > 1,
     )
+
+
+def resolve_order(paths, explicit_order: str | None,
+                  result: OrderResult | None = None) -> list[str]:
+    """Turn a set of input paths, an optional --order string, and an
+    OrderResult into the final ordered path list — the actual "confirm or
+    reorder" decision point, pulled out of the CLI so it's independently
+    testable rather than only exercised by hand.
+
+    - If `explicit_order` is given, it's used verbatim after checking it
+      names exactly the given paths (ValueError otherwise) — this is the
+      user's confirmation/reorder path, always available, regardless of
+      whether automatic ordering succeeded or not.
+    - Otherwise, automatic ordering is used if unambiguous.
+    - Otherwise, raises AmbiguousOrderError (never silently guesses, but
+      also never a dead end — the exception carries the suggested order
+      the caller can hand back for confirmation).
+
+    `result`, if given, reuses an already-computed OrderResult (paths must
+    match); otherwise one is computed from `paths` via order_files.
+    """
+    if explicit_order:
+        ordered = [p.strip() for p in explicit_order.split(",")]
+        mismatch = set(ordered) ^ set(paths)
+        if mismatch:
+            raise ValueError(f"--order must list exactly the given files; "
+                            f"mismatch: {sorted(mismatch)}")
+        return ordered
+
+    r = result if result is not None else order_files(paths)
+    if r.ambiguous:
+        raise AmbiguousOrderError(r.reason, r.ordered_paths)
+    return r.ordered_paths
