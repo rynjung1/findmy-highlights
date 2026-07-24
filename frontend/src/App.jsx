@@ -1,0 +1,143 @@
+import { useEffect, useState } from 'react'
+import UploadStep from './components/UploadStep'
+import CalibrateStep from './components/CalibrateStep'
+import OrderConfirmStep from './components/OrderConfirmStep'
+import ProcessingStep from './components/ProcessingStep'
+import ResultStep from './components/ResultStep'
+import { getJob, triggerProcess } from './api'
+
+const STORAGE_KEY = 'fmh_batch_id'
+
+// Stages: loading -> upload -> calibrate -> [order_confirm ->] processing -> done
+//                                                                        \-> error
+export default function App() {
+  const [stage, setStage] = useState('loading')
+  const [batchId, setBatchId] = useState(null)
+  const [orderInfo, setOrderInfo] = useState(null)
+  const [errorMessage, setErrorMessage] = useState(null)
+
+  // On mount: resume from wherever the batch actually is on the server,
+  // never assume a fresh client. Job state is durable server-side (see
+  // backend/jobs.py) specifically so a reload or a closed tab mid-run
+  // doesn't lose the user's place -- this is the other half of that:
+  // the client has to actually ask, not just start over at "upload".
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (!saved) {
+      setStage('upload')
+      return
+    }
+    setBatchId(saved)
+    resumeFromServer(saved)
+  }, [])
+
+  async function resumeFromServer(id) {
+    try {
+      const detect = await getJob(id, 'detect')
+      if (!detect) {
+        setStage('calibrate')
+        return
+      }
+      if (detect.status === 'needs_order_confirmation') {
+        setOrderInfo({ suggestedOrder: detect.suggested_order, reason: detect.order_reason })
+        setStage('order_confirm')
+        return
+      }
+      if (detect.status === 'pending' || detect.status === 'in_progress') {
+        setStage('processing')
+        return
+      }
+      if (detect.status === 'completed') {
+        const exp = await getJob(id, 'export')
+        setStage(exp?.status === 'completed' ? 'done' : 'processing')
+        return
+      }
+      // failed / interrupted
+      setErrorMessage(
+        `The previous run for this upload didn't finish (${detect.status}): ` +
+          `${detect.error || 'no error detail available'}`,
+      )
+      setStage('error')
+    } catch (err) {
+      setErrorMessage(err.message)
+      setStage('error')
+    }
+  }
+
+  function handleUploaded(id) {
+    localStorage.setItem(STORAGE_KEY, id)
+    setBatchId(id)
+    setStage('calibrate')
+  }
+
+  async function handleCalibrated() {
+    setStage('processing')
+    try {
+      const job = await triggerProcess(batchId)
+      if (job.status === 'needs_order_confirmation') {
+        setOrderInfo({ suggestedOrder: job.suggested_order, reason: job.order_reason })
+        setStage('order_confirm')
+      }
+      // otherwise ProcessingStep's own polling takes over from here
+    } catch (err) {
+      setErrorMessage(err.message)
+      setStage('error')
+    }
+  }
+
+  function handleOrderConfirmed() {
+    setStage('processing')
+  }
+
+  function handleStartOver() {
+    localStorage.removeItem(STORAGE_KEY)
+    setBatchId(null)
+    setOrderInfo(null)
+    setErrorMessage(null)
+    setStage('upload')
+  }
+
+  return (
+    <div style={{ maxWidth: 900, margin: '40px auto', fontFamily: 'sans-serif', padding: 16 }}>
+      <h1>Find My Highlights</h1>
+
+      {stage === 'loading' && <p>Loading...</p>}
+      {stage === 'upload' && <UploadStep onUploaded={handleUploaded} />}
+      {stage === 'calibrate' && batchId && (
+        <CalibrateStep batchId={batchId} onCalibrated={handleCalibrated} />
+      )}
+      {stage === 'order_confirm' && batchId && orderInfo && (
+        <OrderConfirmStep
+          batchId={batchId}
+          suggestedOrder={orderInfo.suggestedOrder}
+          reason={orderInfo.reason}
+          onConfirmed={handleOrderConfirmed}
+        />
+      )}
+      {stage === 'processing' && batchId && (
+        <ProcessingStep
+          batchId={batchId}
+          onDone={() => setStage('done')}
+          onError={(msg) => {
+            setErrorMessage(msg)
+            setStage('error')
+          }}
+        />
+      )}
+      {stage === 'done' && batchId && <ResultStep batchId={batchId} />}
+      {stage === 'error' && (
+        <div>
+          <p style={{ color: 'red' }}>{errorMessage}</p>
+        </div>
+      )}
+
+      {stage !== 'upload' && stage !== 'loading' && (
+        <p style={{ marginTop: 24 }}>
+          <button className="secondary" onClick={handleStartOver}>
+            Start over with a new upload
+          </button>
+        </p>
+      )}
+    </div>
+  )
+}

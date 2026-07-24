@@ -22,17 +22,26 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import cv2
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from pipeline.calibration import (build_calibration, probe_frame_size,
-                                  save_calibration)
+from pipeline.calibration import (build_calibration, grab_preview_frame,
+                                  probe_frame_size, save_calibration)
 from pipeline.manifest import (VALID_STATUS, load_manifest, save_manifest,
                                set_status)
 from pipeline.multifile import order_infos, probe_file, resolve_order
 
 from backend import jobs, storage
-from backend.pipeline_runner import run_detect_job, run_export_job
+from backend.pipeline_runner import run_detect_then_export_job, run_export_job
+
+# Videos this app can plausibly work with. Rejected at upload time so an
+# obviously-wrong file type never gets written to disk in the first
+# place; a file that passes this but still can't actually be decoded is
+# already handled gracefully further downstream by the pipeline's
+# existing corrupt-file handling, not re-validated here.
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 
 
 class ProcessBody(BaseModel):
@@ -88,12 +97,25 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
     def _batch_file_names(bdir: Path) -> list:
         return json.loads((bdir / "files.json").read_text())["files"]
 
-    def _reject_if_busy(bdir: Path, batch_id: str, job_type: str) -> None:
+    def _reject_if_busy(bdir: Path, batch_id: str, job_type: str,
+                        block_if_completed: bool = True) -> None:
+        """Blocks a second trigger while one is pending/in_progress
+        anywhere, and (for detect, not export) also blocks re-triggering
+        once already completed. Export is deliberately exempted from the
+        completed-blocks-retrigger rule: re-stitching is idempotent
+        against whatever the manifest currently says, so it's the
+        correct way to regenerate the output after a Phase 8 restore —
+        unlike detect, re-running it doesn't reprocess the source video,
+        it only redoes the fast, cheap stitch step."""
         existing = jobs.load_job(bdir, job_type)
-        if existing and existing["status"] not in ("failed", "interrupted"):
-            raise HTTPException(
-                409, f"{job_type} already triggered for this batch "
-                     f"(status={existing['status']})")
+        if existing:
+            blocked = {"pending", "in_progress"}
+            if block_if_completed:
+                blocked.add("completed")
+            if existing["status"] in blocked:
+                raise HTTPException(
+                    409, f"{job_type} already triggered for this batch "
+                         f"(status={existing['status']})")
         active = jobs.find_active_job(app.state.uploads_root)
         if active and active["batch_id"] != batch_id:
             raise HTTPException(
@@ -104,6 +126,16 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
     def upload_batch(files: list[UploadFile] = File(...)):
         if not files:
             raise HTTPException(400, "no files provided")
+        # validate every filename BEFORE writing anything to disk, so one
+        # bad file in a multi-file batch doesn't leave partial writes of
+        # the good ones behind
+        bad = [f.filename for f in files
+              if Path(f.filename).suffix.lower() not in ALLOWED_VIDEO_EXTENSIONS]
+        if bad:
+            raise HTTPException(
+                400, f"unsupported file type: {bad} — allowed extensions: "
+                     f"{sorted(ALLOWED_VIDEO_EXTENSIONS)}")
+
         batch_id = storage.new_batch_id()
         bdir = storage.batch_dir(app.state.uploads_root, batch_id)
         names = []
@@ -112,6 +144,19 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
             names.append(f.filename)
         (bdir / "files.json").write_text(json.dumps({"files": names}))
         return {"batch_id": batch_id, "files": names}
+
+    @app.get("/batches/{batch_id}/preview.jpg")
+    def get_preview(batch_id: str):
+        bdir = _batch_dir(batch_id)
+        names = _batch_file_names(bdir)
+        try:
+            frame = grab_preview_frame(bdir / names[0])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        ok, buf = cv2.imencode(".jpg", frame)
+        if not ok:
+            raise HTTPException(500, "failed to encode preview frame")
+        return Response(content=buf.tobytes(), media_type="image/jpeg")
 
     @app.get("/batches/{batch_id}/calibration")
     def get_calibration(batch_id: str):
@@ -233,12 +278,12 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             job = jobs.create_job(bdir, batch_id, "detect", status="pending")
-            app.state.run_in_background(run_detect_job, bdir, job, ordered)
+            app.state.run_in_background(run_detect_then_export_job, bdir, job, ordered)
             return job
 
         if len(paths) == 1:
             job = jobs.create_job(bdir, batch_id, "detect", status="pending")
-            app.state.run_in_background(run_detect_job, bdir, job, paths)
+            app.state.run_in_background(run_detect_then_export_job, bdir, job, paths)
             return job
 
         infos = [probe_file(p) for p in paths]
@@ -255,7 +300,7 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
                 order_reason=result.reason)
 
         job = jobs.create_job(bdir, batch_id, "detect", status="pending")
-        app.state.run_in_background(run_detect_job, bdir, job,
+        app.state.run_in_background(run_detect_then_export_job, bdir, job,
                                     result.ordered_paths)
         return job
 
@@ -280,7 +325,7 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         existing["suggested_order"] = None
         existing["order_reason"] = None
         jobs.save_job(bdir, existing)
-        app.state.run_in_background(run_detect_job, bdir, existing, ordered)
+        app.state.run_in_background(run_detect_then_export_job, bdir, existing, ordered)
         return existing
 
     @app.get("/batches/{batch_id}/jobs/{job_type}")
@@ -326,11 +371,21 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         if not (bdir / "manifest.json").exists():
             raise HTTPException(404, "no manifest yet for this batch")
 
-        _reject_if_busy(bdir, batch_id, "export")
+        _reject_if_busy(bdir, batch_id, "export", block_if_completed=False)
 
         job = jobs.create_job(bdir, batch_id, "export", status="pending")
         app.state.run_in_background(run_export_job, bdir, job)
         return job
+
+    @app.get("/batches/{batch_id}/output")
+    def get_output(batch_id: str):
+        bdir = _batch_dir(batch_id)
+        p = bdir / "output.mp4"
+        if not p.exists():
+            raise HTTPException(404, "no exported output yet for this batch")
+        # FileResponse handles Range requests itself (needed for a
+        # <video> player to seek without downloading the whole file first)
+        return FileResponse(p, media_type="video/mp4", filename="highlights.mp4")
 
     return app
 

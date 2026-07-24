@@ -137,6 +137,104 @@ def test_upload_no_files_400(tmp_path):
         assert r.status_code in (400, 422)  # FastAPI 422s an empty required list
 
 
+def test_upload_unsupported_extension_400(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("notes.txt", b"hello", "text/plain"))])
+        assert r.status_code == 400
+        assert "unsupported file type" in r.json()["detail"]
+
+
+def test_upload_rejects_whole_batch_if_any_file_is_bad(tmp_path):
+    # a mix of one good + one bad file must reject atomically -- no
+    # partial write of the good file left behind
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("good.mkv", b"video bytes", "video/x-matroska")),
+            ("files", ("bad.txt", b"not a video", "text/plain"))])
+        assert r.status_code == 400
+        # no batch directory should exist at all
+        assert list((tmp_path / "uploads").glob("*")) == [] if \
+            (tmp_path / "uploads").exists() else True
+
+
+def test_upload_extension_check_is_case_insensitive(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("CLIP.MP4", b"video bytes", "video/mp4"))])
+        assert r.status_code == 200
+
+
+# ---- preview frame ----
+
+def test_preview_jpg_matches_video_native_resolution(tmp_path):
+    """The load-bearing invariant the frontend's coordinate-scaling math
+    depends on: the JPEG's own pixel dimensions (what the browser's
+    naturalWidth/naturalHeight report) must exactly equal what
+    probe_frame_size() (and therefore build_calibration()) uses. If the
+    backend ever resized the preview, clicks would silently scale wrong
+    without either side raising an error."""
+    from pipeline.calibration import probe_frame_size
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)  # 64x48
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.get(f"/batches/{batch_id}/preview.jpg")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/jpeg"
+
+        import cv2
+        import numpy as np
+        decoded = cv2.imdecode(np.frombuffer(r.content, np.uint8),
+                               cv2.IMREAD_COLOR)
+        jpeg_h, jpeg_w = decoded.shape[:2]
+
+        native_w, native_h = probe_frame_size(tmp_path / "uploads" / batch_id / "clip.mp4")
+        assert (jpeg_w, jpeg_h) == (native_w, native_h)
+
+
+def test_preview_jpg_unknown_batch_404(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.get("/batches/does-not-exist/preview.jpg")
+        assert r.status_code == 404
+
+
+def test_preview_jpg_uses_a_frame_past_the_start(tmp_path):
+    """Confirms the fixed-offset choice actually took effect: a 3-second
+    clip whose first ~1s is red and the rest is blue must show blue in
+    the preview (target offset clamped down for the short clip, but
+    still past the opening red segment), not the red opening frame."""
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    subprocess.run([
+        "ffmpeg", "-v", "error",
+        "-f", "lavfi", "-i", "color=c=red:s=64x48:d=1:r=5",
+        "-f", "lavfi", "-i", "color=c=blue:s=64x48:d=2:r=5",
+        "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0",
+        "-y", str(clip)], check=True)
+
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.get(f"/batches/{batch_id}/preview.jpg")
+        assert r.status_code == 200
+
+        import cv2
+        import numpy as np
+        decoded = cv2.imdecode(np.frombuffer(r.content, np.uint8),
+                               cv2.IMREAD_COLOR)
+        b, g, r_channel = decoded[24, 32].tolist()  # center pixel, BGR
+        assert b > 100 and r_channel < 100, (
+            f"expected the blue portion of the clip, got BGR=({b},{g},{r_channel})"
+            " -- preview frame wasn't actually offset past the start")
+
+
 # ---- calibration ----
 
 def test_get_calibration_before_set_404(tmp_path):
@@ -673,28 +771,95 @@ def test_export_before_manifest_404(tmp_path):
         assert r.status_code == 404
 
 
-def test_export_completes_and_writes_output(tmp_path):
+def test_auto_chain_export_runs_automatically_after_detect(tmp_path):
+    """The point of the Phase 7 auto-chain: a single trigger-processing
+    call ends with a completed export, no separate POST /export needed."""
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        post_process(client, batch_id)
+        detect_job = post_process(client, batch_id).json()
+        assert detect_job["status"] == "completed"
+
+        export_job = client.get(f"/batches/{batch_id}/jobs/export").json()
+        assert export_job["status"] == "completed"
+        assert export_job["output_path"] is not None
+        assert Path(export_job["output_path"]).exists()
+
+
+def test_auto_chain_skips_export_when_detect_fails(tmp_path, monkeypatch):
+    def failing_process_video(*a, **kw):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(pipeline_runner, "process_video", failing_process_video)
+
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        detect_job = post_process(client, batch_id).json()
+        assert detect_job["status"] == "failed"
+        assert client.get(f"/batches/{batch_id}/jobs/export").status_code == 404
+
+
+def test_export_can_be_retriggered_after_completion(tmp_path):
+    # unlike detect, export is safe (and meant) to re-trigger once idle —
+    # this is what a future restore-then-re-export flow will rely on
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        post_process(client, batch_id)  # auto-chain already exported once
+
         r = client.post(f"/batches/{batch_id}/export")
         assert r.status_code == 200
         job = r.json()
         assert job["status"] == "completed"
-        assert job["output_path"] is not None
         assert Path(job["output_path"]).exists()
 
 
-def test_export_triggered_twice_409(tmp_path):
+def test_export_rejected_while_still_in_progress(tmp_path):
+    # a genuinely-running export must still be protected — simulated
+    # directly rather than racing a real thread
+    from backend import jobs
+
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)
-        r1 = client.post(f"/batches/{batch_id}/export")
-        assert r1.status_code == 200
-        r2 = client.post(f"/batches/{batch_id}/export")
-        assert r2.status_code == 409
+
+        bdir = tmp_path / "uploads" / batch_id
+        existing = jobs.load_job(bdir, "export")
+        existing["status"] = "in_progress"
+        jobs.save_job(bdir, existing)
+
+        r = client.post(f"/batches/{batch_id}/export")
+        assert r.status_code == 409
+
+
+# ---- output file serving ----
+
+def test_get_output_before_export_404(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.get(f"/batches/{batch_id}/output")
+        assert r.status_code == 404
+
+
+def test_get_output_serves_the_exported_file(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        post_process(client, batch_id)  # auto-chain exports too
+
+        r = client.get(f"/batches/{batch_id}/output")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "video/mp4"
+        assert r.content == b"fake output video"  # from fake_run_stitch
+
+
+def test_get_output_unknown_batch_404(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.get("/batches/does-not-exist/output")
+        assert r.status_code == 404
 
 
 # ---- startup interrupt sweep ----

@@ -57,6 +57,42 @@ def probe_frame_size(video_path) -> tuple:
     return w, h
 
 
+PREVIEW_FRAME_SECONDS = 20.0  # past typical startup shake/lens-cap frames
+
+
+def grab_preview_frame(video_path, at_seconds: float = PREVIEW_FRAME_SECONDS):
+    """A decoded frame for the backend's calibration preview image — a
+    fixed offset into the video, not frame 0 (often black/blurry/settling)
+    and not an interactive pick like scripts/calibrate.py's grab_frame
+    (there's no window to show a user here, just an HTTP response), so a
+    early-but-not-the-very-first timestamp is the best fixed default.
+    Clamped down for videos shorter than `at_seconds`. Returns a BGR
+    numpy array at the video's native resolution — never resized, since
+    the frontend's coordinate-scaling math depends on this frame's pixel
+    dimensions exactly matching what probe_frame_size()/build_calibration()
+    use."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        cap.release()
+        raise ValueError(f"could not open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = (n_frames / fps) if fps else 0.0
+    target_s = min(at_seconds, max(duration - 0.5, 0.0)) if duration else 0.0
+
+    if fps:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(target_s * fps))
+    ok, frame = cap.read()
+    if not ok:  # fall back to the very first frame rather than fail outright
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        raise ValueError(f"could not read a frame from: {video_path}")
+    return frame
+
+
 def build_calibration(frame_size, plate_xy, radius_px=None,
                       created_from: str = "") -> dict:
     """The calibration.json schema, in one place — both

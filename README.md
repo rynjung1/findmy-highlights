@@ -19,11 +19,72 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 
 **Phases 0-6 complete and approved.** Detection pipeline (motion → person
 detection → play extension → padding), the manifest, multi-file handling,
-stitching kept segments into one finished output video, and now a FastAPI
+stitching kept segments into one finished output video, and a FastAPI
 backend wrapping all of it (upload, calibration, trigger-processing,
 progress, manifest read/update, re-export) all work end-to-end and are
-covered by 204 unit tests + 2 e2e tests (`pytest tests/` and `pytest
+covered by 215 unit tests + 2 e2e tests (`pytest tests/` and `pytest
 tests/ -m e2e`).
+
+**Phase 7 (Home/Upload UI): backend additions and frontend built, NOT
+yet signed off** — the spec requires a manual browser smoke test before
+this phase is done, and that hasn't happened yet (see below for exactly
+what's verified vs. still outstanding).
+
+Backend additions for Phase 7, all tested (54 backend tests total now):
+- `GET /batches/{id}/preview.jpg` — a frame fixed at 20s into the video
+  (not frame 0, which is often black/blurry/still-settling), for the
+  calibration screen to click on. Guaranteed (and tested) to be encoded
+  at the video's exact native resolution, never resized — the frontend's
+  coordinate-scaling math depends on that being true.
+- `GET /batches/{id}/output` — serves the exported video (range-request
+  support via `FileResponse`, so the player can seek without downloading
+  the whole file first).
+- **Detect → export now auto-chains.** `POST /process` used to only run
+  detection; now, once detection completes, export starts automatically
+  in the same background thread — one "Process" action, one wait, then a
+  playable video, matching the spec's Home-view description. If detect
+  fails, export is never started. The manual `POST /export` endpoint
+  stays separate for re-exporting after a future restore (Phase 8/9),
+  and its busy-check was loosened to allow re-triggering once `completed`
+  (unlike detect, which still blocks any re-trigger) — re-stitching is
+  idempotent against whatever the manifest currently says, so it's the
+  correct way to regenerate output after an edit, not a repeat of
+  expensive work.
+- **Upload validates file type, both sides.** Client-side (fast
+  rejection before any bytes leave the browser) and server-side (the
+  real enforcement — every filename in a batch is checked against an
+  extension allowlist *before* any file is written to disk, so one bad
+  file in a multi-file upload can't leave partial writes of the good
+  ones). Deeper "does this actually decode" validation isn't duplicated
+  here — the pipeline's existing corrupt-file handling already covers
+  that at process time.
+
+**Coordinate scaling (the click-to-calibrate design decision):** the
+browser displays `preview.jpg` at whatever size fits the layout, not
+necessarily its native resolution. `CalibrateStep.jsx` reads the loaded
+`<img>` element's `naturalWidth`/`naturalHeight` (the browser's own
+decoded pixel dimensions) and scales the click's on-screen offset by
+`natural / displayed` before sending coordinates to the backend — no
+extra API round-trip needed, since the JPEG already carries its own true
+dimensions and the backend guarantees they equal the video's real frame
+size. As defense in depth, `POST /calibration` still validates
+coordinates fall within the video's actual frame bounds — real bounds
+checking, not just documentation of the intent.
+
+**What's verified vs. what still needs a human:** the full build
+succeeds, and every HTTP request shape the React code actually sends
+(multipart upload, `GET preview.jpg`, `POST calibration` with `x`/`y`
+form fields) was exercised for real through the Vite dev-server proxy
+against the real running backend — preview.jpg came back at the exact
+video's native resolution, calibration was written correctly. What
+hasn't been checked, because no browser-automation tool is available in
+this environment: actually clicking on the preview image in a real
+browser and confirming the marker lands where expected, the full
+upload→calibrate→process→watch flow start to finish, an unsupported file
+type's on-screen error message, and a mid-processing browser
+close/reopen recovering correctly. All of that needs a real manual pass
+before this phase can be marked done — see "How to run it" for how to
+start both servers.
 
 **Phase 6 (backend API):** confirmed against a real running server (not
 just FastAPI's in-process test client) — `scripts/smoke_api.py` uploads a
@@ -416,8 +477,9 @@ Built so far:
   (rejecting anything outside it) and radius must be positive; setting
   calibration is rejected once the batch's detect job is
   pending/in_progress/completed, since it can no longer take effect at
-  that point. There's no in-browser click-to-calibrate flow yet — that's
-  Phase 7/8's job, built against this endpoint's coordinate mode.
+  that point. `GET /batches/{id}/preview.jpg` (Phase 7) is what the
+  in-browser click-to-calibrate flow reads a frame from — see
+  `frontend/src/components/CalibrateStep.jsx`.
 
   **`POST /batches/{id}/process` requires calibration to have been set**
   (400 if not) **unless the caller explicitly passes
@@ -425,12 +487,65 @@ Built so far:
   calibration is caught in milliseconds at trigger time, not discovered
   37 minutes later in a completed job's `warnings` field — the CLI's
   softer "warn and continue" behavior is preserved, but only as an
-  explicit, visible choice rather than a silent default.
+  explicit, visible choice rather than a silent default. On success,
+  detection and export now auto-chain (see below) — one trigger, one
+  playable output at the end.
+
+  **Preview frame + auto-chained export** (Phase 7) —
+  `GET /batches/{id}/preview.jpg` grabs a frame fixed 20 seconds into the
+  batch's first video (`pipeline.calibration.grab_preview_frame()`),
+  encoded at the video's exact native resolution so the frontend's
+  coordinate-scaling math (see Frontend, below) has something reliable
+  to scale against. `POST /process` no longer stops after detection: once
+  it completes, `backend/pipeline_runner.run_detect_then_export_job()`
+  immediately creates and runs the export job in the same background
+  thread, so a single trigger ends with a playable video — matching the
+  spec's "a Process action kicks off the pipeline... on completion, an
+  embedded player" description as one flow, not two. If detection fails,
+  export is never started. `GET /batches/{id}/output` then serves the
+  result with range-request support (`FileResponse`), so a `<video>`
+  player can seek without downloading the whole file first.
+
+- **Frontend** (`frontend/`, React + Vite, own `package.json`/lockfile
+  per the Phase 0 rule to keep Node and Python dependencies separate) —
+  a linear flow through `App.jsx`'s stage state machine: upload → click
+  to calibrate → (order confirmation, only if needed) → progress →
+  player + download. No pipeline or business logic here either —
+  `src/api.js` is a thin fetch wrapper, one function per backend
+  endpoint.
+
+  **Mid-processing browser close/reopen is handled by design, not as an
+  afterthought.** The only client state kept is the batch id
+  (`localStorage`); on load, `App.jsx` always re-fetches the batch's
+  actual job status from the server and resumes whatever stage that
+  implies, rather than assuming a fresh session — durable server-side
+  job state (Phase 6) is what makes this possible at all.
+
+  **Coordinate scaling for click-to-calibrate**, since this is the one
+  most likely to fail silently: the browser displays `preview.jpg` at
+  whatever size fits the layout, not its native resolution.
+  `CalibrateStep.jsx` reads the loaded `<img>`'s `naturalWidth`/
+  `naturalHeight` (the browser's own decoded pixel dimensions) and
+  scales the click's on-screen offset by `natural / displayed` before
+  sending coordinates — no extra backend round trip needed, since the
+  JPEG already carries its true dimensions and the backend guarantees
+  (tested) they equal the video's real frame size. `POST /calibration`'s
+  existing frame-bounds check is a real, tested safety net underneath
+  this, not just documentation of intent.
+
+  This scaling is only correct as long as the `<img>`'s rendered box has
+  the same aspect ratio as its actual content — true today because the
+  component deliberately sets only `max-width`, never `object-fit` or a
+  fixed `height`, so there's no letterboxing/padding for
+  `getBoundingClientRect()` to include. That's an assumption a future
+  style change could break without anyone noticing, so it isn't just
+  trusted: `handleClick` checks the box's aspect ratio against
+  `naturalWidth/naturalHeight` on every click and refuses to record a
+  coordinate (with a visible error, not a silent bad value) if they
+  don't match within 1%.
 
 Planned pieces:
 
-- **Frontend Home view** — upload files, watch progress, play/download the
-  finished output.
 - **Frontend Edit Log view** — review cut segments, preview them, restore any
   that were wrongly trimmed, and re-export.
 
@@ -484,23 +599,53 @@ install packages into system/global Python.
    happens automatically on first detection run and is cached under
    `~/.roboflow/`.
 
+6. **Frontend (optional — only needed to use the Home view UI, not the
+   CLI or bare API):** install Node.js (developed against Node 18.20;
+   note the very latest `create-vite`/tooling needs Node 20+, but this
+   project's own `frontend/package.json` was pinned to work with 18),
+   then:
+
+   ```sh
+   cd frontend
+   npm install
+   ```
+
+   Kept in its own `package.json`/lockfile, separate from the Python venv
+   — see Version control workflow.
+
 ## How to run it
 
-No frontend yet, but the backend API can be run standalone:
+**Full app (backend + frontend), two terminals:**
 
 ```sh
-# start the backend (auto-reloads on code changes)
+# terminal 1: backend, must be on port 8420 -- the frontend dev server's
+# proxy (frontend/vite.config.js) is hardcoded to that port
+./venv/bin/uvicorn backend.app:app --reload --port 8420
+
+# terminal 2: frontend dev server
+cd frontend && npm run dev
+```
+
+Then open `http://localhost:5173` in a browser (not `127.0.0.1` — see the
+note in Known limitations about Vite's dev-server binding). Upload a
+video, click home plate on the preview frame, and it'll walk through
+processing to a finished, downloadable highlight video.
+
+**Backend alone**, for poking at the API directly or before the frontend
+existed:
+
+```sh
 ./venv/bin/uvicorn backend.app:app --reload --port 8420
 
 # in another terminal: exercise it end-to-end against a real clip
 # (uploads, uploads calibration if a calibration.json sits next to the
-# video, triggers real detection, restores a segment, re-exports)
+# video, triggers real detection which now auto-chains into export,
+# restores a segment, re-exports, downloads the final output)
 ./venv/bin/python scripts/smoke_api.py reference_clips/clip_60.mkv --base-url http://127.0.0.1:8420
 ```
 
 Interactive API docs are served at `http://127.0.0.1:8420/docs` (FastAPI's
-built-in Swagger UI) once the server is running — useful for poking at
-endpoints by hand before the frontend exists.
+built-in Swagger UI) once the server is running.
 
 Or run the pipeline directly from the command line, same as before:
 
@@ -562,14 +707,26 @@ local timestamps happen to look adjacent.
   backend API at all**, so every API-triggered job silently ran with the
   Phase 3 at-bat boundary system disabled — see the Current Status
   writeup above for the full account (what was actually lost, how it was
-  confirmed, and the fix). Calling out what's still true post-fix:
-  calibration remains *optional* at `/process` time, same as the CLI
-  (a missing one only disables plate-occupancy with a warning, it doesn't
-  block processing) — so it's still possible to trigger a batch without
-  calibrating it first. Phase 7/8's Home-view upload flow should make
-  calibrating a batch feel like a required step even though the API
-  itself won't enforce it, e.g. prompting for it right after upload
-  rather than letting it be silently skippable.
+  confirmed, and the fix). Also fixed in the same review round:
+  `POST /process` now actively blocks on missing calibration (400) unless
+  the caller explicitly passes `allow_uncalibrated: true` — no longer
+  possible to trigger a batch uncalibrated by accident, only on purpose.
+- **The Phase 7 frontend's manual browser smoke test hasn't happened
+  yet.** No browser-automation tool was available in this environment,
+  so what's verified is: the production build succeeds, and every HTTP
+  request shape the React code sends was exercised for real through the
+  Vite dev-server proxy against the real backend (see Current Status).
+  What's NOT yet verified: actually clicking the preview image in a
+  browser and confirming the coordinate math lands correctly, the full
+  visual flow end to end, the unsupported-file-type error rendering, and
+  a real mid-processing browser close/reopen. This needs a human pass
+  before Phase 7 can be considered done.
+- **Vite's dev server binds in a way `curl 127.0.0.1:5173` can't reach —
+  use `localhost:5173`.** Confirmed while testing the proxy setup:
+  Node's default `localhost` resolution in this environment prefers
+  `::1` over `127.0.0.1`, and Vite listens accordingly. Not a bug in
+  this project's config, just worth knowing before assuming the dev
+  server isn't running when `127.0.0.1` refuses the connection.
 - **Nothing in `uploads/` is ever auto-deleted in v1.** Every batch's
   source files, job state, manifest, and exported output accumulate on
   disk indefinitely. Deliberate scope cut for v1, not an oversight — a

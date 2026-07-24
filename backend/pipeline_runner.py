@@ -16,7 +16,7 @@ from pipeline.run import DEFAULT_CACHE_DIR, process_video
 from pipeline.segments import SegmentConfig, smooth_scores
 from pipeline.stitch import run_stitch
 
-from backend.jobs import save_job
+from backend.jobs import create_job, save_job
 
 
 def run_detect_job(batch_dir, job: dict, ordered_paths: list) -> None:
@@ -74,6 +74,26 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list) -> None:
         job["error"] = str(e)
         save_job(batch_dir, job)
         raise
+
+
+def run_detect_then_export_job(batch_dir, detect_job: dict,
+                               ordered_paths: list) -> None:
+    """Auto-chains detect -> export so one trigger-processing call ends
+    with a playable output, matching the Home view's "one Process
+    action, one wait, then a video" flow (Phase 7) — the manual
+    POST /export endpoint (run_export_job called directly) stays
+    separate and is what a future restore-then-re-export (Phase 8/9)
+    will call again on its own. If detect fails, its own except block
+    already persisted the failure to detect_job before re-raising; this
+    just stops the chain there rather than starting an export against a
+    manifest that was never written."""
+    try:
+        run_detect_job(batch_dir, detect_job, ordered_paths)
+    except Exception:
+        return
+    export_job = create_job(batch_dir, detect_job["batch_id"], "export",
+                            status="pending")
+    run_export_job(batch_dir, export_job)
 
 
 def run_export_job(batch_dir, job: dict) -> None:
