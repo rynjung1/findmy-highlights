@@ -1,4 +1,6 @@
-"""Plate-zone calibration resolution (Phase 2, extended for Phase 4).
+"""Plate-zone calibration resolution (Phase 2, extended for Phase 4) and
+writing (Phase 6, extended from scripts/calibrate.py so the backend's
+calibration endpoint can't drift from the CLI's schema).
 
 One calibration.json applies to every file in a batch by default — the
 zero-friction path: click the plate once, it covers the whole session.
@@ -12,7 +14,12 @@ the common path.
 import json
 from pathlib import Path
 
+import cv2
+
 from pipeline.fusion import PlateZone
+
+# ~one batter-height around the plate at typical backstop-mounted framing
+DEFAULT_RADIUS_FRACTION = 0.26
 
 
 def resolve_zone(video_path, calib_dir=None) -> PlateZone | None:
@@ -30,3 +37,44 @@ def resolve_zone(video_path, calib_dir=None) -> PlateZone | None:
             return PlateZone(center_xy=tuple(c["plate_xy"]),
                              radius_px=c["zone_radius_px"])
     return None
+
+
+def probe_frame_size(video_path) -> tuple:
+    """(width, height) via container metadata — no frame decode needed.
+    scripts/calibrate.py's interactive path already has a decoded frame
+    on hand (needed to display for clicking) and uses its shape instead;
+    this is for callers, like the backend, that only need the dimensions
+    to compute a default radius."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        cap.release()
+        raise ValueError(f"could not open video: {video_path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if w <= 0 or h <= 0:
+        raise ValueError(f"could not read frame size: {video_path}")
+    return w, h
+
+
+def build_calibration(frame_size, plate_xy, radius_px=None,
+                      created_from: str = "") -> dict:
+    """The calibration.json schema, in one place — both
+    scripts/calibrate.py and the backend's calibration endpoint build
+    through this, so the two can't silently disagree on field names or
+    rounding. `radius_px` defaults to DEFAULT_RADIUS_FRACTION of frame
+    height, same default scripts/calibrate.py has always used."""
+    w, h = frame_size
+    if radius_px is None:
+        radius_px = DEFAULT_RADIUS_FRACTION * h
+    x, y = plate_xy
+    return {
+        "frame_size": [w, h],
+        "plate_xy": [round(float(x), 1), round(float(y), 1)],
+        "zone_radius_px": round(float(radius_px), 1),
+        "created_from": created_from,
+    }
+
+
+def save_calibration(dest_path, calibration: dict) -> None:
+    Path(dest_path).write_text(json.dumps(calibration, indent=2))

@@ -228,12 +228,16 @@ def build_concat_cmd(list_path, out_path) -> list:
 
 
 def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
-              prober=probe_video_params, runner=None) -> StitchResult:
+              prober=probe_video_params, runner=None,
+              on_stage=None) -> StitchResult:
     """Execute a stitch plan: extract every kept span, then concat them
     into `output_path`. `work_dir` holds intermediate per-span clips
     (a temp dir is used and cleaned up if not given). `runner` defaults
     to actually invoking ffmpeg via subprocess; tests can inject a fake
-    to check commands without running real video I/O."""
+    to check commands without running real video I/O. `on_stage`, if
+    given, is called with a human-readable stage name before extraction
+    and again before the final concat (added for the backend's progress
+    reporting; scripts/stitch.py doesn't pass one)."""
     import tempfile
 
     if runner is None:
@@ -253,6 +257,8 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
         # process cwd, so a relative work_dir would make ffmpeg look for
         # e.g. work_dir/work_dir/span_0001.mp4 and fail to find it
         work_dir = Path(work_dir).resolve()
+        if on_stage:
+            on_stage("extracting kept segments")
         clip_paths = []
         for job in plan.jobs:
             out = work_dir / job.clip_name
@@ -260,6 +266,8 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
             runner(cmd)
             clip_paths.append(out)
 
+        if on_stage:
+            on_stage("stitching output")
         list_path = work_dir / "concat_list.txt"
         list_path.write_text(build_concat_list(clip_paths))
         runner(build_concat_cmd(list_path, output_path))

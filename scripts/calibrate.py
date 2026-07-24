@@ -18,13 +18,15 @@ around the plate at typical backstop-mounted framing); override with
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline.calibration import (DEFAULT_RADIUS_FRACTION, build_calibration,
+                                  save_calibration)
 
 
 def grab_frame(video_path: str, at_frac: float = 0.5):
@@ -91,20 +93,17 @@ def main() -> None:
 
     frame = grab_frame(args.video)
     h, w = frame.shape[:2]
-    radius = args.radius if args.radius is not None else 0.26 * h
+    radius = args.radius if args.radius is not None else DEFAULT_RADIUS_FRACTION * h
 
     if args.set_xy:
         x, y = (float(v) for v in args.set_xy.split(","))
     else:
         x, y = pick_interactively(frame, radius)
 
+    calibration = build_calibration((w, h), (x, y), radius,
+                                    created_from=Path(args.video).name)
     out = Path(args.output) if args.output else Path(args.video).parent / "calibration.json"
-    out.write_text(json.dumps({
-        "frame_size": [w, h],
-        "plate_xy": [round(x, 1), round(y, 1)],
-        "zone_radius_px": round(radius, 1),
-        "created_from": Path(args.video).name,
-    }, indent=2))
+    save_calibration(out, calibration)
     print(f"saved {out}: plate=({x:.0f},{y:.0f}) radius={radius:.0f}px "
           f"frame={w}x{h}")
 

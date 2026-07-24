@@ -17,11 +17,58 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 
 ## Current status
 
-**Phases 0-5 complete and approved.** Detection pipeline (motion → person
+**Phases 0-6 complete and approved.** Detection pipeline (motion → person
 detection → play extension → padding), the manifest, multi-file handling,
-and now stitching kept segments into one finished output video all work
-end-to-end and are covered by 146 unit tests + 2 e2e tests (`pytest
-tests/` and `pytest tests/ -m e2e`).
+stitching kept segments into one finished output video, and now a FastAPI
+backend wrapping all of it (upload, calibration, trigger-processing,
+progress, manifest read/update, re-export) all work end-to-end and are
+covered by 193 unit tests + 2 e2e tests (`pytest tests/` and `pytest
+tests/ -m e2e`).
+
+**Phase 6 (backend API):** confirmed against a real running server (not
+just FastAPI's in-process test client) — `scripts/smoke_api.py` uploads a
+real reference clip, uploads its calibration, triggers real detection
+(real model inference, no fakes), polls progress through real stage
+transitions, restores a real cut segment via the manifest-update
+endpoint, triggers real export, and confirms the stitched output file
+exists and plays. All passed (`SMOKE TEST PASSED`).
+
+**Caught during review, fixed before this phase was signed off (not
+deferred):** the first version of this phase let a batch be processed via
+the API with no way to ever provide a plate calibration — `resolve_zone()`
+looks in the video's own directory, but uploaded files live in
+`uploads/<batch_id>/`, so every API-triggered job silently ran with
+plate-occupancy disabled, which means the Phase 3 at-bat boundary system
+(the mechanism that extends a segment through a defensive play and tells
+a real batter change apart from a step-out) never ran at all — a
+materially weaker pipeline than everything Phases 2-5 validated, not a
+cosmetic gap. Confirmed directly: the first smoke-test run *did* execute
+this degraded path (`clip_60.mkv` produced 10 kept/10 cut segments,
+visible in the job's `warnings` field) — a different, weaker result than
+the fully-calibrated CLI run. Fixed by adding `POST /batches/{id}/calibration`
+(accepts either an existing `calibration.json` to reuse, or plate pixel
+coordinates to compute a fresh one — the API equivalent of `scripts/
+calibrate.py --set x,y`) and `GET` to read it back; `pipeline/calibration.py`
+gained `build_calibration()`/`save_calibration()`, refactored out of
+`scripts/calibrate.py` so the CLI and the API write the identical schema,
+not two copies that could drift apart. Re-ran the smoke test with
+calibration uploaded first: `clip_60.mkv` now produces **7 kept/7 cut
+segments — an exact match for the original CLI run**, with no warnings.
+`tests/test_backend_api.py` includes a pair of tests that check this
+directly by inspecting the actual `zone` object `process_video` was
+called with (not inferred from the warnings list being empty, which a
+careless fake could satisfy by accident either way).
+
+Endpoint-level tests (`tests/test_backend_api.py`, `tests/test_jobs.py`,
+`tests/test_storage.py`) use a fast fake pipeline and cover: every
+malformed-request case the spec calls out (updating a manifest that
+doesn't exist yet, updating an unknown segment id, triggering processing
+twice on the same batch, triggering export twice), the
+single-job-at-a-time lock (a second batch is correctly rejected while one
+is active, but a batch stuck on `needs_order_confirmation` correctly does
+NOT block others), the ambiguous-order HTTP flow against real
+ffmpeg-generated multi-file clips, the calibration endpoint (both input
+modes, and the malformed-file cases), and the startup interrupt sweep.
 
 **Phase 5 full-length checkpoint (per the project spec's requirement to
 test a real 30-60+ min video before this phase is considered done):** ran
@@ -284,10 +331,71 @@ Built so far:
     back with no corruption — the specific defensive play that was cut
     mid-play by the file split is intact across the join.
 
+- **Backend API** (`backend/app.py`, `backend/jobs.py`,
+  `backend/storage.py`, `backend/pipeline_runner.py`) — a local FastAPI
+  service wrapping the pipeline: upload, calibration, trigger-processing,
+  progress, manifest read/update, re-export. No pipeline logic lives here — every
+  endpoint is a thin wrapper around `pipeline.run.process_video()` and
+  `pipeline.stitch.run_stitch()`, which stay the single implementations;
+  `backend/pipeline_runner.py`'s job is only to wire their `on_stage`
+  callbacks (added in this phase) to durable progress updates.
+
+  **Durable job state, not in-memory.** A real detect job takes tens of
+  minutes and the backend restarts constantly during frontend
+  development — in-memory-only progress would silently vanish on every
+  restart. Instead, `backend/jobs.py` writes minimal progress (job id,
+  type, status, stage, timestamps) to `<batch>/detect_job.json` /
+  `<batch>/export_job.json` at every stage transition, the same
+  JSON-file-as-source-of-truth approach as the manifest. On startup, any
+  job left `pending`/`in_progress` from before the process started is
+  swept to `interrupted` with an explanatory error, rather than being
+  left to silently report "in progress" forever for a job that isn't
+  actually running.
+
+  **Single-job-at-a-time, deliberately (v1).** This is a local
+  single-user app and detection is CPU/memory-heavy (~1GB RSS, near-full
+  CPU on the full-length checkpoint) — running two jobs at once would
+  only make both slower, not add real throughput. A second
+  trigger-processing or re-export call while anything else is
+  `pending`/`in_progress` anywhere gets a clean 409 naming the job
+  that's already running, checked by scanning the job files directly
+  (`find_active_job()`) rather than a separate lock file that could
+  drift out of sync. A batch sitting in `needs_order_confirmation`
+  (waiting on a human decision, not consuming resources) deliberately
+  does **not** count as active and never blocks a different batch.
+
+  **Ambiguous multi-file order, as data instead of a CLI exit code.**
+  `POST /batches/{id}/process` mirrors `scripts/detect_multi.py`'s
+  `AmbiguousOrderError` fallback, but shaped for an HTTP client: if
+  ordering can't be trusted, the job is written with
+  `status="needs_order_confirmation"` plus `suggested_order` and
+  `order_reason` (not an error — an expected, actionable state) and
+  processing does not start. `POST /batches/{id}/order` submits the
+  confirmed order and starts it; a file-list mismatch is a 400, and
+  confirming when nothing is awaiting confirmation is a 409.
+
+  **Upload never buffers a whole file in memory.** Real recordings run
+  1GB+; `backend/storage.py` streams each upload to disk in fixed 1 MiB
+  chunks (verified directly: a test asserts every read call requests a
+  bounded size, not a whole-body `.read()`), never through FastAPI's
+  default in-memory path.
+
+  **Calibration** (`POST`/`GET /batches/{id}/calibration`) writes
+  `<batch>/calibration.json`, which `resolve_zone()` then finds
+  automatically since it looks in the video's own directory — no changes
+  needed anywhere else for this to take effect. Two ways to set it,
+  mirroring `scripts/calibrate.py`'s two non-interactive paths: upload an
+  existing `calibration.json` verbatim (the "same camera setup, already
+  calibrated" case — a shared one covers every file in the batch, same
+  as the CLI), or give plate pixel coordinates to compute a fresh one
+  against the batch's own first video. `pipeline.calibration.build_calibration()`/
+  `save_calibration()` are shared by both `scripts/calibrate.py` and this
+  endpoint specifically so the schema can't drift between the CLI and API
+  paths. There's no in-browser click-to-calibrate flow yet — that's
+  Phase 7/8's job, built against this endpoint's coordinate mode.
+
 Planned pieces:
 
-- **Backend API** — a small local service wrapping the pipeline: upload,
-  process, progress, manifest read/update, re-export.
 - **Frontend Home view** — upload files, watch progress, play/download the
   finished output.
 - **Frontend Edit Log view** — review cut segments, preview them, restore any
@@ -345,7 +453,23 @@ install packages into system/global Python.
 
 ## How to run it
 
-No UI or backend yet — the pipeline runs from the command line:
+No frontend yet, but the backend API can be run standalone:
+
+```sh
+# start the backend (auto-reloads on code changes)
+./venv/bin/uvicorn backend.app:app --reload --port 8420
+
+# in another terminal: exercise it end-to-end against a real clip
+# (uploads, uploads calibration if a calibration.json sits next to the
+# video, triggers real detection, restores a segment, re-exports)
+./venv/bin/python scripts/smoke_api.py reference_clips/clip_60.mkv --base-url http://127.0.0.1:8420
+```
+
+Interactive API docs are served at `http://127.0.0.1:8420/docs` (FastAPI's
+built-in Swagger UI) once the server is running — useful for poking at
+endpoints by hand before the frontend exists.
+
+Or run the pipeline directly from the command line, same as before:
 
 ```sh
 # detect final (extended, padded) action segments in one video
@@ -401,6 +525,23 @@ local timestamps happen to look adjacent.
 
 ## Known limitations / non-goals for this version
 
+- **Fixed during Phase 6 review: calibration wasn't reachable through the
+  backend API at all**, so every API-triggered job silently ran with the
+  Phase 3 at-bat boundary system disabled — see the Current Status
+  writeup above for the full account (what was actually lost, how it was
+  confirmed, and the fix). Calling out what's still true post-fix:
+  calibration remains *optional* at `/process` time, same as the CLI
+  (a missing one only disables plate-occupancy with a warning, it doesn't
+  block processing) — so it's still possible to trigger a batch without
+  calibrating it first. Phase 7/8's Home-view upload flow should make
+  calibrating a batch feel like a required step even though the API
+  itself won't enforce it, e.g. prompting for it right after upload
+  rather than letting it be silently skippable.
+- **Nothing in `uploads/` is ever auto-deleted in v1.** Every batch's
+  source files, job state, manifest, and exported output accumulate on
+  disk indefinitely. Deliberate scope cut for v1, not an oversight — a
+  retention/cleanup policy is a later concern once real usage patterns
+  are known.
 - **The `full_game.mkv` full-length checkpoint is not a recall
   measurement — don't read it as equivalent rigor to the reference-clip
   regression.** It validates performance (37.4 min wall-clock, bounded
@@ -536,3 +677,22 @@ local timestamps happen to look adjacent.
   order, an ambiguous-timestamp variant, and a per-file calibration
   override) before being trusted — not committed, since it was scratch
   validation data, but the same checks are why these tests exist.
+- **Backend API tests** (`tests/test_backend_api.py`, `tests/test_jobs.py`,
+  `tests/test_storage.py`) run against FastAPI's test client with a fast
+  fake standing in for the real pipeline (a real detect job takes tens of
+  minutes and needs model weights — covered instead by the real-server
+  smoke test below), except the ambiguous-order tests, which use real
+  ffmpeg-generated clips since backend/app.py deliberately reuses
+  `pipeline.multifile`'s real ordering logic rather than reimplementing
+  it. Covers every malformed-request case called out in the spec
+  (updating a manifest before one exists, an unknown segment id,
+  triggering processing or export twice on the same batch), the
+  single-job-at-a-time lock and its `needs_order_confirmation` exception,
+  the calibration endpoint (verified by inspecting the actual `zone`
+  object `process_video` receives, not just whether a warning was
+  absent), and the startup interrupt sweep. `scripts/smoke_api.py` is the
+  "hit the API directly, not the UI yet" real-server check the spec
+  calls for: run against a live `uvicorn` process with a real reference
+  clip, it uploads, uploads calibration, triggers real detection, polls
+  real stage transitions, restores a real cut segment, re-exports, and
+  confirms the stitched output plays — see "How to run it" above.

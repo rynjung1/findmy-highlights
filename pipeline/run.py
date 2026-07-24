@@ -25,16 +25,22 @@ DEFAULT_CACHE_DIR = ROOT / ".cache" / "detections"
 
 
 def process_video(video: str, zone, motion_only: bool = False,
-                  cache_dir=None, warn=None):
+                  cache_dir=None, warn=None, on_stage=None):
     """Run the full pipeline on one video. `zone` is a PlateZone or None
     (already resolved by the caller — this function does no calibration
     lookup of its own, keeping single- and multi-file callers consistent).
     `warn`, if given, is called with a message when zone is None and
-    motion_only is False (plate-occupancy signals disabled).
+    motion_only is False (plate-occupancy signals disabled). `on_stage`,
+    if given, is called with a human-readable stage name right before
+    that stage of work starts (added for the backend's progress
+    reporting — the CLI scripts don't pass one, so their behavior is
+    unchanged).
 
     Returns (final_segments, vetoed, duration, motion_result).
     """
     cache_dir = cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR
+    if on_stage:
+        on_stage("analyzing motion")
     motion = compute_motion(video)
     if motion_only:
         segs = scores_to_segments(motion.times, motion.scores, SegmentConfig())
@@ -43,7 +49,11 @@ def process_video(video: str, zone, motion_only: bool = False,
     if zone is None and warn is not None:
         warn(f"no calibration for {video}; plate-occupancy signals disabled")
 
+    if on_stage:
+        on_stage("running player detection")
     det = detect_persons(video, DetectionConfig(), cache_dir=str(cache_dir))
+    if on_stage:
+        on_stage("extending and padding segments")
     fused = fuse(motion.times, motion.scores, motion.grids,
                  motion.frame_size, motion.analysis_size, motion.border_px,
                  det.times, det.boxes, zone)
