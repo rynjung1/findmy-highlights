@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { getManifest, sourceUrl, updateSegmentStatus } from '../api'
+import { getJob, getManifest, outputUrl, sourceUrl, triggerExport, updateSegmentStatus } from '../api'
+
+const EXPORT_POLL_MS = 1000
 
 // Only segments with origin "gap" were ever cut by detection (see
 // pipeline/manifest.py: origin is set once at build time and never
@@ -17,6 +19,14 @@ export default function EditLogView({ batchId }) {
   const [error, setError] = useState(null)
   const [previewingId, setPreviewingId] = useState(null)
   const [pendingId, setPendingId] = useState(null)
+  // Set once an export is confirmed completed (initial load or after a
+  // toggle-triggered re-export) -- also doubles as the cache-bust token
+  // for the output <video>, so a re-export always shows fresh content
+  // instead of the browser serving back the previous export's response
+  // for the same URL.
+  const [exportVersion, setExportVersion] = useState(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -35,6 +45,13 @@ export default function EditLogView({ batchId }) {
         }
         setManifest(m)
         setLoadState('ready')
+        // Surface whatever output already exists (e.g. Phase 7's
+        // auto-chained export from the original processing run) --
+        // the player shouldn't only appear after a restore this session.
+        const exp = await getJob(batchId, 'export')
+        if (!cancelled && exp?.status === 'completed') {
+          setExportVersion(exp.updated_at || Date.now())
+        }
       } catch (err) {
         if (cancelled) return
         setError(err.message)
@@ -46,6 +63,39 @@ export default function EditLogView({ batchId }) {
       cancelled = true
     }
   }, [batchId])
+
+  async function waitForExport() {
+    // Re-export is stitching only (extract + concat kept spans), not
+    // re-running detection, so this is expected to be fast in practice
+    // (measured: ~1s on clip_300) -- but it's still a real background
+    // job, so poll rather than assume.
+    while (true) {
+      const job = await getJob(batchId, 'export')
+      if (job?.status === 'completed') return { ok: true }
+      if (job?.status === 'failed' || job?.status === 'interrupted') {
+        return { ok: false, message: job.error || `export ${job.status}` }
+      }
+      await new Promise((resolve) => setTimeout(resolve, EXPORT_POLL_MS))
+    }
+  }
+
+  async function reExport() {
+    setExporting(true)
+    setExportError(null)
+    try {
+      await triggerExport(batchId)
+      const result = await waitForExport()
+      if (result.ok) {
+        setExportVersion(Date.now())
+      } else {
+        setExportError(`Re-export failed: ${result.message}`)
+      }
+    } catch (err) {
+      setExportError(err.message)
+    } finally {
+      setExporting(false)
+    }
+  }
 
   async function handleToggle(seg) {
     const nextStatus = seg.status === 'cut' ? 'kept' : 'cut'
@@ -72,9 +122,15 @@ export default function EditLogView({ batchId }) {
       }
     } catch (err) {
       setError(err.message)
+      return
     } finally {
       setPendingId(null)
     }
+    // The status change succeeded -- now make the final video actually
+    // reflect it. Runs for both directions (restore AND cut-again): a
+    // toggle that updates the manifest but leaves the last-exported
+    // video showing the old state would be a half-finished feature.
+    await reExport()
   }
 
   if (loadState === 'loading') {
@@ -107,6 +163,34 @@ export default function EditLogView({ batchId }) {
   return (
     <div>
       <h2>Edit Log</h2>
+
+      <div style={{ marginBottom: 24, paddingBottom: 16, borderBottom: '1px solid #ddd' }}>
+        <h3 style={{ marginBottom: 8 }}>Current output</h3>
+        {exporting && (
+          <p>
+            <span className="spinner" aria-hidden="true" />
+            Re-exporting output...
+          </p>
+        )}
+        {exportError && <p style={{ color: 'red' }}>{exportError}</p>}
+        {exportVersion ? (
+          <>
+            <video
+              controls
+              src={outputUrl(batchId, exportVersion)}
+              style={{ maxWidth: '100%', background: '#000' }}
+            />
+            <p>
+              <a href={outputUrl(batchId, exportVersion)} download="highlights.mp4">
+                <button className="secondary">Download</button>
+              </a>
+            </p>
+          </>
+        ) : (
+          !exporting && <p>No exported output yet.</p>
+        )}
+      </div>
+
       {error && <p style={{ color: 'red' }}>{error}</p>}
       {cutEntries.length === 0 ? (
         <p>Detection didn't cut anything from this video -- nothing to review here.</p>
@@ -114,6 +198,7 @@ export default function EditLogView({ batchId }) {
         <ul style={{ listStyle: 'none', padding: 0 }}>
           {cutEntries.map((seg) => {
             const restored = seg.status === 'kept'
+            const isPending = pendingId === seg.id
             return (
               <li
                 key={seg.id}
@@ -146,8 +231,8 @@ export default function EditLogView({ batchId }) {
                     >
                       {previewingId === seg.id ? 'Hide preview' : 'Preview'}
                     </button>
-                    <button onClick={() => handleToggle(seg)} disabled={pendingId === seg.id}>
-                      {pendingId === seg.id ? 'Saving...' : restored ? 'Cut again' : 'Restore'}
+                    <button onClick={() => handleToggle(seg)} disabled={isPending || exporting}>
+                      {isPending ? 'Saving...' : restored ? 'Cut again' : 'Restore'}
                     </button>
                   </div>
                 </div>

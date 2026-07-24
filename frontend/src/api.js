@@ -80,8 +80,12 @@ export async function getManifest(batchId) {
   return res.json()
 }
 
-export function outputUrl(batchId) {
-  return `/batches/${batchId}/output`
+export function outputUrl(batchId, cacheBust) {
+  // cacheBust is optional so ResultStep's existing usage (one output
+  // per session, no reason to distrust the cache) is unaffected; the
+  // Edit Log passes a fresh value after every re-export so the browser
+  // can't serve back a stale video from before the restore took effect.
+  return cacheBust ? `/batches/${batchId}/output?_=${cacheBust}` : `/batches/${batchId}/output`
 }
 
 export function sourceUrl(batchId, filename) {
@@ -94,5 +98,10 @@ export async function updateSegmentStatus(batchId, segmentId, status) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status }),
   })
+  return res.json()
+}
+
+export async function triggerExport(batchId) {
+  const res = await request(`/batches/${batchId}/export`, { method: 'POST' })
   return res.json()
 }

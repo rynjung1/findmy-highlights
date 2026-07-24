@@ -111,6 +111,52 @@ preview image and confirming the marker (small offset noted above and
 in Known limitations, not a functional blocker), and processing showing
 live stage progress. See "How to run it" for how to start both servers.
 
+**Phase 9 (re-export flow): complete.** The spec left the choice
+between an explicit "Re-export" button and automatic background
+re-render open; automatic was chosen — every restore/cut-again toggle
+in the Edit Log now triggers a real `POST /export` itself, waits for it
+to complete, and refreshes the video shown in the Edit Log's own
+"Current output" section (no navigating to Home to see the result, per
+the spec). Chosen over a button because the manifest update and the
+regenerated video should never be allowed to drift apart — an explicit
+button adds a state where they can (a restore that's "saved" but not
+yet reflected in anything watchable), and re-export is fast (stitching
+only, not re-detection: ~1s measured against clip_300) so there's no
+real cost to doing it every time.
+
+All toggle buttons disable while a re-export from any toggle is in
+flight, which also serializes rapid successive toggles into one
+export-at-a-time rather than racing `POST /export` calls (the backend's
+existing single-job-at-a-time lock, Phase 6, would 409 an overlapping
+one anyway — this avoids ever hitting that path from normal use). The
+video's URL carries a cache-bust token that changes on every completed
+export, so the browser can't serve back the previous export's response
+for what's otherwise the same URL. On mount, the Edit Log also checks
+for an already-completed export (e.g., Phase 7's original auto-chained
+one) and shows it immediately, rather than the player only appearing
+after the first restore of the session.
+
+**Verified two ways.** First, the exact request sequence the component
+makes (`PATCH` segment → `GET` manifest → `POST /export` → poll
+`GET /jobs/export`) was replicated by hand against the real running
+backend and the real clip_300 batch: restoring `seg_002` correctly
+dropped `output.mp4`'s duration to 178.009s, and reverting it correctly
+restored 181.299s — the exact numbers from the Phase 8 frame-level
+verification, now reached by triggering through the toggle path instead
+of a manual export call. Second, the actual component source (bundled,
+unmodified) was driven through the same `jsdom` + `React.StrictMode`
+harness as the Phase 8 investigation: confirmed exactly one export
+triggers per toggle (not zero, not a duplicate), the "Re-exporting..."
+indicator and disabled buttons appear for the duration of the job, and
+the video's `src` carries a fresh cache-bust token afterward.
+
+**What still needs a human pass**, same limitation as every prior
+phase — no browser-automation tool is available here: actually watching
+the "Current output" player update after a real restore, confirming the
+Download link works, and the Preview player's real seek behavior (jsdom
+doesn't decode real media, so that specific check has only ever been
+verified by code review, never by playback).
+
 **Phase 8 (Edit Log UI): complete and approved.**
 
 New for this phase:
@@ -641,8 +687,10 @@ Built so far:
   the manifest works below), each with a Preview toggle (an inline
   `<video>` reading the original source file via `GET .../source/{name}`,
   seeked to the segment's span) and a Restore/Cut-again toggle, restored
-  entries visually marked. Re-export after a restore is Phase 9, not yet
-  wired up — see Known limitations.
+  entries visually marked. Every toggle auto-triggers a real re-export
+  and refreshes the "Current output" player shown at the top of the
+  view (Phase 9) — see Current Status above for why automatic was
+  chosen over an explicit button.
 
   **The toggle re-fetches the manifest fresh after every `PATCH` rather
   than merging the response into local state.** Caught during the Phase
@@ -690,15 +738,6 @@ Built so far:
   `naturalWidth/naturalHeight` on every click and refuses to record a
   coordinate (with a visible error, not a silent bad value) if they
   don't match within 1%.
-
-Planned pieces:
-
-- **Re-export after restore** (Phase 9) — the Edit Log's restore toggle
-  updates the manifest now, but nothing yet regenerates the final output
-  video from the updated `kept` set or lets you view the result from the
-  Edit Log. `POST /export` already exists and is idempotent against
-  whatever the manifest currently says (built in Phase 6), so this is
-  wiring a button/flow to it, not new pipeline logic.
 
 ## Setup
 
@@ -876,11 +915,6 @@ local timestamps happen to look adjacent.
   preview, that's a container-compatibility gap, not the endpoint
   serving the wrong bytes — flag it if it comes up and it can be
   addressed (e.g. transcoding on the fly) then, not preemptively.
-- **The Edit Log's restore toggle doesn't re-export yet.** It updates
-  the manifest's `status` for real (`PATCH .../manifest/segments/{id}`,
-  verified against a real batch), but nothing yet regenerates the final
-  output video from the change or lets you view the result from the
-  Edit Log — that's Phase 9, see Planned pieces above.
 - **Fixed during Phase 6 review: calibration wasn't reachable through the
   backend API at all**, so every API-triggered job silently ran with the
   Phase 3 at-bat boundary system disabled — see the Current Status
