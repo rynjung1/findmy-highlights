@@ -45,6 +45,16 @@ def upload(client, names_and_content):
     return r.json()["batch_id"]
 
 
+def post_process(client, batch_id, **body_overrides):
+    """POST /process with allow_uncalibrated=true by default — most
+    tests here aren't exercising the calibration gate itself and would
+    otherwise all need this repeated by hand. Tests that ARE about the
+    gate call client.post(...) directly instead."""
+    body = {"allow_uncalibrated": True}
+    body.update(body_overrides)
+    return client.post(f"/batches/{batch_id}/process", json=body)
+
+
 def fake_process_video_factory(segments_by_file=None, default_segments=((1.0, 3.0),),
                                calls=None):
     """Builds a fake replacing pipeline_runner.process_video: instant, no
@@ -231,14 +241,16 @@ def test_set_calibration_file_missing_fields_400(tmp_path):
 
 
 def test_no_calibration_means_process_video_gets_a_none_zone(tmp_path, process_video_calls):
-    """The degraded-path baseline this fix addresses: without calling
-    /calibration first, process_video must receive zone=None and the
-    resulting warning must be visible in the job — this is exactly what
-    the real smoke test surfaced before calibration was wired through."""
+    """The degraded-path baseline this fix addresses: given an explicit
+    allow_uncalibrated=true opt-in, process_video must receive zone=None
+    and the resulting warning must be visible in the job — this is
+    exactly what the real smoke test surfaced before calibration was
+    wired through. (Without the opt-in, this is now a 400 at trigger
+    time — see the calibration-gate tests below.)"""
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        r = client.post(f"/batches/{batch_id}/process")
+        r = post_process(client, batch_id)
         job = r.json()
         assert job["status"] == "completed"
         assert process_video_calls == [("clip.mkv", None)]
@@ -263,7 +275,7 @@ def test_calibration_is_actually_picked_up_by_detection(tmp_path, process_video_
                 "application/json")})
         assert cal_resp.status_code == 200
 
-        r = client.post(f"/batches/{batch_id}/process")
+        r = post_process(client, batch_id)
         job = r.json()
         assert job["status"] == "completed"
 
@@ -275,6 +287,154 @@ def test_calibration_is_actually_picked_up_by_detection(tmp_path, process_video_
         assert zone.radius_px == 280.0
         assert not job["warnings"], (
             f"expected no calibration warning once set, got: {job['warnings']}")
+
+
+# ---- calibration: malformed requests ----
+
+def test_set_calibration_unknown_batch_404(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches/does-not-exist/calibration",
+                        data={"x": "1", "y": "1"})
+        assert r.status_code == 404
+
+
+def test_set_calibration_out_of_bounds_coordinates_400(tmp_path):
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)  # 64x48
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "9999", "y": "24"})
+        assert r.status_code == 400
+        assert "outside this video's frame" in r.json()["detail"]
+
+        r2 = client.post(f"/batches/{batch_id}/calibration",
+                         data={"x": "-5", "y": "24"})
+        assert r2.status_code == 400
+
+
+def test_set_calibration_negative_radius_400(tmp_path):
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "10", "y": "10", "radius": "-5"})
+        assert r.status_code == 400
+
+
+def test_set_calibration_file_negative_radius_400(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.post(
+            f"/batches/{batch_id}/calibration",
+            files={"calibration_file": ("c.json", json.dumps({
+                "plate_xy": [10.0, 10.0], "zone_radius_px": -1.0}),
+                "application/json")})
+        assert r.status_code == 400
+
+
+def test_set_calibration_file_malformed_plate_xy_400(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.post(
+            f"/batches/{batch_id}/calibration",
+            files={"calibration_file": ("c.json", json.dumps({
+                "plate_xy": [10.0], "zone_radius_px": 5.0}),
+                "application/json")})
+        assert r.status_code == 400
+
+
+def test_set_calibration_after_detect_completed_409(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = post_process(client, batch_id)
+        assert r.json()["status"] == "completed"
+
+        r2 = client.post(f"/batches/{batch_id}/calibration",
+                         data={"x": "1", "y": "1"})
+        assert r2.status_code == 409
+        assert "already completed" in r2.json()["detail"]
+
+
+def test_set_calibration_while_detect_in_progress_409(tmp_path):
+    # same 409 path as "after completed" but for a job caught mid-run —
+    # written directly rather than raced against a real thread
+    from backend import jobs
+
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        bdir = tmp_path / "uploads" / batch_id
+        jobs.create_job(bdir, batch_id, "detect", status="in_progress")
+
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "1", "y": "1"})
+        assert r.status_code == 409
+        assert "in_progress" in r.json()["detail"]
+
+
+def test_set_calibration_still_allowed_after_failed_detect(tmp_path):
+    from backend import jobs
+
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        bdir = tmp_path / "uploads" / batch_id
+        jobs.create_job(bdir, batch_id, "detect", status="failed")
+
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "10", "y": "10"})
+        assert r.status_code == 200
+
+
+# ---- trigger-processing: calibration gate ----
+
+def test_process_without_calibration_is_blocked_400(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.post(f"/batches/{batch_id}/process")
+        assert r.status_code == 400
+        assert "no calibration set" in r.json()["detail"]
+        # confirms this is a real gate, not just a documented convention:
+        # no job was ever created for the rejected attempt
+        assert client.get(f"/batches/{batch_id}/jobs/detect").status_code == 404
+
+
+def test_process_allow_uncalibrated_opt_in_proceeds(tmp_path, process_video_calls):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.post(f"/batches/{batch_id}/process",
+                        json={"allow_uncalibrated": True})
+        assert r.status_code == 200
+        assert r.json()["status"] == "completed"
+        assert process_video_calls == [("clip.mkv", None)]
+
+
+def test_process_with_calibration_set_proceeds_without_flag(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        client.post(f"/batches/{batch_id}/calibration",
+                   files={"calibration_file": ("c.json", json.dumps({
+                       "plate_xy": [10.0, 10.0], "zone_radius_px": 5.0}),
+                       "application/json")})
+        r = client.post(f"/batches/{batch_id}/process")
+        assert r.status_code == 200
+        assert r.json()["status"] == "completed"
 
 
 # ---- trigger-processing: basic + malformed cases ----
@@ -290,7 +450,7 @@ def test_process_single_file_completes_with_manifest(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        r = client.post(f"/batches/{batch_id}/process")
+        r = post_process(client, batch_id)
         assert r.status_code == 200
         job = r.json()
         assert job["status"] == "completed"
@@ -305,9 +465,9 @@ def test_process_triggered_twice_on_same_batch_409(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        r1 = client.post(f"/batches/{batch_id}/process")
+        r1 = post_process(client, batch_id)
         assert r1.status_code == 200
-        r2 = client.post(f"/batches/{batch_id}/process")
+        r2 = post_process(client, batch_id)
         assert r2.status_code == 409
         assert "already triggered" in r2.json()["detail"]
 
@@ -324,7 +484,7 @@ def test_process_rejected_while_another_batch_is_active(tmp_path):
         bdir_a = tmp_path / "uploads" / batch_a
         jobs.create_job(bdir_a, batch_a, "detect", status="in_progress")
 
-        r = client.post(f"/batches/{batch_b}/process")
+        r = post_process(client, batch_b)
         assert r.status_code == 409
         assert "another job is already running" in r.json()["detail"]
         assert batch_a in r.json()["detail"]
@@ -351,7 +511,7 @@ def test_ambiguous_order_returns_needs_confirmation(tmp_path):
     with TestClient(app) as client:
         batch_id = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
-        r = client.post(f"/batches/{batch_id}/process")
+        r = post_process(client, batch_id)
         assert r.status_code == 200
         job = r.json()
         assert job["status"] == "needs_order_confirmation"
@@ -369,11 +529,11 @@ def test_needs_order_confirmation_does_not_block_other_batch(tmp_path):
     with TestClient(app) as client:
         stuck_batch = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
-        r1 = client.post(f"/batches/{stuck_batch}/process")
+        r1 = post_process(client, stuck_batch)
         assert r1.json()["status"] == "needs_order_confirmation"
 
         other_batch = upload(client, [("clip.mkv", b"x")])
-        r2 = client.post(f"/batches/{other_batch}/process")
+        r2 = post_process(client, other_batch)
         assert r2.status_code == 200
         assert r2.json()["status"] == "completed"
 
@@ -388,7 +548,7 @@ def test_confirm_order_starts_processing(tmp_path):
     with TestClient(app) as client:
         batch_id = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
-        client.post(f"/batches/{batch_id}/process")
+        post_process(client, batch_id)
 
         r = client.post(f"/batches/{batch_id}/order",
                         json={"order": ["a.mp4", "b.mp4"]})
@@ -410,7 +570,7 @@ def test_confirm_order_mismatched_files_400(tmp_path):
     with TestClient(app) as client:
         batch_id = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
-        client.post(f"/batches/{batch_id}/process")
+        post_process(client, batch_id)
 
         r = client.post(f"/batches/{batch_id}/order",
                         json={"order": ["a.mp4", "c.mp4"]})
@@ -467,7 +627,7 @@ def test_update_manifest_unknown_segment_404(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        client.post(f"/batches/{batch_id}/process")
+        post_process(client, batch_id)
         r = client.patch(f"/batches/{batch_id}/manifest/segments/seg_999",
                          json={"status": "kept"})
         assert r.status_code == 404
@@ -477,7 +637,7 @@ def test_update_manifest_invalid_status_400(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        client.post(f"/batches/{batch_id}/process")
+        post_process(client, batch_id)
         m = client.get(f"/batches/{batch_id}/manifest").json()
         seg_id = m["segments"][0]["id"]
         r = client.patch(f"/batches/{batch_id}/manifest/segments/{seg_id}",
@@ -489,7 +649,7 @@ def test_update_manifest_flips_status_and_persists(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        client.post(f"/batches/{batch_id}/process")
+        post_process(client, batch_id)
         m = client.get(f"/batches/{batch_id}/manifest").json()
         cut = next(s for s in m["segments"] if s["status"] == "cut")
 
@@ -517,7 +677,7 @@ def test_export_completes_and_writes_output(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        client.post(f"/batches/{batch_id}/process")
+        post_process(client, batch_id)
         r = client.post(f"/batches/{batch_id}/export")
         assert r.status_code == 200
         job = r.json()
@@ -530,7 +690,7 @@ def test_export_triggered_twice_409(tmp_path):
     app = make_app(tmp_path)
     with TestClient(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        client.post(f"/batches/{batch_id}/process")
+        post_process(client, batch_id)
         r1 = client.post(f"/batches/{batch_id}/export")
         assert r1.status_code == 200
         r2 = client.post(f"/batches/{batch_id}/export")

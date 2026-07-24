@@ -22,7 +22,7 @@ detection → play extension → padding), the manifest, multi-file handling,
 stitching kept segments into one finished output video, and now a FastAPI
 backend wrapping all of it (upload, calibration, trigger-processing,
 progress, manifest read/update, re-export) all work end-to-end and are
-covered by 193 unit tests + 2 e2e tests (`pytest tests/` and `pytest
+covered by 204 unit tests + 2 e2e tests (`pytest tests/` and `pytest
 tests/ -m e2e`).
 
 **Phase 6 (backend API):** confirmed against a real running server (not
@@ -59,6 +59,23 @@ directly by inspecting the actual `zone` object `process_video` was
 called with (not inferred from the warnings list being empty, which a
 careless fake could satisfy by accident either way).
 
+**Second review round, also fixed before sign-off:** the calibration fix
+above still let a batch start processing uncalibrated by default —
+finding out only from a completed job's `warnings` field is expensive
+when a real run takes 37 minutes. `POST /batches/{id}/process` now
+checks for `calibration.json` before doing anything else and returns a
+400 immediately if it's missing, unless the caller explicitly passes
+`allow_uncalibrated: true` — a deliberate, visible opt-in instead of a
+silent default, while still preserving the CLI's existing behavior that
+calibration is not force-required (some camera setups genuinely can't
+frame the plate). Verified on the real running server, not just in
+tests: `curl`ing `/process` on an uncalibrated batch returns the 400
+immediately; the same call with `allow_uncalibrated: true` returns 200
+and a real job starts. Setting calibration is itself now rejected
+(409) once the batch's detect job is pending, in_progress, or completed
+— changing it at that point would either race an already-running job or
+silently do nothing for one that's already finished.
+
 Endpoint-level tests (`tests/test_backend_api.py`, `tests/test_jobs.py`,
 `tests/test_storage.py`) use a fast fake pipeline and cover: every
 malformed-request case the spec calls out (updating a manifest that
@@ -68,7 +85,11 @@ single-job-at-a-time lock (a second batch is correctly rejected while one
 is active, but a batch stuck on `needs_order_confirmation` correctly does
 NOT block others), the ambiguous-order HTTP flow against real
 ffmpeg-generated multi-file clips, the calibration endpoint (both input
-modes, and the malformed-file cases), and the startup interrupt sweep.
+modes; malformed files; out-of-bounds coordinates; negative radius;
+unknown batch; setting calibration after the detect job is in_progress
+or completed, both rejected), the trigger-processing calibration gate
+(blocked by default, the `allow_uncalibrated` opt-in, and proceeding
+normally once calibration is set), and the startup interrupt sweep.
 
 **Phase 5 full-length checkpoint (per the project spec's requirement to
 test a real 30-60+ min video before this phase is considered done):** ran
@@ -391,8 +412,20 @@ Built so far:
   against the batch's own first video. `pipeline.calibration.build_calibration()`/
   `save_calibration()` are shared by both `scripts/calibrate.py` and this
   endpoint specifically so the schema can't drift between the CLI and API
-  paths. There's no in-browser click-to-calibrate flow yet — that's
+  paths. Coordinates are validated against the video's actual frame size
+  (rejecting anything outside it) and radius must be positive; setting
+  calibration is rejected once the batch's detect job is
+  pending/in_progress/completed, since it can no longer take effect at
+  that point. There's no in-browser click-to-calibrate flow yet — that's
   Phase 7/8's job, built against this endpoint's coordinate mode.
+
+  **`POST /batches/{id}/process` requires calibration to have been set**
+  (400 if not) **unless the caller explicitly passes
+  `allow_uncalibrated: true`.** This exists specifically so a missing
+  calibration is caught in milliseconds at trigger time, not discovered
+  37 minutes later in a completed job's `warnings` field — the CLI's
+  softer "warn and continue" behavior is preserved, but only as an
+  explicit, visible choice rather than a silent default.
 
 Planned pieces:
 

@@ -35,6 +35,17 @@ from backend import jobs, storage
 from backend.pipeline_runner import run_detect_job, run_export_job
 
 
+class ProcessBody(BaseModel):
+    order: list[str] | None = None
+    # Calibration is checked at trigger time, not left to surface only in
+    # a completed job's warnings field — a real run takes tens of
+    # minutes, so discovering "oh, that was uncalibrated" after the fact
+    # is expensive. Missing calibration is a 400 unless this is set,
+    # which makes running without plate-occupancy signals an explicit,
+    # visible choice instead of a silent default.
+    allow_uncalibrated: bool = False
+
+
 class OrderBody(BaseModel):
     order: list[str]
 
@@ -127,15 +138,24 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         there's no in-browser interactive click flow here, that's
         Phase 7/8's job to build against this endpoint).
 
-        Optional: /process still runs without this being called first
-        (matching the CLI, where calibration is opt-in and a missing one
-        only disables the plate-occupancy signal with a warning) — but
-        skipping it silently drops the Phase 3 at-bat boundary logic
-        down to motion + person-detection only, so callers should treat
-        this as a required setup step in practice, not a truly optional
-        extra."""
+        /process now requires this to have been called first, unless the
+        caller explicitly passes allow_uncalibrated=true — see
+        trigger_process. Setting calibration is rejected once the detect
+        job has moved past the point where it would matter (pending,
+        in_progress, or completed): it would either race an
+        already-running job or silently do nothing for one that's
+        already done, which is more confusing than a clear error telling
+        the caller it's too late."""
         bdir = _batch_dir(batch_id)
         dest = bdir / "calibration.json"
+
+        existing_detect = jobs.load_job(bdir, "detect")
+        if existing_detect and existing_detect["status"] in (
+                "pending", "in_progress", "completed"):
+            raise HTTPException(
+                409, f"cannot set calibration: this batch's detect job is "
+                     f"already {existing_detect['status']} — calibration "
+                     f"must be set before triggering processing")
 
         if calibration_file is not None:
             if x is not None or y is not None or radius is not None:
@@ -152,6 +172,14 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
                 raise HTTPException(
                     400, f"calibration_file missing required field(s): "
                          f"{missing}")
+            plate_xy = calibration["plate_xy"]
+            if not (isinstance(plate_xy, list) and len(plate_xy) == 2):
+                raise HTTPException(
+                    400, "calibration_file's plate_xy must be a 2-element "
+                         "[x, y]")
+            if calibration["zone_radius_px"] <= 0:
+                raise HTTPException(
+                    400, "calibration_file's zone_radius_px must be positive")
             save_calibration(dest, calibration)
             return calibration
 
@@ -159,6 +187,9 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
             raise HTTPException(
                 400, "provide either calibration_file, or both x and y "
                      "plate pixel coordinates")
+        if radius is not None and radius <= 0:
+            raise HTTPException(
+                400, f"radius must be positive, got {radius}")
 
         names = _batch_file_names(bdir)
         video_path = bdir / names[0]
@@ -167,18 +198,33 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+        w, h = frame_size
+        if not (0 <= x <= w) or not (0 <= y <= h):
+            raise HTTPException(
+                400, f"plate coordinates ({x}, {y}) are outside this "
+                     f"video's frame ({w}x{h})")
+
         calibration = build_calibration(frame_size, (x, y), radius,
                                         created_from=names[0])
         save_calibration(dest, calibration)
         return calibration
 
     @app.post("/batches/{batch_id}/process")
-    def trigger_process(batch_id: str, body: OrderBody | None = None):
+    def trigger_process(batch_id: str, body: ProcessBody | None = None):
         bdir = _batch_dir(batch_id)
         names = _batch_file_names(bdir)
         paths = [str(bdir / n) for n in names]
 
         _reject_if_busy(bdir, batch_id, "detect")
+
+        allow_uncalibrated = body.allow_uncalibrated if body is not None else False
+        if not (bdir / "calibration.json").exists() and not allow_uncalibrated:
+            raise HTTPException(
+                400, f"no calibration set for this batch — POST "
+                     f"/batches/{batch_id}/calibration first, or pass "
+                     f"allow_uncalibrated=true to proceed without "
+                     f"plate-occupancy signals (this disables the at-bat "
+                     f"boundary logic, not just a minor quality knob)")
 
         if body is not None and body.order:
             try:
