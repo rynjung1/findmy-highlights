@@ -4,6 +4,7 @@ import CalibrateStep from './components/CalibrateStep'
 import OrderConfirmStep from './components/OrderConfirmStep'
 import ProcessingStep from './components/ProcessingStep'
 import ResultStep from './components/ResultStep'
+import EditLogView from './components/EditLogView'
 import { getJob, triggerProcess } from './api'
 
 const STORAGE_KEY = 'fmh_batch_id'
@@ -11,6 +12,7 @@ const STORAGE_KEY = 'fmh_batch_id'
 // Stages: loading -> upload -> calibrate -> [order_confirm ->] processing -> done
 //                                                                        \-> error
 export default function App() {
+  const [view, setView] = useState('home') // home | editlog -- independent of the stage machine below
   const [stage, setStage] = useState('loading')
   const [batchId, setBatchId] = useState(null)
   const [orderInfo, setOrderInfo] = useState(null)
@@ -71,12 +73,20 @@ export default function App() {
   }
 
   async function handleCalibrated() {
-    setStage('processing')
+    // Stage flips to 'processing' only AFTER the trigger call resolves,
+    // not before it's even sent -- ProcessingStep starts polling
+    // GET /jobs/detect the instant it mounts, so mounting it earlier
+    // guarantees that first poll asks for a job that doesn't exist on
+    // the server yet (a real, always-reproducible 404, not a rare
+    // race). CalibrateStep's own "Saving..." button state already
+    // covers this brief extra wait, so there's no UX gap.
     try {
       const job = await triggerProcess(batchId)
       if (job.status === 'needs_order_confirmation') {
         setOrderInfo({ suggestedOrder: job.suggested_order, reason: job.order_reason })
         setStage('order_confirm')
+      } else {
+        setStage('processing')
       }
       // otherwise ProcessingStep's own polling takes over from here
     } catch (err) {
@@ -101,42 +111,64 @@ export default function App() {
     <div style={{ maxWidth: 900, margin: '40px auto', fontFamily: 'sans-serif', padding: 16 }}>
       <h1>Find My Highlights</h1>
 
-      {stage === 'loading' && <p>Loading...</p>}
-      {stage === 'upload' && <UploadStep onUploaded={handleUploaded} />}
-      {stage === 'calibrate' && batchId && (
-        <CalibrateStep batchId={batchId} onCalibrated={handleCalibrated} />
-      )}
-      {stage === 'order_confirm' && batchId && orderInfo && (
-        <OrderConfirmStep
-          batchId={batchId}
-          suggestedOrder={orderInfo.suggestedOrder}
-          reason={orderInfo.reason}
-          onConfirmed={handleOrderConfirmed}
-        />
-      )}
-      {stage === 'processing' && batchId && (
-        <ProcessingStep
-          batchId={batchId}
-          onDone={() => setStage('done')}
-          onError={(msg) => {
-            setErrorMessage(msg)
-            setStage('error')
-          }}
-        />
-      )}
-      {stage === 'done' && batchId && <ResultStep batchId={batchId} />}
-      {stage === 'error' && (
-        <div>
-          <p style={{ color: 'red' }}>{errorMessage}</p>
-        </div>
-      )}
+      <nav style={{ marginBottom: 24, borderBottom: '1px solid #ddd', paddingBottom: 12 }}>
+        <button
+          className={view === 'home' ? '' : 'secondary'}
+          onClick={() => setView('home')}
+          style={{ marginRight: 8 }}
+        >
+          Home
+        </button>
+        <button
+          className={view === 'editlog' ? '' : 'secondary'}
+          onClick={() => setView('editlog')}
+        >
+          Edit Log
+        </button>
+      </nav>
 
-      {stage !== 'upload' && stage !== 'loading' && (
-        <p style={{ marginTop: 24 }}>
-          <button className="secondary" onClick={handleStartOver}>
-            Start over with a new upload
-          </button>
-        </p>
+      {view === 'editlog' && <EditLogView batchId={batchId} />}
+
+      {view === 'home' && (
+        <>
+          {stage === 'loading' && <p>Loading...</p>}
+          {stage === 'upload' && <UploadStep onUploaded={handleUploaded} />}
+          {stage === 'calibrate' && batchId && (
+            <CalibrateStep batchId={batchId} onCalibrated={handleCalibrated} />
+          )}
+          {stage === 'order_confirm' && batchId && orderInfo && (
+            <OrderConfirmStep
+              batchId={batchId}
+              suggestedOrder={orderInfo.suggestedOrder}
+              reason={orderInfo.reason}
+              onConfirmed={handleOrderConfirmed}
+            />
+          )}
+          {stage === 'processing' && batchId && (
+            <ProcessingStep
+              batchId={batchId}
+              onDone={() => setStage('done')}
+              onError={(msg) => {
+                setErrorMessage(msg)
+                setStage('error')
+              }}
+            />
+          )}
+          {stage === 'done' && batchId && <ResultStep batchId={batchId} />}
+          {stage === 'error' && (
+            <div>
+              <p style={{ color: 'red' }}>{errorMessage}</p>
+            </div>
+          )}
+
+          {stage !== 'upload' && stage !== 'loading' && (
+            <p style={{ marginTop: 24 }}>
+              <button className="secondary" onClick={handleStartOver}>
+                Start over with a new upload
+              </button>
+            </p>
+          )}
+        </>
       )}
     </div>
   )

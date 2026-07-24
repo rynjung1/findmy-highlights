@@ -83,3 +83,16 @@ export async function getManifest(batchId) {
 export function outputUrl(batchId) {
   return `/batches/${batchId}/output`
 }
+
+export function sourceUrl(batchId, filename) {
+  return `/batches/${batchId}/source/${encodeURIComponent(filename)}`
+}
+
+export async function updateSegmentStatus(batchId, segmentId, status) {
+  const res = await request(`/batches/${batchId}/manifest/segments/${segmentId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  })
+  return res.json()
+}

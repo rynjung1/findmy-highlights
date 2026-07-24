@@ -18,6 +18,7 @@ limitations) — that's a deliberate scope cut, not an oversight.
 """
 
 import json
+import mimetypes
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -405,6 +406,29 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         # FileResponse handles Range requests itself (needed for a
         # <video> player to seek without downloading the whole file first)
         return FileResponse(p, media_type="video/mp4", filename="highlights.mp4")
+
+    @app.get("/batches/{batch_id}/source/{filename}")
+    def get_source(batch_id: str, filename: str):
+        """Serves one of the batch's own original uploaded source files,
+        for the Edit Log's cut-segment preview (seek within the source
+        file rather than exporting a physical clip per candidate
+        segment, per the project spec). `filename` is a client-supplied
+        URL segment, unlike every other endpoint here, so it's validated
+        against `files.json` -- the batch's own recorded file list, the
+        same source of truth get_preview already trusts -- rather than
+        joined onto bdir directly; a bare '..' needs no slash to escape
+        one directory level, so this can't be a suffix/character
+        blocklist. The resolved-parent check is defense in depth on top
+        of that allowlist, not a substitute for it."""
+        bdir = _batch_dir(batch_id)
+        if filename not in _batch_file_names(bdir):
+            raise HTTPException(404, f"no such source file in this batch: {filename}")
+        p = (bdir / filename).resolve()
+        if p.parent != bdir.resolve() or not p.exists():
+            raise HTTPException(404, f"no such source file in this batch: {filename}")
+        media_type, _ = mimetypes.guess_type(filename)
+        return FileResponse(p, media_type=media_type or "application/octet-stream",
+                            filename=filename)
 
     return app
 

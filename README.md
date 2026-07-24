@@ -17,15 +17,13 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 
 ## Current status
 
-**Phases 0-6 complete and approved.** Detection pipeline (motion → person
+**Phases 0-7 complete and approved.** Detection pipeline (motion → person
 detection → play extension → padding), the manifest, multi-file handling,
-stitching kept segments into one finished output video, and a FastAPI
+stitching kept segments into one finished output video, a FastAPI
 backend wrapping all of it (upload, calibration, trigger-processing,
-progress, manifest read/update, re-export) all work end-to-end and are
-covered by 220 unit tests + 2 e2e tests (`pytest tests/` and `pytest
-tests/ -m e2e`).
-
-**Phases 0-7 complete and approved**, including the Phase 7 manual
+progress, manifest read/update, re-export), and the Home/Upload frontend
+all work end-to-end and are covered by 225 unit tests + 2 e2e tests
+(`pytest tests/` and `pytest tests/ -m e2e`), including the Phase 7 manual
 browser smoke test (upload → calibrate → process → watch, a real
 end-to-end pass in an actual browser, not just the proxy-level HTTP
 checks below).
@@ -112,6 +110,100 @@ upload→calibrate→process→watch flow start to finish, clicking the
 preview image and confirming the marker (small offset noted above and
 in Known limitations, not a functional blocker), and processing showing
 live stage progress. See "How to run it" for how to start both servers.
+
+**Phase 8 (Edit Log UI): complete and approved.**
+
+New for this phase:
+- `GET /batches/{id}/source/{filename}` — serves one of the batch's own
+  original uploaded files (range-request support, same as `/output`),
+  for the Edit Log's "preview a cut segment by seeking into the source
+  file" requirement rather than exporting a physical clip per candidate.
+  `{filename}` is the first endpoint here where the trailing path
+  component is a client-supplied URL segment rather than a hardcoded
+  literal, so it's checked against `files.json` (the batch's own
+  recorded file list) as an allowlist, not a traversal-character
+  blocklist — a bare `..` needs no slash to climb one directory, and a
+  regex/character-based check would also miss encoded bypasses
+  (`%2e%2e`), which an exact-match allowlist can't be fooled by
+  regardless of encoding. A resolved-parent-path check backs that up.
+  Five tests cover it, including one that confirms `%2e%2e` actually
+  reaches the handler (a literal bare `..` doesn't — httpx, like a real
+  browser, collapses it during URL construction before the request is
+  even sent, so that alone would've been a test that passes for the
+  wrong reason) and one confirming the allowlist is scoped per-batch,
+  not just "does a same-named file exist somewhere under the resolved
+  path."
+- `EditLogView.jsx` — lists every segment detection ever cut. Filters on
+  `origin === "gap"` rather than current `status`: `origin` is set once
+  at manifest build time and never changes (see `pipeline/manifest.py`),
+  so it's the permanent "was this ever a cut candidate" marker,
+  independent of whether it's since been restored — which is exactly
+  what lets restored and still-cut entries both show up, visually
+  distinguished (green left-border + "Restored" badge vs. plain), per
+  the spec. Each entry has a Preview toggle (an inline `<video>` seeked
+  to the segment's `start_s` via `loadedmetadata`, auto-pausing at
+  `end_s` via `timeupdate` — bounded playback of just that span, not the
+  whole source file) and a Restore/Cut-again toggle (`PATCH
+  .../manifest/segments/{id}`, already built in Phase 6). Handles no
+  batch yet and no manifest yet as distinct non-error states, not a
+  crash.
+- Nav bar (`App.jsx`) — Home / Edit Log, independent of the existing
+  upload→calibrate→...→done stage machine, which is now nested under the
+  Home tab unchanged. Switching tabs doesn't reset in-progress upload
+  state.
+
+**What's verified:** the production build succeeds. Every endpoint the
+Edit Log depends on was exercised for real against the actual clip_300
+batch from the Phase 7 manual pass (not a fake) — `GET manifest`,
+`PATCH .../segments/{id}`, and `GET .../source/{filename}` (206 Partial
+Content) all confirmed working directly. The manual browser pass then
+covered the rest: restore toggle visual state, preview playback, and
+list rendering, plus one real bug it caught (below).
+
+**Caught during the manual pass, root-caused and fixed:** toggling a
+segment restore → cut-again showed the *first* toggle's visual result
+correctly but not the second — the backend was confirmed correct at
+every step (`PATCH` responses and the manifest itself both showed the
+right final status), so this was specifically a client-side rendering
+question. Investigated by bundling the actual `EditLogView.jsx` source
+and driving it through `jsdom` + `@testing-library/react` under
+`React.StrictMode` (matching `main.jsx` exactly) across seven scenarios
+— sequential toggles, multi-row, a rapid no-wait-between double-click,
+interleaved different-row toggles, and toggling with the preview player
+open — none reproduced it. Rather than keep guessing at an
+unreproducible cause, `handleToggle` was rewritten to eliminate the
+entire bug class regardless of root cause: it now does a fresh
+`GET .../manifest` after every successful `PATCH` and fully replaces
+local state from that response, instead of merging the `PATCH`'s own
+response into local state. A `console.log` was added at the exact
+moment a toggle is clicked, before any request goes out, specifically
+so a real click could be told apart from a request just being hard to
+spot in a busy Network tab. Confirmed resolved on a clean retest:
+Console showed both clicks firing, Network showed both `PATCH`
+requests returning 200 with a manifest refetch after each, and the page
+now visually shows the correct final state — the original symptom was
+stale visual state in an already-open tab from before the refetch fix
+landed, not a live bug in the current code.
+
+**End-to-end proof the mechanism affects real video, not just JSON**
+(requested specifically, since Phase 9 wasn't built yet to demonstrate
+this through the UI): against the real clip_300 batch, restored
+`seg_002` via `PATCH`, triggered a real `POST /export`, and confirmed
+two ways — not just a duration number. First, a real finding worth
+recording: total output duration went *down* (181.3s → 178.0s) despite
+restoring content, because merging the restored span with its two
+kept neighbors removed a keyframe-snap boundary's worth of the slack
+documented under Stitching below; `scripts/stitch.py`'s own "requested
+output duration" line confirmed the manifest-level accounting was
+still correct (170.5s → 172.3s, exactly the restored span's length),
+which is why duration alone isn't proof and a frame check was needed.
+Second, extracted a real frame at the corresponding output timestamp
+and compared it to the same timestamp in the original source: same
+field, same players, same batter mid-swing, same clouds — the restored
+segment's actual pixels are in the output. Cut it again, re-exported:
+duration returned to exactly 181.299s (byte-identical to the original
+baseline), and the same frame position now showed different, later
+content — the restored footage was genuinely gone, not just relabeled.
 
 **Phase 6 (backend API):** confirmed against a real running server (not
 just FastAPI's in-process test client) — `scripts/smoke_api.py` uploads a
@@ -535,11 +627,39 @@ Built so far:
 
 - **Frontend** (`frontend/`, React + Vite, own `package.json`/lockfile
   per the Phase 0 rule to keep Node and Python dependencies separate) —
-  a linear flow through `App.jsx`'s stage state machine: upload → click
-  to calibrate → (order confirmation, only if needed) → progress →
-  player + download. No pipeline or business logic here either —
-  `src/api.js` is a thin fetch wrapper, one function per backend
-  endpoint.
+  a top-level Home / Edit Log nav (`App.jsx`), independent of Home's own
+  linear stage machine: upload → click to calibrate → (order
+  confirmation, only if needed) → progress → player + download.
+  Switching to Edit Log and back doesn't reset in-progress upload state,
+  since it's a separate `view` toggle, not a stage. No pipeline or
+  business logic here either — `src/api.js` is a thin fetch wrapper, one
+  function per backend endpoint.
+
+  **Edit Log** (`EditLogView.jsx`) — lists every segment detection ever
+  cut (filtered on the manifest's `origin === "gap"`, which is set once
+  at build time and never changes, independent of `status` — see How
+  the manifest works below), each with a Preview toggle (an inline
+  `<video>` reading the original source file via `GET .../source/{name}`,
+  seeked to the segment's span) and a Restore/Cut-again toggle, restored
+  entries visually marked. Re-export after a restore is Phase 9, not yet
+  wired up — see Known limitations.
+
+  **The toggle re-fetches the manifest fresh after every `PATCH` rather
+  than merging the response into local state.** Caught during the Phase
+  8 manual pass: a restore → cut-again sequence sometimes didn't show
+  the second toggle's result visually, even though the backend was
+  confirmed correct at every step. Root-caused via a `jsdom` +
+  `React.StrictMode` harness against the actual component source across
+  seven scenarios (multi-row, rapid double-click, interleaved toggles,
+  preview open) — none reproduced it, so rather than leave an
+  unreproducible local-merge path in place, `handleToggle` was rewritten
+  to always re-`GET .../manifest` and fully replace state from that
+  response, removing the "local state can drift from server truth" bug
+  class outright regardless of the exact original cause (later confirmed
+  on retest to be stale visual state in an already-open tab, not a live
+  bug). A `console.log` fires the instant a toggle is clicked, before
+  any request goes out, to make a real click unambiguous from a request
+  just being hard to spot in a busy Network tab.
 
   **Mid-processing browser close/reopen is handled by design, not as an
   afterthought.** The only client state kept is the batch id
@@ -573,8 +693,12 @@ Built so far:
 
 Planned pieces:
 
-- **Frontend Edit Log view** — review cut segments, preview them, restore any
-  that were wrongly trimmed, and re-export.
+- **Re-export after restore** (Phase 9) — the Edit Log's restore toggle
+  updates the manifest now, but nothing yet regenerates the final output
+  video from the updated `kept` set or lets you view the result from the
+  Edit Log. `POST /export` already exists and is idempotent against
+  whatever the manifest currently says (built in Phase 6), so this is
+  wiring a button/flow to it, not new pipeline logic.
 
 ## Setup
 
@@ -713,11 +837,16 @@ listed exactly once, either as a detected `kept` segment or a `cut` gap
 between them — so the manifest's segments always cover the whole timeline
 with no overlaps or holes. Each entry has an id, a source file, a
 timestamp range (both as an `"HH:MM:SS.mmm"` string and as float seconds),
-a detection score, and a `status` of `kept` or `cut`.
+a detection score, a `status` of `kept` or `cut`, and an `origin` of
+`"detected"` or `"gap"` recording how the entry was created — set once
+at build time and never changed afterward, unlike `status`. This is what
+lets the Edit Log (Phase 8) list "every segment that was ever cut"
+correctly even after some have been restored: `origin === "gap"` is a
+permanent marker, `status` is the current (possibly restored) state.
 
-`set_status()` flips a segment's status (the future Edit Log's restore
-action) and `kept_spans()` returns the current kept spans with adjacent
-ones merged — that's what a re-export would render. Nothing here mutates
+`set_status()` flips a segment's status (the Edit Log's restore action)
+and `kept_spans()` returns the current kept spans with adjacent ones
+merged — that's what a re-export would render. Nothing here mutates
 video files; the manifest is the only thing that changes on restore.
 
 For multiple files, `build_multi_file_manifest()` builds one manifest
@@ -730,6 +859,28 @@ local timestamps happen to look adjacent.
 
 ## Known limitations / non-goals for this version
 
+- **Fixed: `ProcessingStep` could poll for a detect job before it
+  existed, logging a real (if harmless) 404.** `App.jsx`'s
+  `handleCalibrated` called `setStage('processing')` — which mounts
+  `ProcessingStep` and starts it polling `GET .../jobs/detect`
+  immediately — *before* even sending the `POST /process` request that
+  creates that job, not after. Not a rare race; guaranteed on every run
+  until the stage flip was moved to after `triggerProcess` resolves.
+  `CalibrateStep`'s own "Saving..." button state already covers the
+  brief extra wait, so there's no UX gap.
+- **The Edit Log's cut-segment preview serves the original uploaded file
+  as-is (e.g. `.mkv`), not a re-encoded `.mp4`.** Not tested against
+  every browser: Chromium-based browsers generally play H.264-in-MKV
+  fine, but Safari does not support the MKV container natively
+  regardless of the codecs inside it. If a browser fails to play a
+  preview, that's a container-compatibility gap, not the endpoint
+  serving the wrong bytes — flag it if it comes up and it can be
+  addressed (e.g. transcoding on the fly) then, not preemptively.
+- **The Edit Log's restore toggle doesn't re-export yet.** It updates
+  the manifest's `status` for real (`PATCH .../manifest/segments/{id}`,
+  verified against a real batch), but nothing yet regenerates the final
+  output video from the change or lets you view the result from the
+  Edit Log — that's Phase 9, see Planned pieces above.
 - **Fixed during Phase 6 review: calibration wasn't reachable through the
   backend API at all**, so every API-triggered job silently ran with the
   Phase 3 at-bat boundary system disabled — see the Current Status
@@ -926,3 +1077,11 @@ local timestamps happen to look adjacent.
   clip, it uploads, uploads calibration, triggers real detection, polls
   real stage transitions, restores a real cut segment, re-exports, and
   confirms the stitched output plays — see "How to run it" above.
+- **Source-file endpoint tests** (in `tests/test_backend_api.py`, Phase 8)
+  cover the allowlist specifically: serving a real upload, an unknown
+  batch, a filename the batch doesn't have, a percent-encoded `%2e%2e`
+  (the actual adversarial case — a literal bare `..` never reaches the
+  server for real, since httpx/browsers collapse it during URL
+  construction before the request is sent, so a test using the bare
+  form would pass for the wrong reason), and that two batches with an
+  identically-named file don't leak into each other.

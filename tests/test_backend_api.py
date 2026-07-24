@@ -921,6 +921,67 @@ def test_get_output_unknown_batch_404(tmp_path):
         assert r.status_code == 404
 
 
+# ---- source file serving (Edit Log cut-segment preview) ----
+
+def test_get_source_serves_original_upload(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"original bytes")])
+        r = client.get(f"/batches/{batch_id}/source/clip.mkv")
+        assert r.status_code == 200
+        assert r.content == b"original bytes"
+
+
+def test_get_source_unknown_batch_404(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.get("/batches/does-not-exist/source/clip.mkv")
+        assert r.status_code == 404
+
+
+def test_get_source_filename_not_in_batch_404(tmp_path):
+    # a real filename, just not one this batch actually has -- must not
+    # fall back to trying to read it off disk anyway
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.get(f"/batches/{batch_id}/source/other.mkv")
+        assert r.status_code == 404
+
+
+def test_get_source_rejects_traversal_filename_404(tmp_path):
+    # a literal ".." never reaches the server for real -- httpx (like a
+    # real browser) collapses it during URL normalization before the
+    # request is even sent, so testing with a bare ".." would pass for
+    # the wrong reason. %2e%2e is the actual adversarial case: it
+    # survives client-side normalization (encoded dot-segments aren't
+    # collapsed) and only decodes to ".." after Starlette's routing has
+    # already matched it into `filename` -- this is what proves the
+    # endpoint's own allowlist check is the real defense, not an
+    # accident of how the test client builds URLs.
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.get(f"/batches/{batch_id}/source/%2e%2e")
+        assert r.status_code == 404
+        assert r.json()["detail"] == "no such source file in this batch: .."
+
+
+def test_get_source_does_not_leak_a_same_named_file_outside_the_batch(tmp_path):
+    # even if a file with the "right" name exists one directory up (as
+    # it would for every other batch's uploads under the same uploads
+    # root), the allowlist is per-batch (files.json), not just "does a
+    # file with this name exist somewhere reachable from bdir"
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_a = upload(client, [("shared_name.mkv", b"batch A bytes")])
+        batch_b = upload(client, [("shared_name.mkv", b"batch B bytes")])
+        r = client.get(f"/batches/{batch_a}/source/shared_name.mkv")
+        assert r.content == b"batch A bytes"
+        r = client.get(f"/batches/{batch_b}/source/shared_name.mkv")
+        assert r.content == b"batch B bytes"
+
+
 # ---- startup interrupt sweep ----
 
 def test_startup_sweep_marks_stale_in_progress_job_interrupted(tmp_path):
