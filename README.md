@@ -17,16 +17,41 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 
 ## Current status
 
-**Phases 0-4 complete and approved.** Detection pipeline (motion → person
-detection → play extension → padding), the manifest, and multi-file
-handling all work end-to-end and are covered by 120 unit tests + 2 e2e
-tests (`pytest tests/` and `pytest tests/ -m e2e`). Phase 5 (stitch kept
-segments into one output video) is next and hasn't been started.
+**Phases 0-5 complete and approved.** Detection pipeline (motion → person
+detection → play extension → padding), the manifest, multi-file handling,
+and now stitching kept segments into one finished output video all work
+end-to-end and are covered by 146 unit tests + 2 e2e tests (`pytest
+tests/` and `pytest tests/ -m e2e`).
+
+**Phase 5 full-length checkpoint (per the project spec's requirement to
+test a real 30-60+ min video before this phase is considered done):** ran
+the complete pipeline — detection through stitching — against a real
+67.5-minute (4049.9s) game recording (`reference_clips/full_game.mkv`,
+1920x1080).
+- Detection: 37.4 minutes wall-clock (0.55x realtime), peak memory ~969
+  MiB resident (2.15 GiB peak footprint per macOS's accounting) — stayed
+  bounded throughout, no runaway growth. 120 candidate segments, 84% of
+  the game (3391.7s) flagged kept.
+- Stitching: 8.2s wall-clock for all 120 spans (stream-copy path, no
+  re-encode needed — single source file). Output: 1.42 GB, fully
+  decodable (180,690 frames, matching the expected frame count for its
+  duration almost exactly — no corruption). Rendered duration (3769.5s)
+  came in 377.8s longer than the manifest's requested 3391.7s (3.15s
+  average extra per span, 6.17s max) — verified as stream-copy
+  keyframe-snap slack, never lost or duplicated content (see the
+  Stitching section below for the root cause, checked per-span against
+  this file's real 6.006s keyframe interval, not just asserted).
+- Visual spot-check (since there's no ground truth for this file): sampled
+  frames across the output — 5 spread through the full timeline plus the
+  start/middle/end of the 3 longest segments (144s, 135s, 106s). All show
+  real live action (batters mid-stance, fielders positioned and moving, one
+  frame catches a live pitch mid-flight) — this is genuinely catching real
+  plays, not just avoiding a crash. One honest caveat: the tail end of the
+  144s segment shows a batter walking toward the plate with the bat
+  lowered, not swinging — a borderline dead-time moment kept in per the
+  priority rule's bias toward not cutting early, not a detection failure.
 
 Open items:
-- No full-length (30-60+ min) real video has been run through the
-  pipeline yet — needed before Phase 5's checkpoint to catch
-  performance/memory issues, per the project spec.
 - No committed multi-file regression fixture. Multi-file logic was
   validated against real footage the user supplied directly (not
   committed — video files are gitignored), so a fresh clone can run the
@@ -199,6 +224,65 @@ Built so far:
   several) — print candidate segments as timestamps (or JSON with
   `--json` for the single-file CLI), and `--manifest PATH` to write a
   manifest; `--motion-only` gives the Phase 1 baseline.
+- **Stitching** (`pipeline/stitch.py`, `scripts/stitch.py`) — renders a
+  manifest's `kept` spans into one finished output video. Reads
+  `kept_spans_by_file()` so spans are pulled per file, in
+  `source_file_index` order, each file's own spans in their own local
+  order — never merged across a file boundary, matching the Phase 3/4
+  boundary decision: a play split across two files is rendered as two
+  clips back to back, not stitched into one continuous shot (confirmed
+  against the `boundary_test_part1/2` reference pair — the split hit-play
+  survives the join intact, just as two consecutive clips).
+
+  Every kept span is extracted with ffmpeg first, then all spans are
+  joined with the concat demuxer. Two paths: **stream copy** (`-c copy`,
+  no re-encode) whenever every contributing source file shares the same
+  codec/resolution/fps/orientation — fast and lossless, which matters on
+  a 30-60+ minute video; or a **re-encode fallback**, normalizing every
+  span to the largest resolution and highest fps among the inputs (so
+  nothing is downscaled) when they disagree. `pipeline.stitch` probes
+  the contributing source files itself at stitch time (rather than
+  reusing `pipeline.multifile`'s ordering-time flags), since a manifest
+  only stores filenames, not the probed params, and stitching can run as
+  its own step later against just the manifest. Which path ran, and why,
+  is always reported — never silent. A stream-copy extraction can't cut
+  mid-GOP, so ffmpeg's input-level seek starts a copied span at a
+  keyframe at or before the requested time (extra footage, never less) —
+  the same err-toward-keeping direction as the priority rule, applied to
+  trimming itself.
+
+  How much extra depends on the source file's own keyframe interval
+  (GOP), not on anything this module controls, so a small-GOP test clip
+  doesn't bound what a real file will show. Verified directly against the
+  full-length checkpoint below (67.5-minute MKV, constant 6.006s GOP
+  measured from its own packet keyframe flags): 120 real spans averaged
+  3.15s of slack, max 6.17s. Root-caused, not just measured — for 7 of
+  the 120 spans, ffmpeg's seek landed on the keyframe *before* the
+  nearest preceding one (confirmed by comparing each span's actual
+  rendered start against the source's full keyframe timeline), not the
+  mathematically nearest keyframe; a known ffmpeg/MKV cue-index seeking
+  characteristic on this file, not a bug in this module's command
+  construction. Still strictly extra content, never lost — safe per the
+  priority rule — but the honest bound is "roughly one to a bit over one
+  *real* source GOP," not a fixed number.
+
+  Validated three ways: unit tests for the pure planning/command-building
+  logic (no video needed); real-ffmpeg tests against tiny synthetic clips
+  for both paths, including one that deliberately mismatches resolution
+  *and* fps to exercise the re-encode fallback end-to-end (previously the
+  untested path); and the two real end-to-end runs below. Building the
+  real-ffmpeg tests caught an actual bug before either real run: a
+  relative `work_dir` produced a concat list whose relative entries the
+  concat demuxer re-resolved against the list file's own directory
+  (not the process's cwd), doubling the path and failing outright —
+  `run_stitch` now resolves `work_dir` to absolute first; regression test
+  added and confirmed to fail without the fix.
+  - `clip_60.mkv` (single file, 7 non-contiguous kept spans): stream-copy
+    path, output plays and decodes cleanly.
+  - `boundary_test_part1/2.mkv` (the Phase 4 file-boundary pair): confirms
+    a play split across a file boundary renders as two clips back to
+    back with no corruption — the specific defensive play that was cut
+    mid-play by the file split is intact across the join.
 
 Planned pieces:
 
@@ -285,6 +369,11 @@ No UI or backend yet — the pipeline runs from the command line:
 
 # per-file calibration override, e.g. if the camera moved between files
 ./venv/bin/python scripts/calibrate.py game_part2.mkv --set 900,700 --output game_part2.calibration.json
+
+# stitch a manifest's kept segments into one finished output video
+# (--input-dir is where the manifest's named source file(s) actually live,
+# since the manifest itself only stores filenames, not full paths)
+./venv/bin/python scripts/stitch.py out/clip_60_manifest.json --input-dir reference_clips --output out/clip_60_highlights.mp4
 ```
 
 ## How the manifest works
@@ -312,6 +401,22 @@ local timestamps happen to look adjacent.
 
 ## Known limitations / non-goals for this version
 
+- **The `full_game.mkv` full-length checkpoint is not a recall
+  measurement — don't read it as equivalent rigor to the reference-clip
+  regression.** It validates performance (37.4 min wall-clock, bounded
+  memory), stitching correctness (output fully decodable, duration
+  accounted for), and plausibility via a 13-frame visual spot-check
+  (5 spread across the timeline, plus start/middle/end of the 3 longest
+  segments) — all of that is real and confirmed, not hand-waved. What it
+  does *not* have is ground truth: unlike the reference clips, there's no
+  hand-annotated list of every real play in `full_game.mkv` for
+  `scripts/regression.py` to check recall against, so there's no measured
+  answer to "did detection miss anything in this file." Thirteen frames
+  looking like real action is evidence the pipeline is doing something
+  sensible on unseen real footage, not proof of recall on it. If this
+  file (or one like it) is going to be relied on for tuning decisions
+  later, it needs real ground truth annotation first, the same as the
+  three reference clips got.
 - **A real play split across a file boundary becomes two separate
   segments, not one continuous one.** Per the Phase 3/4 design decision,
   play extension and at-bat state never cross a file boundary — so if
