@@ -18,6 +18,7 @@ limitations) — that's a deliberate scope cut, not an oversight.
 """
 
 import json
+import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,6 +43,20 @@ from backend.pipeline_runner import run_detect_then_export_job, run_export_job
 # already handled gracefully further downstream by the pipeline's
 # existing corrupt-file handling, not re-validated here.
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+
+
+def _is_unsafe_filename(name: str) -> bool:
+    """A client-supplied filename is written directly as bdir / name
+    (see upload_batch) with no renaming, so it must be a bare filename,
+    not a path: reject any '/', '\\', '..' component, or anything
+    os.path.basename() would strip, before it ever reaches the
+    filesystem. Path traversal here would be a write-side vulnerability
+    (escaping the batch's upload directory), worse than a read-side one."""
+    return (not name
+            or "/" in name
+            or "\\" in name
+            or ".." in name
+            or os.path.basename(name) != name)
 
 
 class ProcessBody(BaseModel):
@@ -129,6 +144,10 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         # validate every filename BEFORE writing anything to disk, so one
         # bad file in a multi-file batch doesn't leave partial writes of
         # the good ones behind
+        unsafe = [f.filename for f in files if _is_unsafe_filename(f.filename)]
+        if unsafe:
+            raise HTTPException(400, f"unsafe filename: {unsafe}")
+
         bad = [f.filename for f in files
               if Path(f.filename).suffix.lower() not in ALLOWED_VIDEO_EXTENSIONS]
         if bad:

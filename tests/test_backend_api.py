@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient
 
 import backend.pipeline_runner as pipeline_runner
+from backend import storage
 from backend.app import create_app
 from pipeline.manifest import build_manifest, save_manifest
 
@@ -166,6 +167,64 @@ def test_upload_extension_check_is_case_insensitive(tmp_path):
         r = client.post("/batches", files=[
             ("files", ("CLIP.MP4", b"video bytes", "video/mp4"))])
         assert r.status_code == 200
+
+
+def test_upload_traversal_filename_would_have_escaped_pre_fix(tmp_path):
+    """Proves the vulnerability the next few tests guard against is
+    real, not hypothetical -- the exact join upload_batch used to do
+    (bdir / filename, with no validation) actually resolves outside the
+    batch's own directory for this filename, the same join the pre-fix
+    code would have written through. This is what makes the 400s below
+    a real fix, not a check against an already-harmless string."""
+    bdir = storage.batch_dir(tmp_path / "uploads", "some_batch_id")
+    escaped = (bdir / "../../evil.mkv").resolve()
+    assert not str(escaped).startswith(str(bdir.resolve()))
+
+
+def test_upload_rejects_path_traversal_filename_400(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("../../evil.mkv", b"video bytes", "video/x-matroska"))])
+        assert r.status_code == 400
+        assert "unsafe filename" in r.json()["detail"]
+        # nothing was written outside the uploads root
+        assert not (tmp_path / "evil.mkv").exists()
+        assert not (tmp_path.parent / "evil.mkv").exists()
+
+
+def test_upload_rejects_backslash_filename_400(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("..\\evil.mkv", b"video bytes", "video/x-matroska"))])
+        assert r.status_code == 400
+        assert "unsafe filename" in r.json()["detail"]
+
+
+def test_upload_rejects_bare_dotdot_segment_400(tmp_path):
+    # a single ".." component needs no slash at all to climb one
+    # directory when joined with Path(bdir) / name
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("..", b"video bytes", "video/x-matroska"))])
+        assert r.status_code == 400
+        assert "unsafe filename" in r.json()["detail"]
+
+
+def test_upload_rejects_traversal_batch_atomically(tmp_path):
+    # same atomic-rejection guarantee as the bad-extension case: one
+    # unsafe filename in a multi-file batch must block the whole batch,
+    # not just skip the bad file
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("good.mkv", b"video bytes", "video/x-matroska")),
+            ("files", ("../evil.mkv", b"video bytes", "video/x-matroska"))])
+        assert r.status_code == 400
+        assert list((tmp_path / "uploads").glob("*")) == [] if \
+            (tmp_path / "uploads").exists() else True
 
 
 # ---- preview frame ----
