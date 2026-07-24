@@ -51,7 +51,18 @@ def process_video(video: str, zone, motion_only: bool = False,
 
     if on_stage:
         on_stage("running player detection")
-    det = detect_persons(video, DetectionConfig(), cache_dir=str(cache_dir))
+
+    def _detection_progress(t, duration):
+        # detect_persons runs one real model inference call per sampled
+        # frame (~1/sec) and is, in practice, the overwhelming majority
+        # of a real run's wall-clock time (measured: ~80s of an ~87s
+        # clip_300 run) -- without this, on_stage only fires once at the
+        # start of this stage and once at the end, so a poller watching
+        # job["stage"] sees the exact same string for the entire run.
+        on_stage(f"running player detection ({t:.0f}s/{duration:.0f}s)")
+
+    det = detect_persons(video, DetectionConfig(), cache_dir=str(cache_dir),
+                         progress_cb=_detection_progress if on_stage else None)
     if on_stage:
         on_stage("extending and padding segments")
     fused = fuse(motion.times, motion.scores, motion.grids,

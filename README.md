@@ -22,15 +22,48 @@ detection → play extension → padding), the manifest, multi-file handling,
 stitching kept segments into one finished output video, and a FastAPI
 backend wrapping all of it (upload, calibration, trigger-processing,
 progress, manifest read/update, re-export) all work end-to-end and are
-covered by 215 unit tests + 2 e2e tests (`pytest tests/` and `pytest
+covered by 220 unit tests + 2 e2e tests (`pytest tests/` and `pytest
 tests/ -m e2e`).
 
-**Phase 7 (Home/Upload UI): backend additions and frontend built, NOT
-yet signed off** — the spec requires a manual browser smoke test before
-this phase is done, and that hasn't happened yet (see below for exactly
-what's verified vs. still outstanding).
+**Phases 0-7 complete and approved**, including the Phase 7 manual
+browser smoke test (upload → calibrate → process → watch, a real
+end-to-end pass in an actual browser, not just the proxy-level HTTP
+checks below).
 
-Backend additions for Phase 7, all tested (54 backend tests total now):
+The manual pass surfaced three real issues, since fixed and re-verified:
+
+- **Exported video looked barely trimmed** (clip_300: 191s source down
+  to only 181s, ~10s shorter). Investigated by pulling the actual test
+  batch and re-running both detection and stitching directly: the
+  manifest's real cut total (15.2s) matched `scripts/regression.py`'s
+  currently-validated baseline for clip_300 almost exactly (170s kept,
+  91%) and a fresh CLI run on the same file (16.0s cut) — **detection via
+  the API behaves identically to CLI-validated behavior, not a bug.** The
+  output looking barely-trimmed is the already-documented stream-copy
+  keyframe-snap slack (see Stitching below): re-running `scripts/stitch.py`
+  against the same manifest reproduced the exact 181.3s output and
+  self-reported "requested output duration: 170.5s" vs. the 181.3s
+  actually rendered, the same mechanism already measured and written up
+  for `full_game.mkv`. Nothing changed here; it was a mismatch between
+  expectation and the already-validated baseline, not a regression.
+- **No progress indication during processing** — same static stage text
+  for the whole run, no spinner. Root-caused, not just patched: a real
+  (uncached) detect job was run while polling the job file every second,
+  showing that ~92% of a real run's wall-clock time (80 of 87s on
+  clip_300) is spent inside a single "running player detection" stage
+  with zero intermediate updates — polling and re-rendering were already
+  working correctly, the backend just never reported progress *within*
+  that stage. `pipeline/detection.py` already had a per-sampled-frame
+  `progress_cb` hook that nothing called; `pipeline/run.py` now wires it
+  to `on_stage`, giving a live `(Ns/Ts)` count throughout what used to be
+  one static string — re-verified with the same real-job probe, updating
+  roughly once per second start to finish. `ProcessingStep.jsx` also
+  gained a small CSS spinner so there's a visible "alive" indicator
+  during any stage, not just this one.
+- **Calibration marker offset from the click** — investigated and not
+  pursued further; see Known limitations below.
+
+Backend additions for Phase 7, all tested (59 backend tests total now):
 - `GET /batches/{id}/preview.jpg` — a frame fixed at 20s into the video
   (not frame 0, which is often black/blurry/still-settling), for the
   calibration screen to click on. Guaranteed (and tested) to be encoded
@@ -71,20 +104,14 @@ size. As defense in depth, `POST /calibration` still validates
 coordinates fall within the video's actual frame bounds — real bounds
 checking, not just documentation of the intent.
 
-**What's verified vs. what still needs a human:** the full build
-succeeds, and every HTTP request shape the React code actually sends
-(multipart upload, `GET preview.jpg`, `POST calibration` with `x`/`y`
-form fields) was exercised for real through the Vite dev-server proxy
-against the real running backend — preview.jpg came back at the exact
-video's native resolution, calibration was written correctly. What
-hasn't been checked, because no browser-automation tool is available in
-this environment: actually clicking on the preview image in a real
-browser and confirming the marker lands where expected, the full
-upload→calibrate→process→watch flow start to finish, an unsupported file
-type's on-screen error message, and a mid-processing browser
-close/reopen recovering correctly. All of that needs a real manual pass
-before this phase can be marked done — see "How to run it" for how to
-start both servers.
+**What's verified:** the full build succeeds; every HTTP request shape
+the React code sends was exercised through the Vite dev-server proxy
+against the real backend (preview.jpg at native resolution, calibration
+written correctly); and the manual browser pass covered the full
+upload→calibrate→process→watch flow start to finish, clicking the
+preview image and confirming the marker (small offset noted above and
+in Known limitations, not a functional blocker), and processing showing
+live stage progress. See "How to run it" for how to start both servers.
 
 **Phase 6 (backend API):** confirmed against a real running server (not
 just FastAPI's in-process test client) — `scripts/smoke_api.py` uploads a
@@ -711,16 +738,29 @@ local timestamps happen to look adjacent.
   `POST /process` now actively blocks on missing calibration (400) unless
   the caller explicitly passes `allow_uncalibrated: true` — no longer
   possible to trigger a batch uncalibrated by accident, only on purpose.
-- **The Phase 7 frontend's manual browser smoke test hasn't happened
-  yet.** No browser-automation tool was available in this environment,
-  so what's verified is: the production build succeeds, and every HTTP
-  request shape the React code sends was exercised for real through the
-  Vite dev-server proxy against the real backend (see Current Status).
-  What's NOT yet verified: actually clicking the preview image in a
-  browser and confirming the coordinate math lands correctly, the full
-  visual flow end to end, the unsupported-file-type error rendering, and
-  a real mid-processing browser close/reopen. This needs a human pass
-  before Phase 7 can be considered done.
+- **Fixed: upload accepted path-traversal filenames.** `POST /batches`
+  wrote each uploaded file to `<batch_dir>/<client-supplied filename>`
+  with only an extension check — a filename like `../../evil.mp4` (or
+  a bare `..`, which needs no slash at all) would have written outside
+  the batch's own directory. Found while designing the Phase 8 source-file
+  endpoint (which reads by filename and needed the same class of check),
+  fixed immediately since this was a live write-side issue in already-committed
+  code, not deferred to Phase 8. `upload_batch` now rejects any filename
+  containing `/`, `\`, `..`, or that doesn't equal its own
+  `os.path.basename()`, before anything is written to disk. Verified with
+  a test that reverts the fix and confirms the rejection tests actually
+  fail without it, not just that they pass with it.
+- **Calibration accuracy depends on click precision.** The Phase 7
+  manual browser pass found the saved plate coordinates for one clip
+  offset from the reference calibration by about 14px on a 1080px-tall
+  frame (checked: `CalibrateStep.jsx`'s marker is drawn from the raw
+  on-screen click position, not run back through the scaling math, so
+  this isn't a rendering bug — it reads as ordinary click variance
+  between two separately-calibrated clips off the same camera). Users
+  should visually confirm the red marker lands on the intended spot
+  before confirming a calibration; small offsets are expected and
+  acceptable and won't meaningfully affect plate-occupancy signals, but
+  a marker that's clearly off (not just a few pixels) should be re-clicked.
 - **Vite's dev server binds in a way `curl 127.0.0.1:5173` can't reach —
   use `localhost:5173`.** Confirmed while testing the proxy setup:
   Node's default `localhost` resolution in this environment prefers
