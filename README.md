@@ -150,12 +150,18 @@ triggers per toggle (not zero, not a duplicate), the "Re-exporting..."
 indicator and disabled buttons appear for the duration of the job, and
 the video's `src` carries a fresh cache-bust token afterward.
 
-**What still needs a human pass**, same limitation as every prior
-phase — no browser-automation tool is available here: actually watching
-the "Current output" player update after a real restore, confirming the
-Download link works, and the Preview player's real seek behavior (jsdom
-doesn't decode real media, so that specific check has only ever been
-verified by code review, never by playback).
+**Confirmed by a real manual pass**: preview seek, Download, both toggle
+directions, and rapid restore→cut-again-before-export-finishes (handled
+cleanly, no errors or inconsistent state) all work correctly.
+
+**Full pre-demo checklist walked end to end, all ten items pass** — see
+the Phase 5 full-length checkpoint above for the one real scare along
+the way (an initial re-run came in at 67.6 minutes instead of ~37,
+traced to environmental contention during that specific run and
+conclusively re-confirmed clean in isolation, not a regression) and
+Setup/How to run it below for the multi-file and Edit Log checks run
+fresh against this exact codebase rather than resting on older phases'
+validation. **v1 is complete.**
 
 **Phase 8 (Edit Log UI): complete and approved.**
 
@@ -344,6 +350,24 @@ the complete pipeline — detection through stitching — against a real
   144s segment shows a batter walking toward the plate with the bat
   lowered, not swinging — a borderline dead-time moment kept in per the
   priority rule's bias toward not cutting early, not a detection failure.
+
+**Re-confirmed during the Phase 9 pre-demo checklist**, with a real scare
+along the way worth recording honestly: a first re-run of this same file
+(via the API, concurrently with other checklist testing) took 67.6
+minutes — nearly double. Rather than accept "the machine was probably
+busy" as an unverified excuse for a hard numeric bar this project set,
+a second run was done in genuine isolation: the one other thing found
+running was a leftover `uvicorn --reload` process that had silently
+accumulated an enormous amount of background CPU time (killed before
+re-running), the CLI was used directly instead of the API to remove the
+FastAPI/threading layer as a variable, and the stale detection cache
+entry for this exact file was deleted first (it otherwise would have
+produced a meaningless near-instant cache-hit "measurement" instead of
+a real one). Result: **2237.02s = 37 min 17s wall-clock**, peak RSS 931
+MiB, peak footprint 2.14 GiB — matching the original checkpoint within
+1-4%, i.e. no regression at all. Detection output was identical again
+too (120 segments, 84% flagged). The 67.6-minute figure was genuinely
+an artifact of that specific run's environment, not the pipeline.
 
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
