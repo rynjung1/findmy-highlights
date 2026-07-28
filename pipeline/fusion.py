@@ -94,16 +94,28 @@ def boxes_to_grid_mask(boxes, frame_size, analysis_size, border_px,
 
 
 def compute_occupancy(det_times, det_boxes, zone: PlateZone,
-                      stationary_v: float):
-    """Per detection sample: is the plate zone occupied by a batter?
+                      stationary_v: float, require_stationary_entry: bool = True):
+    """Per detection sample: is this zone occupied by a person?
 
     Occupancy has hysteresis, matching at-bat semantics:
     - ENTERING the occupied state requires a roughly-stationary person in
-      the zone (someone jogging through the zone never triggers it).
-    - STAYING occupied only requires a person still in the zone — a batter
-      striding into a load or swing moves fast but is still mid-at-bat,
-      and dropping the boost at that exact moment is how a play gets cut.
-    The state clears the moment no person is in the zone.
+      the zone by default (someone jogging through the zone never
+      triggers it) — this is deliberately tuned for the plate use case
+      (Phase 2/3): a batter settling in to face a pitch. STAYING occupied
+      only requires a person still in the zone — a batter striding into a
+      load or swing moves fast but is still mid-at-bat, and dropping the
+      boost at that exact moment is how a play gets cut.
+    - `require_stationary_entry=False` (Phase 10, base zones): enter the
+      occupied state the instant any person's box overlaps the zone, no
+      stationarity check. Validated against real footage (clip_base1/3/4)
+      that the stationary-entry requirement, reused as-is for bases,
+      measurably lags or misses a defensive catch/tag — a fielder is
+      often still moving fast at the exact instant they receive the
+      ball, which is the opposite of the plate's "batter has settled in"
+      assumption. Default stays True so every existing plate call site
+      (fuse(), and therefore atbat_start_times() and refine_segments())
+      is provably unaffected by this parameter's existence.
+    The state clears the moment no person is in the zone, in both modes.
 
     Stationarity compares each in-zone box against the closest-center box in
     the PREVIOUS detection sample; a box with no plausible predecessor is not
@@ -132,9 +144,40 @@ def compute_occupancy(det_times, det_boxes, zone: PlateZone,
                 if d / dt <= stationary_v * h:
                     stationary = True
                     break
-        occupied[i] = stationary or (prev_state and in_zone)
+        elif i == 0:
+            # no previous sample to compare against for stationarity, but
+            # a person can still simply BE in the zone in the first sample
+            for b in det_boxes[i]:
+                cx, cy = 0.5 * (b[0] + b[2]), 0.5 * (b[1] + b[3])
+                if (cx - cx0) ** 2 + (cy - cy0) ** 2 <= zone.radius_px ** 2:
+                    in_zone = True
+                    break
+        entry_condition = stationary if require_stationary_entry else in_zone
+        occupied[i] = entry_condition or (prev_state and in_zone)
         prev_state = occupied[i]
     return occupied
+
+
+def compute_all_occupancy(det_times, det_boxes, zones: dict,
+                          stationary_v: float,
+                          require_stationary_entry: bool = False) -> dict:
+    """compute_occupancy() for each named zone (Phase 10: base_name ->
+    PlateZone from pipeline.calibration.resolve_base_zones()). A thin
+    convenience loop, not new logic -- kept separate from fuse()/refine.py
+    on purpose, since Phase 10 computes and validates this signal without
+    wiring it into segment-closing decisions (Phase 11's job).
+
+    Defaults to require_stationary_entry=False, unlike compute_occupancy()
+    itself -- this function has no existing callers (it's new, base-only),
+    so its own default can safely encode what validation against real
+    footage found: clip_base4 showed the stationary-entry requirement,
+    reused as-is from the plate, lags detecting a fielder arriving at a
+    base by 3 full seconds (onset t=14 vs t=11) because a fielder is
+    often still moving when they receive the ball, unlike a batter
+    settling in at the plate. See scripts/validate_base_occupancy.py."""
+    return {name: compute_occupancy(det_times, det_boxes, zone,
+                                    stationary_v, require_stationary_entry)
+           for name, zone in zones.items()}
 
 
 def fuse(motion_times, motion_scores, motion_grids,

@@ -134,6 +134,84 @@ def test_person_outside_zone_not_occupied():
     assert not occ.any()
 
 
+# ---------- Phase 10: relaxed (non-stationary) entry for base zones ----------
+
+def test_default_entry_still_requires_stationary():
+    # calling compute_occupancy() the exact way fuse() always has (no new
+    # arg) must be unaffected -- a fast-moving person in the zone on their
+    # very first sample there is NOT occupied by default
+    det_times = [0.0, 1.0]
+    fast = [centered_box(1000, 840), centered_box(1400, 840)]
+    zone = PlateZone(center_xy=(1400, 840), radius_px=280)
+    occ = compute_occupancy(det_times, [[fast[0]], [fast[1]]], zone,
+                            stationary_v=0.3)
+    assert not occ.any()
+
+
+def test_relaxed_entry_occupies_on_fast_arrival():
+    # the Phase 10 finding: a fielder arriving at speed to make a play
+    # should register as occupied immediately, not wait for them to slow
+    # down -- require_stationary_entry=False is the base-zone mode
+    det_times = [0.0, 1.0]
+    zone = PlateZone(center_xy=(1400, 840), radius_px=280)
+    fast_arrival = [centered_box(1000, 840), centered_box(1400, 840)]
+    occ = compute_occupancy(det_times, [[fast_arrival[0]], [fast_arrival[1]]],
+                            zone, stationary_v=0.3,
+                            require_stationary_entry=False)
+    assert occ[1]   # in zone on arrival -> occupied immediately, no lag
+
+
+def test_relaxed_entry_first_sample_can_be_occupied():
+    # with no predecessor to check stationarity against, the strict mode
+    # can never mark sample 0 occupied (see test_stationary_person_in_
+    # zone_is_occupied's occ[0] assertion) -- relaxed mode isn't limited
+    # by that, since it only needs presence, not a velocity estimate
+    det_times = [0.0]
+    b = centered_box(*ZONE.center_xy)
+    occ = compute_occupancy(det_times, [[b]], ZONE, stationary_v=0.3,
+                            require_stationary_entry=False)
+    assert occ[0]
+
+
+def test_relaxed_entry_still_clears_when_zone_empties():
+    # relaxing entry doesn't relax the exit rule -- it's still "occupied
+    # only while someone is actually in the zone"
+    det_times = [0.0, 1.0, 2.0]
+    b = centered_box(*ZONE.center_xy)
+    far = centered_box(200, 200)
+    occ = compute_occupancy(det_times, [[b], [b], [far]], ZONE,
+                            stationary_v=0.3, require_stationary_entry=False)
+    assert occ[0] and occ[1] and not occ[2]
+
+
+def test_compute_all_occupancy_per_named_zone():
+    from pipeline.fusion import compute_all_occupancy
+    det_times = [0.0, 1.0]
+    first = PlateZone(center_xy=(500, 500), radius_px=80)
+    third = PlateZone(center_xy=(1500, 500), radius_px=80)
+    b_first = centered_box(500, 500)
+    boxes = [[b_first], [b_first]]
+    occ = compute_all_occupancy(det_times, boxes,
+                                {"first": first, "third": third},
+                                stationary_v=0.3)
+    assert occ["first"].any()
+    assert not occ["third"].any()
+
+
+def test_compute_all_occupancy_defaults_to_relaxed_entry():
+    # compute_all_occupancy is new (no existing callers), so it can
+    # safely default to what Phase 10's validation found works better
+    # for bases, unlike compute_occupancy's own default (True, unchanged
+    # for the plate's sake)
+    from pipeline.fusion import compute_all_occupancy
+    det_times = [0.0, 1.0]
+    zone = PlateZone(center_xy=(1400, 840), radius_px=280)
+    fast_arrival = [centered_box(1000, 840), centered_box(1400, 840)]
+    occ = compute_all_occupancy(det_times, [[fast_arrival[0]], [fast_arrival[1]]],
+                                {"first": zone}, stationary_v=0.3)
+    assert occ["first"][1]
+
+
 def test_occupancy_adds_boost():
     times, scores, grids = make_motion(30, base=0.001)
     det_times = list(np.arange(0.0, 3.5, 1.0))

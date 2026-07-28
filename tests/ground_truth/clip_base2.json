@@ -1,0 +1,14 @@
+{
+  "clip": "clip_base2.mkv",
+  "duration": 29.0,
+  "notes": "New for Phase 10 prep, provided by the owner: shortstop catch on a line drive, batter out. Not part of the original at-bat-focused reference set -- a short (~29s decodable), single-play clip. Annotated by frame-by-frame visual review (1fps contact sheet plus full-resolution frames around the play). This clip's exact offset/provenance within reference_clips/full_game.mkv is unconfirmed (a timestamp cross-check didn't line up, likely an offset mix-up at extraction time) -- not chased down further since the clip itself, not its derivation, is the ground truth source. DRAFT: owner review/correction pending before Phase 10 starts.",
+  "events": [
+    {"id": "e1", "window": [11, 17], "type": "flyout_shortstop", "required": true,
+     "check_continuity": true,
+     "note": "batter loaded/swinging ~11-12; ball clearly visible in flight high above the infield at ~13, right after contact (bat already dropping from the batter's hand); ball is gone from frame by ~15 and the catcher is already walking calmly back toward the plate, not chasing anything -- consistent with a clean catch resolving the play almost immediately (no baserunning, batter out on the catch). Tightest, most confidently-bounded window of the four new clips since the ball is directly visible at the moment of contact.",
+     "phase11_resolution_marker_s": 15,
+     "phase11_note": "Phase 11 acceptance criterion, NOT graded by Phase 10: play visually resolves (ball gone from frame, catcher already walking calmly back to the plate) at approximately t=15s. Phase 11 should report how close the kept segment's end lands to this mark."}
+  ],
+  "base_occupancy": null,
+  "base_occupancy_note": "Deliberately excluded from Phase 10's base-occupancy validation set: this play resolves entirely on the catch itself (batter out the instant the ball is caught) -- no runner ever reaches or is tagged at first, second, or third, so there is no base-zone event here to detect. Not every base-relevant clip actually exercises a base; this one exercises the catch/veto side of the pipeline instead, which is already covered by the original three clips' methodology."
+}

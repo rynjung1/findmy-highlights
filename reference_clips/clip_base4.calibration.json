@@ -1,0 +1,21 @@
+{
+  "frame_size": [
+    1920,
+    1080
+  ],
+  "plate_xy": [
+    1147.0,
+    840.0
+  ],
+  "zone_radius_px": 280.0,
+  "created_from": "clip_base4.mkv (manual, base coords eyeballed for Phase 10 validation prototyping; base radius deliberately much smaller than plate radius -- see validation notes)",
+  "bases": {
+    "first": {
+      "xy": [
+        1480.0,
+        555.0
+      ],
+      "radius_px": 80.0
+    }
+  }
+}

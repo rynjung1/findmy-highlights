@@ -22,7 +22,7 @@ detection → play extension → padding), the manifest, multi-file handling,
 stitching kept segments into one finished output video, a FastAPI
 backend wrapping all of it (upload, calibration, trigger-processing,
 progress, manifest read/update, re-export), and the Home/Upload frontend
-all work end-to-end and are covered by 225 unit tests + 2 e2e tests
+all work end-to-end and are covered by 240 unit tests + 2 e2e tests
 (`pytest tests/` and `pytest tests/ -m e2e`), including the Phase 7 manual
 browser smoke test (upload → calibrate → process → watch, a real
 end-to-end pass in an actual browser, not just the proxy-level HTTP
@@ -110,6 +110,69 @@ upload→calibrate→process→watch flow start to finish, clicking the
 preview image and confirming the marker (small offset noted above and
 in Known limitations, not a functional blocker), and processing showing
 live stage progress. See "How to run it" for how to start both servers.
+
+**Phase 10 (multi-base calibration): complete.** Additive-only, exactly as
+scoped: `calibration.json` now supports an optional `bases` dict
+(first/second/third, each independently optional) alongside the existing
+home-plate fields; `pipeline/calibration.py` gained `resolve_base_zones()`
+(same per-file-override-then-shared lookup as `resolve_zone()`, but reads
+`bases`) and `build_calibration()` gained an optional `bases` parameter.
+`resolve_zone()` itself, and every existing caller of it, is byte-for-byte
+untouched — proven, not just claimed: `scripts/regression.py`'s output
+across all seven reference clips was diffed before/after this phase's
+pipeline changes (via `git stash`), and the diff is empty.
+
+This phase's job was to compute and validate the raw base-occupancy
+signal, not wire it into segment-closing logic (that's Phase 11's,
+mirroring exactly how Phase 2 built and validated plate-occupancy but
+Phase 3 was what actually used it). Validated against `clip_base1/3/4`
+(real defensive plays at first base; `clip_base2`'s line-drive catch has
+no base event, see its ground truth file) and found two real problems,
+not one:
+
+- **The plate's radius (280px) is wrong for bases, not just untuned.**
+  Bases sit much farther from a backstop-mounted camera than the plate,
+  so the same pixel radius that correctly bounds a batter covers roughly
+  half the visible field at first base's distance — confirmed visually
+  (a frame with both radii drawn) before touching any code. Occupancy
+  at that radius read true for nearly the entire clip. Fixed with a
+  much smaller, explicitly base-specific default
+  (`DEFAULT_BASE_RADIUS_PX`, flagged in its own docstring as
+  dataset-tuned against these three clips' framing, not derived from
+  camera geometry — a real UI-driven calibration click will refine this
+  further).
+- **A fielder arriving at speed lags the plate-style stationary-entry
+  requirement by a measured 3 seconds** (`clip_base4`: relaxed-entry
+  onset at t=11 vs. strict-entry onset at t=14) — confirmed with real
+  per-sample occupancy timelines, not assumed. `compute_occupancy()`
+  gained a `require_stationary_entry` parameter (default `True`, so
+  `fuse()`'s plate call site is provably unaffected); the new
+  `compute_all_occupancy()` (base-only, no prior callers) defaults it
+  to `False`, encoding this finding directly.
+- **A third, more fundamental finding, correctly radius-tuned or not:**
+  a first baseman stands near first continuously as normal defensive
+  positioning, not just during an active play — unlike the plate, which
+  is genuinely empty between at-bats. Quantified, not just observed:
+  `clip_base1` and `clip_base3` read occupied for 100% of pre-play
+  samples (the zone was "occupied" from t=0, long before any play
+  developed); `clip_base4` did not (15% pre-play occupied — empty until
+  the play actually approached). All three calibrated clips are
+  first-base plays, so whether this varies by base (first vs.
+  second/third) is untested and flagged for Phase 11 to check against
+  real second/third-base footage, not assumed either way from this
+  data. Raw occupancy alone cannot reliably distinguish "fielder
+  standing at their position" from "a catch/tag resolving right now" —
+  this is the load-bearing finding Phase 11 needs to design around
+  (likely pairing occupancy with motion/velocity at the zone, or a
+  sustained-vs-transient distinction), not something this phase
+  attempts to solve.
+
+15 new unit tests (backward-compat fixtures, partial base sets,
+per-file override resolution for bases, both entry modes,
+`compute_all_occupancy`) — 240 total pass. `scripts/validate_base_occupancy.py`
+is the standalone validation harness this phase's numbers came from,
+reusing already-cached person detections rather than re-running model
+inference.
 
 **Phase 9 (re-export flow): complete.** The spec left the choice
 between an explicit "Re-export" button and automatic background
