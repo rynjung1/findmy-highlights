@@ -76,16 +76,66 @@ double play or relay before it can be tested, let alone fixed.
 
 WALK-UP GAP note: tier 1 above (plate zone reusing this same mechanism)
 only tightens the EXTENSION layer -- it's floored at the raw segment's
-own end, same as the base case. Measured against clip_540's ~86s
-between-play stretch: only ~12 percentage points of that gap's kept time
-sits in the extension layer; roughly 49% is already present in the RAW
-motion segment before extension logic ever runs (pipeline.segments,
-Stage 1/2). Tier 1 cannot touch that larger piece by construction. A
-fix that could would mean changing what counts as segment-worthy motion
-in pipeline.segments itself (e.g. weighting by proximity to the plate),
-which is a materially bigger, riskier change than anything in Stage
-10/11 so far -- explicitly deferred pending its own feasibility stage,
-not attempted here.
+own end, same as the base case. Measured directly (v2 Step 1, all five
+walk-up gaps across clip_60/300/540, not just one): the RAW motion
+segment (pipeline.segments, Stage 1/2) already covers 30-64% of a given
+gap before extension logic ever runs -- clip_540's ~86s stretch measures
+~48.7% of that, right in the middle of the range, not a special case.
+Extension itself (this module, excluding padding) adds only ~0-9
+percentage points on top in every gap measured. PADDING (pad_and_merge,
+NOT extension) is what accounts for most of the rest that reaches the
+final output -- 12-32 percentage points, more than extension everywhere
+and more than the raw segment itself on the two shortest gaps measured.
+An earlier version of this note credited padding's contribution to "the
+extension layer"; that was wrong -- keeping the two separate matters,
+since they're different fixes with different costs (see PADDING
+VALIDATION below). Tier 1 cannot touch the raw-segment piece by
+construction. A fix that could would mean changing what counts as
+segment-worthy motion in pipeline.segments itself (e.g. weighting by
+proximity to the plate), which is a materially bigger, riskier change
+than anything in Stage 10/11 so far -- under active feasibility
+investigation (v2), not attempted here.
+
+PADDING VALIDATION (re-measured, v2 padding track): the original
+pre_pad_s=3.0/post_pad_s=1.5 were set once, when this module was first
+written, against only clip_60/300/540 (largest observed pre-open need:
+1.2s, hence 3.0s = a 2.5x margin) -- six more reference clips
+(clip_base1-4, clip_foul1, clip_whiff1) were added after that and the
+number was never re-checked against them, despite padding being the
+single biggest contributor to kept dead time in most walk-up gaps.
+Re-measured directly against all nine current clips (binary-searching the
+real minimum pre_pad_s/post_pad_s that still produces full, contiguous
+coverage of every required check_continuity event via this exact
+pad_and_merge()): the real current max need is 2.8s pre / 1.3s post
+(clip_540's e4), meaning the original 2.5x margin had quietly eroded to
+~1.1x as harder clips were added -- not the comfortable cushion it was
+meant to be.
+
+Restoring the LITERAL 2.5x margin on that new max (7.0s/3.25s) passes
+recall and continuity cleanly on all nine clips, but tested against
+full_game.mkv (the one real 67.5-minute recording) it nearly halves the
+pipeline's actual dead-time reduction: 11.4 minutes cut at the old
+defaults vs. only 4.7 minutes cut at literal 2.5x, because padding that
+large merges most of the game's distinct plays into a handful of huge
+segments (123 -> 32 final segments). The short reference clips can't
+surface this cost since each brackets one isolated play with nothing
+nearby to over-merge -- only real, long-form footage exposes it. A sweep
+between the two showed a smooth, monotonic cost curve with no free
+margin anywhere on it: every bit of safety costs real cut time.
+
+Landed on pre_pad_s=4.5/post_pad_s=2.2 (~1.6x over the real 2.8s/1.3s
+max) rather than either extreme: a real, meaningful improvement over the
+eroded ~1.1x margin, while still keeping ~7.6 of the original 11.4
+minutes of real dead-time reduction on full_game.mkv. Landed above the
+bare 1.6s/0.7s "just enough" minimum specifically because of an Edit Log
+asymmetry: it can restore a segment that padding cut ENTIRELY, but there
+is no way (v1 has no manual re-cut/extend feature) to fix a segment padding
+cut INTO -- a mid-play clip is unrecoverable in the UI, while an
+over-cautious full cut is a one-click fix. That asymmetry is why this
+lands with real headroom rather than the tightest value that merely
+passes today's nine clips. Confirmed clean (9/9 recall, 9/9 continuity)
+against all nine clips at this exact value, run fresh, not inferred from
+a nearby candidate.
 """
 
 from dataclasses import dataclass, field
@@ -105,13 +155,14 @@ class RefineConfig:
     # catcher, next batter — is inside it), so the recorded departure can
     # land just AFTER the raw segment end; allow that slack for eligibility.
     departure_slack_s: float = 2.0
-    # Padding defaults: measured against the reference clips, the largest
-    # pre-open coverage need is 1.2s (clip_300's swing at ~97 vs raw open
-    # at 98.2), so 3.0s is a 2.5x margin. Padding dominates over-inclusion
-    # (+29-44s/clip vs +1-12s for extension), so these stay as tight as the
-    # priority rule allows: widen them before ever risking a clipped play.
-    pre_pad_s: float = 3.0
-    post_pad_s: float = 1.5
+    # Padding defaults: re-measured across all nine current reference
+    # clips (real max need 2.8s pre / 1.3s post, clip_540's e4) -- see
+    # this module's PADDING VALIDATION docstring section for the full
+    # derivation, the full_game.mkv cost curve that ruled out a literal
+    # 2.5x margin, and the Edit Log asymmetry that argues for landing
+    # above the bare minimum (~1.6x here, not the tightest passing value).
+    pre_pad_s: float = 4.5
+    post_pad_s: float = 2.2
     final_merge_gap_s: float = 0.5
     # Stage 11: box-heights/sec (pipeline.fusion.compute_zone_velocity's
     # units). 0.20 sits above every resting-fielder sample measured across
