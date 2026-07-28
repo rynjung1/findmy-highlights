@@ -74,10 +74,19 @@ export default function CalibrateStep({ batchId, onCalibrated }) {
   }
 
   return (
-    <div>
-      <h2>2. Mark home plate</h2>
-      <p>Click the center of home plate in the frame below.</p>
-      <div style={{ position: 'relative', display: 'inline-block' }}>
+    <div className="card">
+      <h2 style={{ marginTop: 0 }}>Mark home plate</h2>
+      <p className="muted">Click the center of home plate in the frame below.</p>
+      <div
+        style={{
+          position: 'relative',
+          display: 'inline-block',
+          borderRadius: 'var(--radius-md)',
+          overflow: 'hidden',
+          boxShadow: 'var(--shadow-sm)',
+          border: '1px solid var(--color-border)',
+        }}
+      >
         <img
           ref={imgRef}
           src={previewUrl(batchId)}
@@ -89,19 +98,19 @@ export default function CalibrateStep({ batchId, onCalibrated }) {
           <div
             style={{
               position: 'absolute',
-              left: display.x - 7,
-              top: display.y - 7,
-              width: 14,
-              height: 14,
+              left: display.x - 9,
+              top: display.y - 9,
+              width: 18,
+              height: 18,
               borderRadius: '50%',
-              border: '3px solid red',
-              boxShadow: '0 0 0 1px white',
+              border: '3px solid var(--color-danger)',
+              boxShadow: '0 0 0 3px rgba(192, 38, 62, 0.2), 0 0 0 1px white',
               pointerEvents: 'none',
             }}
           />
         )}
       </div>
-      {error && <p style={{ color: 'red' }}>{error}</p>}
+      {error && <p className="alert alert-danger">{error}</p>}
       <p>
         <button onClick={handleConfirm} disabled={!native || saving}>
           {saving ? 'Saving...' : 'Confirm plate location'}

@@ -67,13 +67,17 @@ export default function ProcessingStep({ batchId, onDone, onError }) {
     : `Analyzing: ${detectJob?.stage || 'starting...'}`
 
   return (
-    <div>
-      <h2>Processing</h2>
+    <div className="card">
+      <span className="step-eyebrow">Working</span>
+      <h2 style={{ marginTop: 0 }}>Processing</h2>
       <p>
         <span className="spinner" aria-hidden="true" />
         {stageLabel}
       </p>
-      <p style={{ color: '#666', fontSize: 14 }}>
+      <div className="progress-track">
+        <div className="progress-fill" />
+      </div>
+      <p className="muted" style={{ fontSize: 14 }}>
         This can take a while for long recordings. Progress is saved on the
         server, so it's safe to close this tab and come back later -- just
         reopen this page and it'll pick up where it left off.

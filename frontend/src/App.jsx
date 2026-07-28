@@ -9,6 +9,51 @@ import { getJob, triggerProcess } from './api'
 
 const STORAGE_KEY = 'fmh_batch_id'
 
+// order_confirm is a sub-state that only sometimes appears between
+// calibrate and processing -- it's folded into the "Process" tracker
+// step rather than given its own, since the tracker's fixed 4 steps
+// are meant to show overall progress, not every possible server state.
+const TRACKER_STEPS = [
+  { label: 'Upload', desc: 'Add your recordings' },
+  { label: 'Calibrate', desc: 'Mark home plate' },
+  { label: 'Process', desc: 'Detect and cut highlights' },
+  { label: 'Done', desc: 'Watch and download' },
+]
+const STAGE_TO_STEP_INDEX = {
+  upload: 0,
+  calibrate: 1,
+  order_confirm: 2,
+  processing: 2,
+  done: 3,
+}
+
+function SidebarSteps({ stage }) {
+  const currentIndex = STAGE_TO_STEP_INDEX[stage]
+  if (currentIndex === undefined) return null
+  return (
+    <div className="sidebar-steps">
+      <h3>This upload</h3>
+      {TRACKER_STEPS.map(({ label, desc }, i) => {
+        const status = i < currentIndex ? 'done' : i === currentIndex ? 'current' : ''
+        return (
+          <div key={label} className={`sidebar-step${status ? ` ${status}` : ''}`}>
+            <div className="sidebar-step-rail">
+              <span className="sidebar-step-dot">{i < currentIndex ? '✓' : i + 1}</span>
+              {i < TRACKER_STEPS.length - 1 && (
+                <span className={`sidebar-step-line${i < currentIndex ? ' done' : ''}`} />
+              )}
+            </div>
+            <div className="sidebar-step-text">
+              <div className="sidebar-step-label">{label}</div>
+              <div className="sidebar-step-desc">{desc}</div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // Stages: loading -> upload -> calibrate -> [order_confirm ->] processing -> done
 //                                                                        \-> error
 export default function App() {
@@ -108,30 +153,45 @@ export default function App() {
   }
 
   return (
-    <div style={{ maxWidth: 900, margin: '40px auto', fontFamily: 'sans-serif', padding: 16 }}>
-      <h1>Find My Highlights</h1>
+    <div className="app-layout">
+      <aside className="sidebar">
+        <div className="app-header">
+          <span className="app-mark" aria-hidden="true">FH</span>
+          <h1 className="app-title">Find My Highlights</h1>
+        </div>
 
-      <nav style={{ marginBottom: 24, borderBottom: '1px solid #ddd', paddingBottom: 12 }}>
-        <button
-          className={view === 'home' ? '' : 'secondary'}
-          onClick={() => setView('home')}
-          style={{ marginRight: 8 }}
-        >
-          Home
-        </button>
-        <button
-          className={view === 'editlog' ? '' : 'secondary'}
-          onClick={() => setView('editlog')}
-        >
-          Edit Log
-        </button>
-      </nav>
+        <nav className="app-nav">
+          <button
+            className={view === 'home' ? 'active' : 'secondary'}
+            onClick={() => setView('home')}
+          >
+            Home
+          </button>
+          <button
+            className={view === 'editlog' ? 'active' : 'secondary'}
+            onClick={() => setView('editlog')}
+          >
+            Edit Log
+          </button>
+        </nav>
 
-      {view === 'editlog' && <EditLogView batchId={batchId} />}
+        {view === 'home' && stage !== 'loading' && stage !== 'error' && (
+          <SidebarSteps stage={stage} />
+        )}
+      </aside>
 
-      {view === 'home' && (
+      <main className="main-content">
+      <div className="app-shell">
+        {view === 'editlog' && <EditLogView batchId={batchId} />}
+
+        {view === 'home' && (
         <>
-          {stage === 'loading' && <p>Loading...</p>}
+          {stage === 'loading' && (
+            <div className="card">
+              <span className="spinner" aria-hidden="true" />
+              Loading...
+            </div>
+          )}
           {stage === 'upload' && <UploadStep onUploaded={handleUploaded} />}
           {stage === 'calibrate' && batchId && (
             <CalibrateStep batchId={batchId} onCalibrated={handleCalibrated} />
@@ -156,20 +216,23 @@ export default function App() {
           )}
           {stage === 'done' && batchId && <ResultStep batchId={batchId} />}
           {stage === 'error' && (
-            <div>
-              <p style={{ color: 'red' }}>{errorMessage}</p>
+            <div className="card">
+              <h2>Something went wrong</h2>
+              <p className="alert alert-danger">{errorMessage}</p>
             </div>
           )}
 
           {stage !== 'upload' && stage !== 'loading' && (
-            <p style={{ marginTop: 24 }}>
+            <p style={{ marginTop: 20 }}>
               <button className="secondary" onClick={handleStartOver}>
                 Start over with a new upload
               </button>
             </p>
           )}
         </>
-      )}
+        )}
+      </div>
+      </main>
     </div>
   )
 }

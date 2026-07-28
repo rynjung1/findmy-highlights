@@ -134,14 +134,19 @@ export default function EditLogView({ batchId }) {
   }
 
   if (loadState === 'loading') {
-    return <p>Loading...</p>
+    return (
+      <div className="card">
+        <span className="spinner" aria-hidden="true" />
+        Loading...
+      </div>
+    )
   }
 
   if (loadState === 'not_ready') {
     return (
-      <div>
-        <h2>Edit Log</h2>
-        <p>
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>Edit Log</h2>
+        <p className="muted">
           No processed video yet for this session -- upload and process a
           video from the Home tab first.
         </p>
@@ -151,9 +156,9 @@ export default function EditLogView({ batchId }) {
 
   if (loadState === 'error') {
     return (
-      <div>
-        <h2>Edit Log</h2>
-        <p style={{ color: 'red' }}>{error}</p>
+      <div className="card">
+        <h2 style={{ marginTop: 0 }}>Edit Log</h2>
+        <p className="alert alert-danger">{error}</p>
       </div>
     )
   }
@@ -161,10 +166,10 @@ export default function EditLogView({ batchId }) {
   const cutEntries = manifest.segments.filter(isEditLogEntry)
 
   return (
-    <div>
-      <h2>Edit Log</h2>
+    <div className="card">
+      <h2 style={{ marginTop: 0 }}>Edit Log</h2>
 
-      <div style={{ marginBottom: 24, paddingBottom: 16, borderBottom: '1px solid #ddd' }}>
+      <div style={{ marginBottom: 24, paddingBottom: 20, borderBottom: '1px solid var(--color-border)' }}>
         <h3 style={{ marginBottom: 8 }}>Current output</h3>
         {exporting && (
           <p>
@@ -172,13 +177,13 @@ export default function EditLogView({ batchId }) {
             Re-exporting output...
           </p>
         )}
-        {exportError && <p style={{ color: 'red' }}>{exportError}</p>}
+        {exportError && <p className="alert alert-danger">{exportError}</p>}
         {exportVersion ? (
           <>
             <video
               controls
               src={outputUrl(batchId, exportVersion)}
-              style={{ maxWidth: '100%', background: '#000' }}
+              style={{ maxWidth: '100%', width: '100%', background: '#000' }}
             />
             <p>
               <a href={outputUrl(batchId, exportVersion)} download="highlights.mp4">
@@ -187,38 +192,28 @@ export default function EditLogView({ batchId }) {
             </p>
           </>
         ) : (
-          !exporting && <p>No exported output yet.</p>
+          !exporting && <p className="muted">No exported output yet.</p>
         )}
       </div>
 
-      {error && <p style={{ color: 'red' }}>{error}</p>}
+      {error && <p className="alert alert-danger">{error}</p>}
       {cutEntries.length === 0 ? (
-        <p>Detection didn't cut anything from this video -- nothing to review here.</p>
+        <p className="muted">Detection didn't cut anything from this video -- nothing to review here.</p>
       ) : (
         <ul style={{ listStyle: 'none', padding: 0 }}>
           {cutEntries.map((seg) => {
             const restored = seg.status === 'kept'
             const isPending = pendingId === seg.id
             return (
-              <li
-                key={seg.id}
-                style={{
-                  border: '1px solid #ddd',
-                  borderLeft: restored ? '4px solid #2a7a2a' : '4px solid #999',
-                  borderRadius: 6,
-                  padding: 12,
-                  marginBottom: 10,
-                  background: restored ? '#f1f8f1' : '#fff',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <li key={seg.id} className={`entry-card${restored ? ' restored' : ''}`}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                   <div>
                     <strong>
                       {seg.start} - {seg.end}
                     </strong>
-                    <span style={{ color: '#666', marginLeft: 10 }}>{seg.source_file}</span>
+                    <span className="muted" style={{ marginLeft: 10 }}>{seg.source_file}</span>
                     {restored && (
-                      <span style={{ marginLeft: 10, color: '#2a7a2a', fontWeight: 'bold' }}>
+                      <span className="badge badge-success" style={{ marginLeft: 10 }}>
                         Restored
                       </span>
                     )}
@@ -265,7 +260,7 @@ function SegmentPreview({ batchId, segment }) {
       src={sourceUrl(batchId, segment.source_file)}
       onLoadedMetadata={handleLoadedMetadata}
       onTimeUpdate={handleTimeUpdate}
-      style={{ maxWidth: '100%', background: '#000', marginTop: 10 }}
+      style={{ maxWidth: '100%', width: '100%', background: '#000', marginTop: 10 }}
     />
   )
 }
