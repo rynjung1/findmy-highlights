@@ -1,4 +1,4 @@
-"""Motion-based action detection (Phase 1 baseline).
+"""Motion-based action detection (Stage 1 baseline).
 
 Measures frame-to-frame motion intensity with a basic correction for
 camera motion: the global translation between consecutive frames is
@@ -7,7 +7,7 @@ pan/tilt of the whole frame does not read as subject motion. What's left
 after compensation is localized motion — players moving, a swing, a run.
 
 This is deliberately simple. It cannot tell a swing from a coach walking
-across the infield; that discrimination is Phase 2's job. Per the project
+across the infield; that discrimination is Stage 2's job. Per the project
 priority rule, thresholds downstream are set permissively: over-flagging
 is acceptable, missing a real play is not.
 """

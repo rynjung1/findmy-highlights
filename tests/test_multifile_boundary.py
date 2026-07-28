@@ -1,4 +1,4 @@
-"""Confirms the Phase 3/4 boundary decision holds: play extension and
+"""Confirms the Stage 3/4 boundary decision holds: play extension and
 at-bat state never cross a file boundary, regardless of gap size.
 
 Rather than re-testing extension/at-bat math (already covered in

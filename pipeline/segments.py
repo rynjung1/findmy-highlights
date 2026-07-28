@@ -8,7 +8,7 @@ so a play whose motion briefly dips (batter connects, ball in the air,
 runner mid-stride) isn't chopped into fragments. Nearby segments are then
 merged and very short blips dropped. All defaults err permissive, per the
 project rule that missing a real play is worse than keeping dead time.
-Proper padding and final merge policy come in Phase 3; the small merge here
+Proper padding and final merge policy come in Stage 3; the small merge here
 only exists to avoid absurdly fragmented output.
 """
 

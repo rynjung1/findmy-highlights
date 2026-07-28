@@ -1,0 +1,9 @@
+{
+  "clip": "clip_foul1.mkv",
+  "duration": 42.5,
+  "notes": "New for Stage 12 feasibility check: the first confirmed real foul ball in the reference set. Provided by the owner, corresponds to global 6:46-6:52 in full_game.mkv. Annotated by frame-by-frame visual review (4fps, t=9-20; 8fps, t=16-17 to check for a defensive reaction after the ball left frame).",
+  "events": [
+    {"id": "e1", "window": [12, 18], "type": "foul_ball", "required": true,
+     "note": "batter loads ~12-14; contact ~15.25-15.5 (bat visibly connects, ball redirects into a steep near-vertical arc); ball stays visible climbing up and out of frame (over/behind the batting cage) through ~16.5, gone by ~17. Batter simply resets at the plate for the next pitch -- no baserunning. No fielder converges on or reacts to the ball at any point; infield positioning is static throughout. This is the case Stage 12's feasibility check flagged as needing real audio-vs-motion disagreement data: contact clearly occurred (bat-ball transient present) but no defensive-reaction motion follows it, unlike every hit_and_run/pitch_swing_run event in the other reference clips."}
+  ]
+}

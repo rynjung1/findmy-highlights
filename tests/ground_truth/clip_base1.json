@@ -1,19 +1,19 @@
 {
   "clip": "clip_base1.mkv",
   "duration": 27.2,
-  "notes": "New for Phase 10 prep, provided by the owner: catch at first base, runner out. Not part of the original at-bat-focused reference set -- a short (~27s decodable), single-play clip. Annotated by frame-by-frame visual review (1fps contact sheet plus full-resolution and 0.25s-step frames around the play). This clip's exact offset/provenance within reference_clips/full_game.mkv is unconfirmed (a timestamp cross-check didn't line up, likely an offset mix-up at extraction time) -- not chased down further since the clip itself, not its derivation, is the ground truth source. DRAFT: owner review/correction pending before Phase 10 starts.",
+  "notes": "New for Stage 10 prep, provided by the owner: catch at first base, runner out. Not part of the original at-bat-focused reference set -- a short (~27s decodable), single-play clip. Annotated by frame-by-frame visual review (1fps contact sheet plus full-resolution and 0.25s-step frames around the play). This clip's exact offset/provenance within reference_clips/full_game.mkv is unconfirmed (a timestamp cross-check didn't line up, likely an offset mix-up at extraction time) -- not chased down further since the clip itself, not its derivation, is the ground truth source. DRAFT: owner review/correction pending before Stage 10 starts.",
   "events": [
     {"id": "e1", "window": [8, 20], "type": "hit_and_putout_first_base", "required": true,
      "check_continuity": true,
      "note": "RESOLVED (re-examined at 0.25s resolution): the bat motion at ~9-11.5s is a load/reset, not a missed swing -- bat trails down at ~9.0, drops to a relaxed hang near the ground at ~9.5 (a real swing's follow-through wraps up across the body, it doesn't relax straight down), swings back up onto the shoulder at ~10.0, and is fully coiled/ready again by ~11.5, before the actual swing. That up-down-up cycle over ~2.5s reads as taking a pitch and resetting, not one continuous fast arc through the hitting zone. No separate missed-swing event needed. Ball clearly visible in flight right next to the bat at ~13, confirming contact; fielders converge in the infield ~13-15; runner visibly running toward first (right side of frame, where the base is) through ~15-16; runner and fielder together near the base at ~17, then both walk off casually by ~20, consistent with an out call. Defense back in standard positions by ~22-24.",
-     "phase11_resolution_marker_s": 18,
-     "phase11_note": "Phase 11 acceptance criterion, NOT graded by Phase 10: play visually resolves (runner+fielder together at the base, about to walk off) at approximately t=18s. Phase 11 should report how close the kept segment's end lands to this mark."}
+     "stage11_resolution_marker_s": 18,
+     "stage11_note": "Stage 11 acceptance criterion, NOT graded by Stage 10: play visually resolves (runner+fielder together at the base, about to walk off) at approximately t=18s. Stage 11 should report how close the kept segment's end lands to this mark."}
   ],
   "base_occupancy": {
     "base": "first",
     "pixel_xy_approx": [1445, 565],
-    "pixel_xy_note": "read visually off the b1_t18 frame (fielder/runner standing at the base bag); not a real calibration click -- a placeholder for validating compute_occupancy before the Phase 10 UI exists.",
+    "pixel_xy_note": "read visually off the b1_t18 frame (fielder/runner standing at the base bag); not a real calibration click -- a placeholder for validating compute_occupancy before the Stage 10 UI exists.",
     "occupied_window_s": [16, 18],
     "catch_tag_instant_s": 16.5,
-    "note": "Phase 10 acceptance criterion. Runner+fielder converge and are both at/near the base from ~16-18s before walking off; the tag/out is judged to land at ~16.5s (fielder receiving the throw and applying the tag, before the pair starts moving away together at ~17). Precision here is inherently looser than the other timestamps in this file -- distant, small, motion-blurred figures at 1fps-equivalent review -- treat as +/-1s."}
+    "note": "Stage 10 acceptance criterion. Runner+fielder converge and are both at/near the base from ~16-18s before walking off; the tag/out is judged to land at ~16.5s (fielder receiving the throw and applying the tag, before the pair starts moving away together at ~17). Precision here is inherently looser than the other timestamps in this file -- distant, small, motion-blurred figures at 1fps-equivalent review -- treat as +/-1s."}
 }

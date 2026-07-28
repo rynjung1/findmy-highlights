@@ -1,7 +1,7 @@
 """Durable job state: written to a JSON file at every stage transition,
 mirroring pipeline.manifest's save/load-a-JSON-file pattern rather than
 an in-memory dict. A real detect job takes tens of minutes and the
-backend restarts constantly during Phase 7/8 development — in-memory-only
+backend restarts constantly during Stage 7/8 development — in-memory-only
 progress would silently vanish on every restart, which is a near-certain
 failure mode here, not a simplification.
 

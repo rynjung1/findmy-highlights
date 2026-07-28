@@ -8,7 +8,7 @@
     840.0
   ],
   "zone_radius_px": 280.0,
-  "created_from": "clip_base3.mkv (manual, base coords eyeballed for Phase 10 validation prototyping; base radius deliberately much smaller than plate radius -- see validation notes)",
+  "created_from": "clip_base3.mkv (manual, base coords eyeballed for Stage 10 validation prototyping; base radius deliberately much smaller than plate radius -- see validation notes)",
   "bases": {
     "first": {
       "xy": [

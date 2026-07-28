@@ -45,7 +45,7 @@ export default function EditLogView({ batchId }) {
         }
         setManifest(m)
         setLoadState('ready')
-        // Surface whatever output already exists (e.g. Phase 7's
+        // Surface whatever output already exists (e.g. Stage 7's
         // auto-chained export from the original processing run) --
         // the player shouldn't only appear after a restore this session.
         const exp = await getJob(batchId, 'export')

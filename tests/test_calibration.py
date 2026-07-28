@@ -1,5 +1,5 @@
 """Unit tests for plate-zone calibration resolution: shared-by-default,
-per-file override takes priority (Phase 4)."""
+per-file override takes priority (Stage 4)."""
 
 import json
 import sys
@@ -63,10 +63,10 @@ def test_per_file_override_without_shared_fallback(tmp_path):
     assert resolve_zone(str(tmp_path / "part2.mkv")) is None  # no override, no shared
 
 
-# ---- Phase 10: base zones, backward compatibility ----
+# ---- Stage 10: base zones, backward compatibility ----
 
 def test_old_home_only_file_has_no_base_zones(tmp_path):
-    # a pre-Phase-10 calibration.json, byte for byte -- no "bases" key at all
+    # a pre-Stage-10 calibration.json, byte for byte -- no "bases" key at all
     write_calib(tmp_path / "calibration.json", 100, 200, 50)
     video = tmp_path / "clip.mkv"
     video.write_bytes(b"")
@@ -83,7 +83,7 @@ def test_no_calibration_file_returns_no_base_zones(tmp_path):
 
 def test_partial_base_set_resolves_only_whats_present(tmp_path):
     # some bases may not be visible in a given camera angle -- partial
-    # calibration must be allowed, per the Phase 10 spec
+    # calibration must be allowed, per the Stage 10 spec
     write_calib(tmp_path / "calibration.json", 100, 200, 50,
                bases={"first": {"xy": [900, 600], "radius_px": 80}})
     video = tmp_path / "clip.mkv"
@@ -119,7 +119,7 @@ def test_base_zones_respect_per_file_override(tmp_path):
 
 
 def test_build_calibration_without_bases_is_byte_identical_to_before(tmp_path):
-    # the exact call shape every pre-Phase-10 caller uses
+    # the exact call shape every pre-Stage-10 caller uses
     calib = build_calibration((1920, 1080), (100.0, 200.0), radius_px=50.0,
                               created_from="test.mkv")
     assert calib == {

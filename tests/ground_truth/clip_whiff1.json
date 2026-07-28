@@ -1,0 +1,9 @@
+{
+  "clip": "clip_whiff1.mkv",
+  "duration": 42.4,
+  "notes": "New for Stage 12 feasibility check: the first confirmed real swing-and-miss in the reference set (no prior clip had one; the earlier candidate in clip_540 turned out to be a mislabeled hit on frame review -- see clip_540.json's e4 note). Provided by the owner, corresponds to global 8:10-8:15 in full_game.mkv. Annotated by frame-by-frame visual review (4fps, t=9-20; 8fps, t=15.5-16.5 to locate the loudest post-swing sound).",
+  "events": [
+    {"id": "e1", "window": [12, 18], "type": "swing_and_miss", "required": true,
+     "note": "batter loads ~12-14; bat swings through the zone ~14.5-14.8 with no contact; the pitched ball continues past the batter untouched and reaches the backstop by ~15.2; batter immediately walks off (no baserunning). Zero defensive reaction from any fielder -- nobody moves toward the ball. The loudest nearby sound in the following ~1.5s (~15.9-15.96) is NOT the ball -- frame review shows the batter tossing the bat onto the rack near the backstop at that instant; this is a real confound for any audio-amplitude approach that searches a window wider than ~0.3s past the swing instant."}
+  ]
+}

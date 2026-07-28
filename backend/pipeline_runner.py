@@ -80,9 +80,9 @@ def run_detect_then_export_job(batch_dir, detect_job: dict,
                                ordered_paths: list) -> None:
     """Auto-chains detect -> export so one trigger-processing call ends
     with a playable output, matching the Home view's "one Process
-    action, one wait, then a video" flow (Phase 7) — the manual
+    action, one wait, then a video" flow (Stage 7) — the manual
     POST /export endpoint (run_export_job called directly) stays
-    separate and is what a future restore-then-re-export (Phase 8/9)
+    separate and is what a future restore-then-re-export (Stage 8/9)
     will call again on its own. If detect fails, its own except block
     already persisted the failure to detect_job before re-raising; this
     just stops the chain there rather than starting an export against a

@@ -13,8 +13,9 @@
      "note": "ball visible ~47, swing ~49, batter running ~50, fielding through ~56"},
     {"id": "e3", "window": [79, 91], "type": "hit_and_run", "required": true,
      "check_continuity": true,
-     "note": "runners advancing and fielders converging ~82-88; contact just before ~82; continuity-checked because Phase 3 play-extension depends on the signal holding through this defensive play"},
-    {"id": "e4", "window": [177, 184], "type": "swing", "required": true,
-     "note": "clear swing motion at ~181"}
+     "note": "runners advancing and fielders converging ~82-88; contact just before ~82; continuity-checked because Stage 3 play-extension depends on the signal holding through this defensive play"},
+    {"id": "e4", "window": [177, 185], "type": "hit_and_run", "required": true,
+     "check_continuity": true,
+     "note": "RECLASSIFIED during Stage 12 feasibility check: originally logged as a bare 'swing' at ~181, but frame review (2fps, t=175-190) shows contact ~183-184 followed by the batter dropping the bat and running to first while fielders converge through ~186-188 -- this is a fair ball, not a miss. Window end capped at 185 (not the visually-observed ~187) because clip_540.mkv only reliably decodes to ~185.4s via OpenCV (see pipeline/motion.py's container-vs-decodable-duration note) -- ffmpeg CLI frame extraction can read a few seconds further than the pipeline's own cv2.VideoCapture ever will, so a window past that point could never be satisfied and would be a false regression failure, not a real one."}
   ]
 }

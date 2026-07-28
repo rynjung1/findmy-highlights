@@ -106,7 +106,7 @@ def run_pipeline(video_path, tmp_path):
                  motion.frame_size, motion.analysis_size, motion.border_px,
                  det.times, det.boxes, None)
     # matches the real pipeline (scripts/detect.py): motion alone opens
-    # AND closes raw segments; Phase 3's play extension replaced the old
+    # AND closes raw segments; Stage 3's play extension replaced the old
     # fused-score sustain, so this must NOT pass sustain_scores, or the
     # veto would be exercised against a pipeline shape that no longer
     # exists in production

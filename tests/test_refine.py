@@ -8,7 +8,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.refine import (RefineConfig, departure_times, extend_segments,
-                             pad_and_merge, refine_segments)
+                             pad_and_merge, refine_segments,
+                             zone_close_candidate)
 from pipeline.settle import SettleConfig
 
 CFG = RefineConfig(settle=SettleConfig(threshold=0.002, min_quiet_s=1.5),
@@ -162,6 +163,89 @@ def test_padding_merges_touching_segments():
     # padded: (0,9) and (8,15) overlap -> one segment
     out = pad_and_merge([(4.0, 7.0), (12.0, 13.0)], 60.0, CFG)
     assert out == [(0.0, 15.0)]
+
+
+def _zone_series(dt=0.1, n=200, spike_start=5.2, spike_end=5.6,
+                 spike_v=0.5, rest_v=0.05):
+    t = np.arange(n) * dt
+    v = np.full(n, rest_v)
+    v[(t >= spike_start) & (t < spike_end)] = spike_v
+    return t, v
+
+
+ZONE_SETTLE = SettleConfig(threshold=0.20, min_quiet_s=1.5)
+
+
+def test_zone_close_candidate_no_arrival_returns_none():
+    # resting fielder: velocity never crosses the arrival gate -- must
+    # never produce a candidate (Stage 10's resting-fielder confound)
+    t, v = _zone_series(spike_v=0.05)
+    assert zone_close_candidate(t, v, 0.0, 20.0, 0.20, ZONE_SETTLE) is None
+
+
+def test_zone_close_candidate_arrival_never_settles_returns_none():
+    t, v = _zone_series(spike_start=5.0, spike_end=20.0, spike_v=0.5)
+    assert zone_close_candidate(t, v, 0.0, 20.0, 0.20, ZONE_SETTLE) is None
+
+
+def test_zone_close_candidate_arrival_then_settle():
+    t, v = _zone_series()  # spike 5.2-5.6
+    cand = zone_close_candidate(t, v, 0.0, 20.0, 0.20, ZONE_SETTLE)
+    assert cand is not None
+    assert 6.9 <= cand <= 7.3   # ~5.6 + min_quiet_s 1.5
+
+
+def test_zone_tightens_when_whole_frame_tail_is_monotonic():
+    # whole-frame stays elevated 5.0-8.0 as one continuous tail (never
+    # dips and rises), quiet after -- the same real event the zone
+    # tracked, just seen field-wide instead of at-the-base
+    t = np.arange(200) * 0.1
+    m = np.full(200, 0.0005)
+    m[(t >= 5.0) & (t < 8.0)] = 0.0025
+    zt, zv = _zone_series()   # arrival 5.2-5.6, settles ~7.1
+    out = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG,
+                          zone_velocities={"first": (zt, zv)})
+    (_, e), = out
+    assert e < 7.5     # tightened relative to whole-frame-only (~7.9)
+    assert e >= 6.9     # roughly at the zone's own settle time
+
+
+def test_zone_does_not_tighten_across_a_real_reactivation():
+    # whole-frame: active 5.0-5.6 (the play), a 1.4s dip (bridges, per
+    # the existing settle logic), reactivates 7.0-7.5 -- simulating a
+    # relay throw / continued play elsewhere in frame -- quiet after 7.5.
+    # The base zone itself settles at ~6.9 and never sees the
+    # reactivation (it's local to the base, the relay isn't). This is
+    # exactly the double-play/relay case flagged as a known limitation
+    # in pipeline/refine.py's ZONE-LOCAL CLOSE docstring: the guard here
+    # is what keeps it from silently over-tightening in the common case
+    # where the continued play shows up in whole-frame motion.
+    t = np.arange(300) * 0.1
+    m = np.full(300, 0.0005)
+    m[(t >= 5.0) & (t < 5.6)] = 0.0025
+    m[(t >= 7.0) & (t < 7.5)] = 0.0025
+    zt, zv = _zone_series(spike_start=5.2, spike_end=5.35)  # settles ~6.9
+    out = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG,
+                          zone_velocities={"first": (zt, zv)})
+    (_, e), = out
+    assert e >= 7.3   # NOT tightened -- whole-frame's reactivation wins
+
+
+def test_zone_velocities_empty_dict_is_unchanged():
+    t, m = motion()
+    m[(t > 5) & (t < 9)] = 0.0025
+    out_without = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG)
+    out_with_empty = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG,
+                                     zone_velocities={})
+    assert out_without == out_with_empty
+
+
+def test_zone_velocities_default_none_is_unchanged():
+    t, m = motion()
+    m[(t > 5) & (t < 9)] = 0.0025
+    with_default = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG)
+    explicit_none = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG, None)
+    assert with_default == explicit_none
 
 
 def test_full_refine_pipeline():

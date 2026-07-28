@@ -7,7 +7,7 @@ By default runs the fused pipeline (motion + person detection + plate
 occupancy). Requires a calibration.json next to the video for the plate
 zone (see scripts/calibrate.py); without one, plate occupancy is skipped
 and a warning is printed. --motion-only skips person detection entirely
-(the Phase 1 baseline).
+(the Stage 1 baseline).
 """
 
 import argparse
@@ -43,7 +43,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("video")
     ap.add_argument("--motion-only", action="store_true",
-                    help="Phase 1 baseline: skip person detection")
+                    help="Stage 1 baseline: skip person detection")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     ap.add_argument("--manifest", metavar="PATH",
                     help="write a manifest JSON of kept segments and cut gaps")

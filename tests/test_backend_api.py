@@ -831,7 +831,7 @@ def test_export_before_manifest_404(tmp_path):
 
 
 def test_auto_chain_export_runs_automatically_after_detect(tmp_path):
-    """The point of the Phase 7 auto-chain: a single trigger-processing
+    """The point of the Stage 7 auto-chain: a single trigger-processing
     call ends with a completed export, no separate POST /export needed."""
     app = make_app(tmp_path)
     with TestClient(app) as client:

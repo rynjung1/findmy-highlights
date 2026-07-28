@@ -1,4 +1,4 @@
-"""Person detection on sampled frames (Phase 2 signal).
+"""Person detection on sampled frames (Stage 2 signal).
 
 Uses RF-DETR Base (Apache-2.0, code and weights) at an elevated input
 resolution — validated on the reference footage to catch distant fielders

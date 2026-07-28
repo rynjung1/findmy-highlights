@@ -120,7 +120,7 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         once already completed. Export is deliberately exempted from the
         completed-blocks-retrigger rule: re-stitching is idempotent
         against whatever the manifest currently says, so it's the
-        correct way to regenerate the output after a Phase 8 restore —
+        correct way to regenerate the output after a Stage 8 restore —
         unlike detect, re-running it doesn't reprocess the source video,
         it only redoes the fast, cheap stitch step."""
         existing = jobs.load_job(bdir, job_type)
@@ -201,7 +201,7 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         coordinates to compute a fresh one against this batch's own
         first video (the API equivalent of `calibrate.py --set x,y` —
         there's no in-browser interactive click flow here, that's
-        Phase 7/8's job to build against this endpoint).
+        Stage 7/8's job to build against this endpoint).
 
         /process now requires this to have been called first, unless the
         caller explicitly passes allow_uncalibrated=true — see

@@ -1,4 +1,4 @@
-"""Unit tests for Phase 5 stitching: reencode-vs-copy decision, target
+"""Unit tests for Stage 5 stitching: reencode-vs-copy decision, target
 resolution/fps selection, ffmpeg command construction, and the span-job
 plan built from a manifest. Most of this is pure logic — no real ffmpeg
 or video files needed; ffmpeg invocation is checked via an injected fake
@@ -263,7 +263,7 @@ def test_run_stitch_raises_on_no_kept_segments(tmp_path):
 # the fake-runner tests above only check which commands WOULD be built;
 # they can't catch a bug in how ffmpeg actually resolves those commands
 # against the real filesystem, which is exactly the class of bug found
-# manually while validating this phase: a relative `work_dir` produced a
+# manually while validating this stage: a relative `work_dir` produced a
 # concat list whose relative entries the concat demuxer re-resolved
 # against the LIST FILE's own directory (not the process cwd), doubling
 # the path and failing outright. run_stitch now resolves work_dir to an
@@ -289,7 +289,7 @@ def probe_real_duration_s(path) -> float:
 
 
 def test_stream_copy_output_duration_covers_all_nonadjacent_kept_spans(tmp_path):
-    """The core Phase 5 correctness check: a manifest with several
+    """The core Stage 5 correctness check: a manifest with several
     non-contiguous kept spans (real cut gaps between them, not just a
     file-boundary split) must produce one output whose rendered duration
     covers every requested span. Stream-copy trims can't cut mid-GOP, so
@@ -337,7 +337,7 @@ def test_stream_copy_output_duration_covers_all_nonadjacent_kept_spans(tmp_path)
 
 
 def test_run_stitch_with_relative_work_dir_string(tmp_path, monkeypatch):
-    """Regression test for the actual bug found during manual Phase 5
+    """Regression test for the actual bug found during manual Stage 5
     validation: passing a RELATIVE work_dir (a plain string like "work",
     not tmp_path / "work" which pytest always makes absolute) used to
     make the concat demuxer look for a doubled path

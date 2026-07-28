@@ -1,11 +1,11 @@
-"""Stitch a manifest's kept segments into one output video (Phase 5).
+"""Stitch a manifest's kept segments into one output video (Stage 5).
 
 Takes the manifest built by scripts/detect.py or scripts/detect_multi.py
 and the directory holding the original source files, and produces one
 finished video containing exactly the kept spans, in file order
 (`source_file_index`), each file's own kept spans in their own local
 order (from `pipeline.manifest.kept_spans_by_file` — spans are never
-merged across a file boundary, matching the Phase 3/4 boundary decision;
+merged across a file boundary, matching the Stage 3/4 boundary decision;
 a play split across two files stays two clips back to back in the
 output, not stitched into one continuous shot).
 

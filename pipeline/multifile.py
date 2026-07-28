@@ -1,4 +1,4 @@
-"""Multi-file ordering and gap detection (Phase 4).
+"""Multi-file ordering and gap detection (Stage 4).
 
 Files are ordered by capture-time metadata (ffprobe's creation_time tag)
 first. That signal is trusted only when it's unambiguous — present on
@@ -11,7 +11,7 @@ rule that file ordering falls back to asking, not assuming.
 
 A real time gap between files (recording stopped, phone ran out of
 storage) is detected from the same metadata and reported so downstream
-code and the UI know about it — but per the Phase 3/4 boundary decision,
+code and the UI know about it — but per the Stage 3/4 boundary decision,
 NOTHING in the detection pipeline (play extension, at-bat state) is ever
 allowed to reason across a file boundary regardless of gap size. Gap
 detection here is informational, not a gate on pipeline behavior.

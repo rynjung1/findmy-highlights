@@ -12,7 +12,7 @@ human-readable) and as float seconds (lossless for tooling). The `origin`
 field records how an entry came to be ("detected" / "gap"); a future
 manual-cut feature can add its own origin without schema changes.
 
-Multi-file (Phase 4): `start_s`/`end_s` are always LOCAL to a segment's own
+Multi-file (Stage 4): `start_s`/`end_s` are always LOCAL to a segment's own
 `source_file` (matching the spec's example, which shows plain timestamps
 per source file, not one global concatenated clock). Every segment also
 carries `source_file_index`, an explicit integer position into the
@@ -22,7 +22,7 @@ re-probing timestamps; `source_files` + `source_file_index` already say
 it exactly. Critically, spans from different files are NEVER merged into
 one span even if their local timestamps look numerically adjacent — they
 are different pieces of video that need independent seeking, and per the
-Phase 3/4 boundary decision, nothing about detection reasons across a
+Stage 3/4 boundary decision, nothing about detection reasons across a
 file boundary either.
 """
 

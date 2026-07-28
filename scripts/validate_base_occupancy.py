@@ -1,4 +1,4 @@
-"""Phase 10 validation: does the raw base-occupancy signal actually match
+"""Stage 10 validation: does the raw base-occupancy signal actually match
 real footage, and specifically how close does its onset land to the real
 catch/tag instant?
 
@@ -7,7 +7,7 @@ compute_all_occupancy() directly against the base_occupancy ground truth in
 tests/ground_truth/clip_base{1,3,4}.json (clip_base2 has no base event, see
 its ground truth file), using already-cached person detections. Nothing
 here is wired into the detection pipeline -- see pipeline/fusion.py and
-pipeline/calibration.py docstrings for why that's Phase 11's job.
+pipeline/calibration.py docstrings for why that's Stage 11's job.
 """
 
 import json
@@ -76,7 +76,7 @@ def validate_clip(stem: str, mode_label: str, require_stationary_entry: bool):
     # occupied. Found to vary a lot (clip_base1/3: 100%, clip_base4: 15%)
     # rather than being universal; whether that's a first-vs-second/third
     # base difference is untested (all three calibrated clips are first
-    # base) and is flagged for Phase 11, not resolved here.
+    # base) and is flagged for Stage 11, not resolved here.
     pre_play_idx = [i for i, t in enumerate(det.times) if t < catch_instant - 3]
     pre_play_frac = (sum(occ[i] for i in pre_play_idx) / len(pre_play_idx)
                      if pre_play_idx else float("nan"))
@@ -91,7 +91,7 @@ def main():
     clips = ["clip_base1", "clip_base3", "clip_base4"]
     for label, require_stationary in [
         ("plate-style: require_stationary_entry=True (current default)", True),
-        ("relaxed: require_stationary_entry=False (Phase 10 proposal)", False),
+        ("relaxed: require_stationary_entry=False (Stage 10 proposal)", False),
     ]:
         print(f"\n=== {label} ===")
         for stem in clips:

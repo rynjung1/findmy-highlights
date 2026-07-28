@@ -13,8 +13,8 @@ Score (additive — a weak signal can only fail to add, never subtract):
 
     combined = motion + w_person * person_motion + w_occupancy * occupied
 
-so combined >= motion everywhere, which guarantees Phase 2 can never flag
-less than the Phase 1 motion baseline at the same thresholds.
+so combined >= motion everywhere, which guarantees Stage 2 can never flag
+less than the Stage 1 motion baseline at the same thresholds.
 
 Veto: a segment may be dropped only when person detection is certain there
 was nobody near its motion — every sample in the segment had a valid
@@ -101,11 +101,11 @@ def compute_occupancy(det_times, det_boxes, zone: PlateZone,
     - ENTERING the occupied state requires a roughly-stationary person in
       the zone by default (someone jogging through the zone never
       triggers it) — this is deliberately tuned for the plate use case
-      (Phase 2/3): a batter settling in to face a pitch. STAYING occupied
+      (Stage 2/3): a batter settling in to face a pitch. STAYING occupied
       only requires a person still in the zone — a batter striding into a
       load or swing moves fast but is still mid-at-bat, and dropping the
       boost at that exact moment is how a play gets cut.
-    - `require_stationary_entry=False` (Phase 10, base zones): enter the
+    - `require_stationary_entry=False` (Stage 10, base zones): enter the
       occupied state the instant any person's box overlaps the zone, no
       stationarity check. Validated against real footage (clip_base1/3/4)
       that the stationary-entry requirement, reused as-is for bases,
@@ -158,14 +158,64 @@ def compute_occupancy(det_times, det_boxes, zone: PlateZone,
     return occupied
 
 
+def compute_zone_velocity(det_times, det_boxes, zone: PlateZone):
+    """Per detection sample: box-height-normalized speed (box-heights/sec)
+    of the fastest in-zone box, relative to the nearest box in the
+    previous sample -- the SAME normalization compute_occupancy's
+    stationarity check already uses (see its docstring), so a reading
+    from this function is directly comparable to that one's stationary_v.
+
+    0.0 when nothing is in the zone, or at the first sample (no previous
+    frame to compare against). A box with no plausible predecessor
+    contributes 0.0 for that box -- same "not yet moving" convention as
+    compute_occupancy's stationarity check (someone freshly appearing in
+    the zone isn't a measured velocity yet, just a position).
+
+    Stage 11: this is the signal that separates a resting fielder
+    (near-zero, sustained -- Stage 10's "resting fielder confound",
+    where raw occupancy alone can't tell a standing fielder from a live
+    play) from a genuine transient arrival (a clear speed spike).
+    Validated directly against clip_base1/3/4: resting-period samples
+    measured 0.00-0.12 bh/s, the real throw/catch arrival spiking to
+    0.32-1.01 bh/s, consistently in the few seconds BEFORE the catch/tag
+    instant (the fielder moving to the bag, then typically stationary AT
+    the catch itself, not after it) -- see pipeline/refine.py's
+    zone_close_candidate() and RefineConfig.zone_arrival_thresh."""
+    det_times = np.asarray(det_times, dtype=float)
+    n = len(det_times)
+    out = np.zeros(n)
+    cx0, cy0 = zone.center_xy
+    r2 = zone.radius_px ** 2
+    prev_boxes = []
+    for i in range(n):
+        boxes = det_boxes[i]
+        in_zone = [b for b in boxes
+                  if (0.5 * (b[0] + b[2]) - cx0) ** 2
+                  + (0.5 * (b[1] + b[3]) - cy0) ** 2 <= r2]
+        if in_zone and prev_boxes and i > 0:
+            dt = det_times[i] - det_times[i - 1]
+            if dt > 0:
+                prev_centers = [(0.5 * (pb[0] + pb[2]), 0.5 * (pb[1] + pb[3]))
+                                for pb in prev_boxes]
+                speeds = []
+                for b in in_zone:
+                    cx, cy = 0.5 * (b[0] + b[2]), 0.5 * (b[1] + b[3])
+                    h = max(1.0, b[3] - b[1])
+                    d = min(np.hypot(cx - px, cy - py) for px, py in prev_centers)
+                    speeds.append((d / dt) / h)
+                out[i] = max(speeds)
+        prev_boxes = boxes
+    return out
+
+
 def compute_all_occupancy(det_times, det_boxes, zones: dict,
                           stationary_v: float,
                           require_stationary_entry: bool = False) -> dict:
-    """compute_occupancy() for each named zone (Phase 10: base_name ->
+    """compute_occupancy() for each named zone (Stage 10: base_name ->
     PlateZone from pipeline.calibration.resolve_base_zones()). A thin
     convenience loop, not new logic -- kept separate from fuse()/refine.py
-    on purpose, since Phase 10 computes and validates this signal without
-    wiring it into segment-closing decisions (Phase 11's job).
+    on purpose, since Stage 10 computes and validates this signal without
+    wiring it into segment-closing decisions (Stage 11's job).
 
     Defaults to require_stationary_entry=False, unlike compute_occupancy()
     itself -- this function has no existing callers (it's new, base-only),

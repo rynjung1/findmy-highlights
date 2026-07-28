@@ -1,5 +1,5 @@
 """Basic end-to-end smoke test for the backend API against a REAL running
-server (not FastAPI's in-process TestClient) — the Phase 6 spec's "basic
+server (not FastAPI's in-process TestClient) — the Stage 6 spec's "basic
 test showing the API working via a simple script or API client (not the
 UI yet)".
 
@@ -9,7 +9,7 @@ Usage:
 
 Uploads a real video, fetches the calibration preview frame, uploads
 calibration, triggers real detection (the actual pipeline, not a fake —
-this is intentionally slow, proportional to the video length; Phase 7's
+this is intentionally slow, proportional to the video length; Stage 7's
 auto-chain means export runs immediately after, no separate trigger
 needed for the first output), reads the manifest, restores one cut
 segment, explicitly re-exports to reflect the restore, and downloads the
@@ -85,7 +85,7 @@ def main():
             print(f"no calibration.json found next to {video} — "
                  f"detection will run with plate-occupancy disabled")
 
-        print("triggering detection (Phase 7 auto-chains export after)...")
+        print("triggering detection (Stage 7 auto-chains export after)...")
         r = client.post(f"/batches/{batch_id}/process")
         r.raise_for_status()
         job = r.json()

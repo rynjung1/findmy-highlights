@@ -15,7 +15,7 @@ user to confirm/reorder" fallback the project spec calls for. Passing
 mismatched-resolution/fps and gap-detection warnings below) — an explicit
 order is taken as full confirmation, not second-guessed.
 
-Per the Phase 3/4 design decision, a file boundary is always a hard
+Per the Stage 3/4 design decision, a file boundary is always a hard
 boundary: play extension and at-bat state never cross it, regardless of
 gap size. Each file is processed independently by the same pipeline
 scripts/detect.py uses for one file (pipeline/run.py's process_video) —
@@ -78,7 +78,7 @@ def main() -> None:
                  f"{'resolution' if result.mismatched_resolution else ''}"
                  f"{' and ' if result.mismatched_resolution and result.mismatched_fps else ''}"
                  f"{'frame rate' if result.mismatched_fps else ''} "
-                 f"(Phase 5 stitching will need to re-encode)", file=sys.stderr)
+                 f"(Stage 5 stitching will need to re-encode)", file=sys.stderr)
         for path, gap in zip(ordered_paths, result.gaps_s):
             if gap is not None and gap > 1.0:
                 print(f"note: {gap:.0f}s gap detected before {path}",

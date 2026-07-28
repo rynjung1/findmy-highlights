@@ -3,7 +3,7 @@ extension -> padding. Shared by scripts/detect.py (one file) and
 scripts/detect_multi.py (many files) so there is exactly one
 implementation of "process one video" — a multi-file run is this
 function called once per file, nothing more. That's also what makes the
-Phase 3/4 boundary decision (extension and at-bat state never cross a
+Stage 3/4 boundary decision (extension and at-bat state never cross a
 file boundary) structurally true rather than a rule that has to be
 remembered: each call gets its own fresh motion/detection/occupancy
 computation and starts its at-bat detector unarmed-at-clip-start, with
@@ -13,8 +13,9 @@ no channel for state to leak from one file into the next.
 from pathlib import Path
 
 from pipeline.atbat import AtBatConfig, atbat_start_times
+from pipeline.calibration import resolve_base_zones
 from pipeline.detection import DetectionConfig, detect_persons
-from pipeline.fusion import apply_veto, compute_occupancy, fuse
+from pipeline.fusion import apply_veto, compute_occupancy, compute_zone_velocity, fuse
 from pipeline.motion import compute_motion
 from pipeline.refine import RefineConfig, refine_segments
 from pipeline.segments import SegmentConfig, scores_to_segments, smooth_scores
@@ -68,8 +69,8 @@ def process_video(video: str, zone, motion_only: bool = False,
     fused = fuse(motion.times, motion.scores, motion.grids,
                  motion.frame_size, motion.analysis_size, motion.border_px,
                  det.times, det.boxes, zone)
-    # motion alone owns segment open AND raw exit (Phase 3 replaced the
-    # Phase 2 score-sustain with the explicit play-extension below)
+    # motion alone owns segment open AND raw exit (Stage 3 replaced the
+    # Stage 2 score-sustain with the explicit play-extension below)
     raw = scores_to_segments(motion.times, motion.scores, SegmentConfig())
     kept, vetoed = apply_veto(raw, fused)
 
@@ -85,6 +86,27 @@ def process_video(video: str, zone, motion_only: bool = False,
     else:
         occ = [False] * len(det.times)
         fires = []
+    # Stage 11 tier 1: base zones are resolved from the same calibration
+    # file the plate zone comes from (per-file override, else shared) --
+    # purely additive, a file with no "bases" key yields {} and
+    # refine_segments behaves exactly as before (see pipeline/refine.py's
+    # ZONE-LOCAL CLOSE docstring section).
+    base_zones = resolve_base_zones(video)
+    zone_velocities = {name: (det.times, compute_zone_velocity(det.times, det.boxes, z))
+                       for name, z in base_zones.items()}
+    # Stage 11 tier 1 (walk-up gap, extension-layer piece): the SAME
+    # mechanism, applied to the plate zone instead of a base -- an
+    # incoming batter arriving then settling into the box is the
+    # identical spike-then-quiet shape a fielder receiving a throw has,
+    # just for "the next at-bat has begun" instead of "this play is
+    # over". Reuses the same generic zone_velocities dict
+    # extend_segments() already consumes; no new mechanism, no new
+    # safety property beyond what's already validated. (Tier 2 -- the
+    # bigger raw-segment-level fix -- is deliberately not started here;
+    # see pipeline/refine.py's WALK-UP GAP note.)
+    if zone is not None:
+        zone_velocities["plate"] = (det.times, compute_zone_velocity(det.times, det.boxes, zone))
     final = refine_segments(kept, motion.times, sm, det.times, occ, fires,
-                            motion.duration, RefineConfig(settle=settle_cfg))
+                            motion.duration, RefineConfig(settle=settle_cfg),
+                            zone_velocities)
     return final, vetoed, motion.duration, motion

@@ -1,5 +1,5 @@
-"""Plate-zone calibration resolution (Phase 2, extended for Phase 4) and
-writing (Phase 6, extended from scripts/calibrate.py so the backend's
+"""Plate-zone calibration resolution (Stage 2, extended for Stage 4) and
+writing (Stage 6, extended from scripts/calibrate.py so the backend's
 calibration endpoint can't drift from the CLI's schema).
 
 One calibration.json applies to every file in a batch by default — the
@@ -24,7 +24,7 @@ DEFAULT_RADIUS_FRACTION = 0.26
 # Bases sit much farther from a backstop-mounted camera than the plate
 # does, so the same PIXEL radius that correctly covers a batter at the
 # plate covers a wildly larger real-world area at a base's distance —
-# validated directly (Phase 10): plate's default radius at first base's
+# validated directly (Stage 10): plate's default radius at first base's
 # typical position engulfed roughly half the visible field (dugout,
 # outfield, unrelated players), making occupancy read ~always-true. This
 # flat pixel default is a rough, dataset-specific starting point (tuned
@@ -53,7 +53,7 @@ def resolve_zone(video_path, calib_dir=None) -> PlateZone | None:
     to it (or in calib_dir) takes priority, else the shared
     calibration.json in the same directory, else None.
 
-    Untouched by the Phase 10 `bases` extension below: this function only
+    Untouched by the Stage 10 `bases` extension below: this function only
     ever reads `plate_xy`/`zone_radius_px`, so an old home-only file and
     a new file with bases both resolve home identically, and every
     existing caller (pipeline.run.process_video, the backend) needs no
@@ -75,10 +75,10 @@ def resolve_base_zones(video_path, calib_dir=None) -> dict:
     calibration -- some bases not visible in a given camera angle -- is
     the expected common case, not an error.
 
-    Phase 10 scope: this is called by base-occupancy computation/
+    Stage 10 scope: this is called by base-occupancy computation/
     validation only. Nothing in the detection pipeline (process_video,
     fuse, refine_segments, atbat_start_times) calls this -- wiring the
-    result into segment-closing decisions is explicitly Phase 11's job,
+    result into segment-closing decisions is explicitly Stage 11's job,
     not this function's."""
     candidate = _find_calibration_file(video_path, calib_dir)
     if candidate is None:
@@ -159,7 +159,7 @@ def build_calibration(frame_size, plate_xy, radius_px=None,
     for any of "first"/"second"/"third" -- independently optional, a
     camera angle that only shows first base can supply just that one.
     Omitting `bases` entirely (the default) produces the exact same dict
-    Phase 6 always has, byte for byte -- this parameter is purely
+    Stage 6 always has, byte for byte -- this parameter is purely
     additive, existing callers that don't pass it are unaffected.
     A base without an explicit radius gets DEFAULT_BASE_RADIUS_PX, NOT
     the plate's radius_px -- reusing the plate's radius for a base is

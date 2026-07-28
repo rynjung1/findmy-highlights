@@ -17,7 +17,7 @@ Hard FAILURE conditions (exit 1):
      silently erase a real play).
   4. An event marked "check_continuity" is not FULLY covered by a single
      contiguous span of kept segments (these are the defensive-play windows
-     Phase 3's play-extension depends on: any internal coverage gap means
+     Stage 3's play-extension depends on: any internal coverage gap means
      the play would be visibly chopped). The raw fused score is allowed to
      dip below the exit threshold inside the window — a batter frozen
      mid-stance pre-pitch legitimately produces near-zero motion, and
@@ -67,7 +67,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--clips-dir", default=str(ROOT / "reference_clips"))
     ap.add_argument("--motion-only", action="store_true",
-                    help="skip the fused pipeline (Phase 1 baseline only)")
+                    help="skip the fused pipeline (Stage 1 baseline only)")
     args = ap.parse_args()
     clips_dir = Path(args.clips_dir)
 
@@ -100,8 +100,9 @@ def main() -> None:
             continue
 
         from pipeline.atbat import AtBatConfig, atbat_start_times
+        from pipeline.calibration import resolve_base_zones
         from pipeline.detection import DetectionConfig, detect_persons
-        from pipeline.fusion import compute_occupancy
+        from pipeline.fusion import compute_occupancy, compute_zone_velocity
         from pipeline.refine import RefineConfig, refine_segments
         from pipeline.settle import SettleConfig
         det = detect_persons(str(clip_path), DetectionConfig(),
@@ -122,9 +123,18 @@ def main() -> None:
         else:
             occ = [False] * len(det.times)
             fires = []
+        # Stage 11: base zones, same per-file-override-then-shared lookup
+        # as the plate zone. A clip with no "bases" key yields {}, so
+        # refine_segments behaves exactly as before Stage 11.
+        base_zones = resolve_base_zones(clip_path, calib_dir=clips_dir)
+        zone_velocities = {name: (det.times, compute_zone_velocity(det.times, det.boxes, z))
+                          for name, z in base_zones.items()}
+        # Stage 11 tier 1: same mechanism, plate zone -- see pipeline/run.py.
+        if zone is not None:
+            zone_velocities["plate"] = (det.times, compute_zone_velocity(det.times, det.boxes, zone))
         kept = refine_segments(raw_kept, motion.times, sm_motion, det.times,
                                occ, fires, motion.duration,
-                               RefineConfig(settle=settle_cfg))
+                               RefineConfig(settle=settle_cfg), zone_velocities)
         fus_rec, fus_tot, fus_missed = recall_line("refined", kept, truth,
                                                    motion.duration)
         print(f"    at-bat fires: {[round(f, 1) for f in fires]}")

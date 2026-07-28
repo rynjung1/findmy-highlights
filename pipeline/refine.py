@@ -1,6 +1,6 @@
-"""Segment refinement: play extension, padding, and final merge (Phase 3).
+"""Segment refinement: play extension, padding, and final merge (Stage 3).
 
-This replaces Phase 2's score-level sustain as the mechanism that decides
+This replaces Stage 2's score-level sustain as the mechanism that decides
 where a segment ENDS (the dual-hysteresis sustain path remains in
 segments.py but is no longer fed by the fused score — one mechanism owns
 the exit boundary, so extensions are attributable and can't compound).
@@ -24,6 +24,68 @@ ending.
 
 PADDING: pre_pad/post_pad seconds so cuts never clip into a play's run-up
 or tail; clamped to the clip bounds. Padded segments that touch are merged.
+
+ZONE-LOCAL CLOSE (Stage 11): whole-frame settle protects against closing
+mid-play, but it's a blunt instrument for anything localized to one part
+of the frame -- it waits for the ENTIRE frame to quiet down, not just the
+specific thing that's resolving. pipeline.fusion.compute_zone_velocity
+gives a tighter, zone-local signal: box-height-normalized speed of
+whoever's in a calibrated zone, base OR plate. Validated against
+clip_base1/3/4 for bases: a resting fielder (standard positioning, no
+play happening) reads 0.00-0.12 bh/s for many seconds; a real throw/catch
+arrival spikes to 0.32-1.01 bh/s in the few seconds before the catch, then
+drops back down once the fielder is set to receive it. Raw base OCCUPANCY
+can't tell these apart (Stage 10's resting-fielder confound: a fielder can
+sit in the zone at 92-100% occupancy the whole clip) -- velocity can,
+because the confound is about presence, not motion. The identical
+spike-then-quiet shape shows up at the PLATE too (Stage 11 tier 1): an
+incoming batter walking up then settling into the box, closing out the
+walk-up gap left over from the previous play -- same function, same
+guard, just a different physical event producing the same signature.
+Plate-zone data is noisier than the base clips (a much larger calibrated
+radius catches the catcher/umpire/on-deck batter too, not just one
+player), so not every at-bat transition produces a usable candidate --
+that's fine, the mechanism only ever tightens when it's confident, and
+falls back to whole-frame behavior otherwise.
+
+zone_close_candidate() finds the first time, after a genuine velocity
+spike, that a zone has gone quiet again -- but extend_segments() only
+ever uses that time to SHORTEN the whole-frame close time, never to
+lengthen it, and only when there is no whole-frame-detected motion
+between the zone candidate and the whole-frame close time. That guard
+matters: a continued play elsewhere on the field (a relay throw, a runner
+still advancing, a second batter's activity) almost always still shows up
+in whole-frame motion even after this one zone has quieted down, and
+deferring to whole-frame in that case is what keeps this addition from
+ever cutting off real, still-detected action -- it can tighten dead time,
+it can never override a real detected signal.
+
+KNOWN LIMITATION (no reference clip currently exercises this): a double
+play or a continued relay -- the SAME base receiving a second throw after
+a brief lull -- looks identical to "the play is over" from that one
+zone's velocity alone, since zone_close_candidate() returns the first
+settle after the first arrival and does not re-arm for a second spike
+within the same call. The whole-frame guard above catches the common
+case, because a real second throw/relay typically also produces broader
+whole-frame motion (a runner, a second fielder) that blocks the
+tightening. But a hypothetical continued play that stayed entirely
+within one base's own zone -- with no detectable whole-frame signature
+elsewhere -- would still be missed. Flagging this now rather than
+discovering it silently later; it needs a real reference clip with a
+double play or relay before it can be tested, let alone fixed.
+
+WALK-UP GAP note: tier 1 above (plate zone reusing this same mechanism)
+only tightens the EXTENSION layer -- it's floored at the raw segment's
+own end, same as the base case. Measured against clip_540's ~86s
+between-play stretch: only ~12 percentage points of that gap's kept time
+sits in the extension layer; roughly 49% is already present in the RAW
+motion segment before extension logic ever runs (pipeline.segments,
+Stage 1/2). Tier 1 cannot touch that larger piece by construction. A
+fix that could would mean changing what counts as segment-worthy motion
+in pipeline.segments itself (e.g. weighting by proximity to the plate),
+which is a materially bigger, riskier change than anything in Stage
+10/11 so far -- explicitly deferred pending its own feasibility stage,
+not attempted here.
 """
 
 from dataclasses import dataclass, field
@@ -51,6 +113,17 @@ class RefineConfig:
     pre_pad_s: float = 3.0
     post_pad_s: float = 1.5
     final_merge_gap_s: float = 0.5
+    # Stage 11: box-heights/sec (pipeline.fusion.compute_zone_velocity's
+    # units). 0.20 sits above every resting-fielder sample measured across
+    # clip_base1/3/4 (max 0.12) and below the real arrival spikes (min
+    # 0.32) -- see this module's ZONE-LOCAL CLOSE docstring section. Reused
+    # as-is for the plate zone (tier 1) rather than separately re-derived --
+    # not proven optimal there, just not proven wrong either; the guard
+    # means a bad threshold costs missed tightening opportunities, not
+    # correctness, so this wasn't worth blocking tier 1 on.
+    zone_arrival_thresh: float = 0.20
+    zone_settle: SettleConfig = field(
+        default_factory=lambda: SettleConfig(threshold=0.20, min_quiet_s=1.5))
 
 
 def departure_times(det_times, occupied):
@@ -64,9 +137,47 @@ def departure_times(det_times, occupied):
     return out
 
 
+def zone_close_candidate(zone_times, zone_velocity, search_start, cap_end,
+                         arrival_thresh, zone_settle_cfg):
+    """Earliest time it's safe to consider THIS base's play resolved,
+    using zone-local velocity alone. Returns None if no genuine arrival
+    was ever seen in [search_start, cap_end] -- a resting fielder with no
+    real play must never produce a candidate (this function never looks
+    at occupancy, only velocity, precisely because occupancy alone can't
+    tell the two apart -- see this module's ZONE-LOCAL CLOSE docstring).
+
+    Also returns None if an arrival was seen but the zone never actually
+    settled again within the window -- an unresolved (or still-ongoing)
+    play must not produce a fabricated close time.
+
+    No whole-frame cross-check happens here -- that's extend_segments()'s
+    job, the only caller allowed to act on this candidate."""
+    zone_times = np.asarray(zone_times, dtype=float)
+    zone_velocity = np.asarray(zone_velocity, dtype=float)
+    idx = (zone_times >= search_start) & (zone_times <= cap_end)
+    zt, zv = zone_times[idx], zone_velocity[idx]
+    active = np.nonzero(zv >= arrival_thresh)[0]
+    if len(active) == 0:
+        return None
+    arrival_time = float(zt[active[0]])
+    after = zt >= arrival_time
+    settled = settled_mask(zt[after], zv[after], zone_settle_cfg)
+    settled_at = np.nonzero(settled)[0]
+    if len(settled_at) == 0:
+        return None
+    return float(zt[after][settled_at[0]])
+
+
 def extend_segments(segments, motion_times, motion_smooth, departures,
-                    atbat_fires, duration, config: RefineConfig | None = None):
-    """Apply the play-extension rule to each eligible segment's end."""
+                    atbat_fires, duration, config: RefineConfig | None = None,
+                    zone_velocities: dict | None = None):
+    """Apply the play-extension rule to each eligible segment's end.
+
+    `zone_velocities`, if given, is {base_name: (times, velocity)} from
+    pipeline.fusion.compute_zone_velocity -- see this module's ZONE-LOCAL
+    CLOSE docstring section for what it does and its known limitation.
+    Omitting it (the default) is byte-for-byte identical to Stage 10
+    behavior: every existing caller that doesn't pass it is unaffected."""
     cfg = config or RefineConfig()
     motion_times = np.asarray(motion_times, dtype=float)
     motion_smooth = np.asarray(motion_smooth, dtype=float)
@@ -93,6 +204,42 @@ def extend_segments(segments, motion_times, motion_smooth, departures,
             e = last_active_time(wt[:scan_end], ws[:scan_end], cfg.settle)
             if e is None:
                 e = b
+
+        if zone_velocities and e > b:
+            best_zone_e = None
+            for zt, zv in zone_velocities.values():
+                cand = zone_close_candidate(zt, zv, a, cap_end,
+                                            cfg.zone_arrival_thresh,
+                                            cfg.zone_settle)
+                if cand is not None and cand < e:
+                    if best_zone_e is None or cand < best_zone_e:
+                        best_zone_e = cand
+            if best_zone_e is not None:
+                # `e` is BY DEFINITION the last whole-frame-active sample,
+                # so (best_zone_e, e] always contains an "active" reading
+                # whenever best_zone_e < e -- a naive "any activity in
+                # between" check would therefore always block, making this
+                # whole mechanism a no-op. What actually matters is
+                # whether that trailing activity is a genuine REACTIVATION
+                # (quiet, then active again -- a real second event, e.g. a
+                # relay throw) versus a monotonic tail-off of the SAME
+                # settling process the zone already tracked (never dips
+                # and rises again). Only the former should block. Includes
+                # the sample AT best_zone_e itself (>=, not >) -- the
+                # quiet half of a reactivation can land exactly there.
+                between = (motion_times >= best_zone_e) & (motion_times <= e)
+                ws_between = motion_smooth[between]
+                was_quiet = False
+                reactivated = False
+                for val in ws_between:
+                    if val < cfg.settle.threshold:
+                        was_quiet = True
+                    elif was_quiet:
+                        reactivated = True
+                        break
+                if not reactivated:
+                    e = max(b, best_zone_e)
+
         fire = next((f for f in sorted(atbat_fires) if b < f <= cap_end), None)
         if fire is not None:
             e = min(e, fire) if e > b else e
@@ -110,11 +257,12 @@ def pad_and_merge(segments, duration, config: RefineConfig | None = None):
 
 def refine_segments(segments, motion_times, motion_smooth, det_times,
                     occupied, atbat_fires, duration,
-                    config: RefineConfig | None = None):
+                    config: RefineConfig | None = None,
+                    zone_velocities: dict | None = None):
     """Full refinement: extension then padding/merge. `segments` should
-    already be veto-filtered."""
+    already be veto-filtered. `zone_velocities` -- see extend_segments()."""
     cfg = config or RefineConfig()
     deps = departure_times(det_times, occupied)
     extended = extend_segments(segments, motion_times, motion_smooth, deps,
-                               atbat_fires, duration, cfg)
+                               atbat_fires, duration, cfg, zone_velocities)
     return pad_and_merge(extended, duration, cfg)

@@ -134,7 +134,7 @@ def test_person_outside_zone_not_occupied():
     assert not occ.any()
 
 
-# ---------- Phase 10: relaxed (non-stationary) entry for base zones ----------
+# ---------- Stage 10: relaxed (non-stationary) entry for base zones ----------
 
 def test_default_entry_still_requires_stationary():
     # calling compute_occupancy() the exact way fuse() always has (no new
@@ -149,7 +149,7 @@ def test_default_entry_still_requires_stationary():
 
 
 def test_relaxed_entry_occupies_on_fast_arrival():
-    # the Phase 10 finding: a fielder arriving at speed to make a play
+    # the Stage 10 finding: a fielder arriving at speed to make a play
     # should register as occupied immediately, not wait for them to slow
     # down -- require_stationary_entry=False is the base-zone mode
     det_times = [0.0, 1.0]
@@ -200,7 +200,7 @@ def test_compute_all_occupancy_per_named_zone():
 
 def test_compute_all_occupancy_defaults_to_relaxed_entry():
     # compute_all_occupancy is new (no existing callers), so it can
-    # safely default to what Phase 10's validation found works better
+    # safely default to what Stage 10's validation found works better
     # for bases, unlike compute_occupancy's own default (True, unchanged
     # for the plate's sake)
     from pipeline.fusion import compute_all_occupancy

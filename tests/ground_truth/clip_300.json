@@ -15,7 +15,7 @@
      "note": "new batter arrives ~76, in stance with ready/load motions through 96"},
     {"id": "e6", "window": [95, 103], "type": "hit_and_run", "required": true,
      "check_continuity": true,
-     "note": "swing/contact ~97, batter drops bat and runs ~98, fielding through ~102; FOUND LATE during Phase 3 safeguard analysis (originally under-annotated as part of borderline e3) — the at-bat-start FIRE at t=107 led to frame review that revealed this play; continuity-checked because the swing sits in a raw-detection coverage gap that pre-padding must close"},
+     "note": "swing/contact ~97, batter drops bat and runs ~98, fielding through ~102; FOUND LATE during Stage 3 safeguard analysis (originally under-annotated as part of borderline e3) — the at-bat-start FIRE at t=107 led to frame review that revealed this play; continuity-checked because the swing sits in a raw-detection coverage gap that pre-padding must close"},
     {"id": "e4", "window": [122, 129], "type": "pitch", "required": true,
      "note": "ball clearly visible in the air ~125, batter takes the pitch"},
     {"id": "e5", "window": [144, 160], "type": "warmup_throws", "required": false,
