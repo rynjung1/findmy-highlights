@@ -17,420 +17,149 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 
 ## Current status
 
-**Stages 0-7 complete and approved.** Detection pipeline (motion → person
-detection → play extension → padding), the manifest, multi-file handling,
-stitching kept segments into one finished output video, a FastAPI
-backend wrapping all of it (upload, calibration, trigger-processing,
-progress, manifest read/update, re-export), and the Home/Upload frontend
-all work end-to-end and are covered by 240 unit tests + 2 e2e tests
-(`pytest tests/` and `pytest tests/ -m e2e`), including the Stage 7 manual
-browser smoke test (upload → calibrate → process → watch, a real
-end-to-end pass in an actual browser, not just the proxy-level HTTP
-checks below).
+**v1 is complete.** Every piece of work originally scoped for this version —
+the detection pipeline, multi-file handling and stitching, the backend API,
+the full Home/Upload and Edit Log frontend, multi-base calibration, and the
+zone-velocity signal built on top of it — is done, tested, and has been
+exercised end to end against real footage and a real running server, not
+just in-process test clients. `pytest tests/` covers 247 unit tests,
+`pytest tests/ -m e2e` covers 2 tests that run real model inference, and a
+full ten-item pre-demo checklist (upload, calibrate, process, watch, Edit
+Log restore/cut-again, multi-file, re-export) has been walked end to end in
+an actual browser.
 
-The manual pass surfaced three real issues, since fixed and re-verified:
+**Detection pipeline.** Motion detection, person detection, plate/base
+occupancy, at-bat boundary detection, play extension, and padding work
+together as described in Architecture overview below. Two honest findings
+from early validation still hold: person detection alone doesn't improve
+recall over motion-only on this footage — the discrimination that matters
+comes from plate occupancy over time, not person presence — and the first
+version of play extension cut real plays short by up to a few seconds
+because it ended at the first quiet motion sample instead of requiring
+quiet to hold continuously; both were caught and fixed against real
+reference-clip footage, not synthetic cases. The full pipeline was also
+run once against a real 67.5-minute, 4049.9s game recording
+(`full_game.mkv`): 37.4 minutes wall-clock, ~969 MiB peak resident memory,
+84% of the game (3391.7s) flagged kept, output fully decodable, every
+sampled frame showing real live action. Re-run later for the pre-demo
+checklist and reconfirmed clean (2237.02s = 37m17s, no regression) after an
+earlier re-run had clocked 67.6 minutes — traced to a leftover
+`uvicorn --reload` process eating background CPU during that specific run,
+not a real slowdown.
 
-- **Exported video looked barely trimmed** (clip_300: 191s source down
-  to only 181s, ~10s shorter). Investigated by pulling the actual test
-  batch and re-running both detection and stitching directly: the
-  manifest's real cut total (15.2s) matched `scripts/regression.py`'s
-  currently-validated baseline for clip_300 almost exactly (170s kept,
-  91%) and a fresh CLI run on the same file (16.0s cut) — **detection via
-  the API behaves identically to CLI-validated behavior, not a bug.** The
-  output looking barely-trimmed is the already-documented stream-copy
-  keyframe-snap slack (see Stitching below): re-running `scripts/stitch.py`
-  against the same manifest reproduced the exact 181.3s output and
-  self-reported "requested output duration: 170.5s" vs. the 181.3s
-  actually rendered, the same mechanism already measured and written up
-  for `full_game.mkv`. Nothing changed here; it was a mismatch between
-  expectation and the already-validated baseline, not a regression.
-- **No progress indication during processing** — same static stage text
-  for the whole run, no spinner. Root-caused, not just patched: a real
-  (uncached) detect job was run while polling the job file every second,
-  showing that ~92% of a real run's wall-clock time (80 of 87s on
-  clip_300) is spent inside a single "running player detection" stage
-  with zero intermediate updates — polling and re-rendering were already
-  working correctly, the backend just never reported progress *within*
-  that stage. `pipeline/detection.py` already had a per-sampled-frame
-  `progress_cb` hook that nothing called; `pipeline/run.py` now wires it
-  to `on_stage`, giving a live `(Ns/Ts)` count throughout what used to be
-  one static string — re-verified with the same real-job probe, updating
-  roughly once per second start to finish. `ProcessingStep.jsx` also
-  gained a small CSS spinner so there's a visible "alive" indicator
-  during any stage, not just this one.
-- **Calibration marker offset from the click** — investigated and not
-  pursued further; see Known limitations below.
+**Multi-file handling & stitching.** Files are ordered by capture-time
+metadata when it's unambiguous and trustworthy, and refuse to guess
+otherwise — returning a suggested order for the caller to confirm instead.
+A play split across a file boundary renders as two separate clips by
+design: play extension and at-bat state never cross a file boundary,
+verified with adversarial back-to-back test timelines and real split-clip
+footage. Stitching stream-copies when every source shares
+codec/resolution/fps (fast, lossless) and falls back to a normalizing
+re-encode otherwise. A since-fixed bug capped a video's reported duration
+at the frames actually decodable rather than what the container claimed —
+trusting the nominal count had been overstating "dead time" by several
+seconds on every clip.
 
-Backend additions for Stage 7, all tested (59 backend tests total now):
-- `GET /batches/{id}/preview.jpg` — a frame fixed at 20s into the video
-  (not frame 0, which is often black/blurry/still-settling), for the
-  calibration screen to click on. Guaranteed (and tested) to be encoded
-  at the video's exact native resolution, never resized — the frontend's
-  coordinate-scaling math depends on that being true.
-- `GET /batches/{id}/output` — serves the exported video (range-request
-  support via `FileResponse`, so the player can seek without downloading
-  the whole file first).
-- **Detect → export now auto-chains.** `POST /process` used to only run
-  detection; now, once detection completes, export starts automatically
-  in the same background thread — one "Process" action, one wait, then a
-  playable video, matching the spec's Home-view description. If detect
-  fails, export is never started. The manual `POST /export` endpoint
-  stays separate for re-exporting after a future restore (Stage 8/9),
-  and its busy-check was loosened to allow re-triggering once `completed`
-  (unlike detect, which still blocks any re-trigger) — re-stitching is
-  idempotent against whatever the manifest currently says, so it's the
-  correct way to regenerate output after an edit, not a repeat of
-  expensive work.
-- **Upload validates file type, both sides.** Client-side (fast
-  rejection before any bytes leave the browser) and server-side (the
-  real enforcement — every filename in a batch is checked against an
-  extension allowlist *before* any file is written to disk, so one bad
-  file in a multi-file upload can't leave partial writes of the good
-  ones). Deeper "does this actually decode" validation isn't duplicated
-  here — the pipeline's existing corrupt-file handling already covers
-  that at process time.
+**Backend API.** The FastAPI service wrapping the pipeline (upload,
+calibration, trigger-processing, progress, manifest read/update,
+re-export) is confirmed against a real running server via
+`scripts/smoke_api.py` — real upload, real calibration, real detection,
+real export, no fakes — and covered by 79 backend-specific tests. Two
+issues were caught and fixed in review before sign-off: calibration
+wasn't reachable through the API at all at first, so every API-triggered
+job silently ran with the at-bat boundary system disabled; and processing
+could start with no calibration set and no warning until a 37-minute job
+finished. Both are fixed now — a dedicated calibration endpoint, and a 400
+at trigger time unless the caller explicitly passes
+`allow_uncalibrated: true`. Job state is written to disk at every stage
+transition rather than kept in memory, so it survives the dev server's
+frequent restarts, and a single-job-at-a-time lock stops two heavy
+detection jobs from competing for the same CPU.
 
-**Coordinate scaling (the click-to-calibrate design decision):** the
-browser displays `preview.jpg` at whatever size fits the layout, not
-necessarily its native resolution. `CalibrateStep.jsx` reads the loaded
-`<img>` element's `naturalWidth`/`naturalHeight` (the browser's own
-decoded pixel dimensions) and scales the click's on-screen offset by
-`natural / displayed` before sending coordinates to the backend — no
-extra API round-trip needed, since the JPEG already carries its own true
-dimensions and the backend guarantees they equal the video's real frame
-size. As defense in depth, `POST /calibration` still validates
-coordinates fall within the video's actual frame bounds — real bounds
-checking, not just documentation of the intent.
+**Home/Upload frontend.** Upload → click-to-calibrate → (order
+confirmation, if needed) → progress → player, all working end to end in a
+real browser, with detection and export auto-chained so one "Process"
+click ends in a playable, downloadable video. A manual pass surfaced and
+fixed three real issues: an exported video that looked barely trimmed
+(turned out to be already-documented keyframe-snap slack from stream-copy
+seeking, not a bug); no progress indication during the long
+person-detection stage (fixed by wiring an existing per-frame progress
+callback that nothing was calling); and a small calibration-marker offset
+from the actual click (investigated and judged ordinary click variance —
+see Known limitations).
 
-**What's verified:** the full build succeeds; every HTTP request shape
-the React code sends was exercised through the Vite dev-server proxy
-against the real backend (preview.jpg at native resolution, calibration
-written correctly); and the manual browser pass covered the full
-upload→calibrate→process→watch flow start to finish, clicking the
-preview image and confirming the marker (small offset noted above and
-in Known limitations, not a functional blocker), and processing showing
-live stage progress. See "How to run it" for how to start both servers.
+**Edit Log.** Lists every segment ever cut, using the manifest's permanent
+`origin === "gap"` marker rather than its mutable `status`, so restored
+entries still show up correctly. Each entry has a preview (seeking into
+the original source file) and a restore/cut-again toggle. The
+segment-preview endpoint checks requested filenames against a per-batch
+allowlist rather than a traversal-character blocklist, specifically
+because a blocklist can be bypassed by percent-encoding (`%2e%2e`) in a
+way an allowlist can't. A real UI bug was caught and fixed during the
+manual pass: a second toggle in quick succession sometimes didn't show its
+result visually, even though the backend was already correct at every
+step. Root-caused with a `jsdom`/`React.StrictMode` harness across seven
+scenarios (none reproduced it), so the toggle handler was rewritten to
+always re-fetch the manifest and fully replace local state from it, rather
+than merge the `PATCH` response into local state — removing the entire
+"local state can drift from the server" bug class regardless of the
+original cause.
 
-**Stage 10 (multi-base calibration): complete.** Additive-only, exactly as
-scoped: `calibration.json` now supports an optional `bases` dict
-(first/second/third, each independently optional) alongside the existing
-home-plate fields; `pipeline/calibration.py` gained `resolve_base_zones()`
-(same per-file-override-then-shared lookup as `resolve_zone()`, but reads
-`bases`) and `build_calibration()` gained an optional `bases` parameter.
-`resolve_zone()` itself, and every existing caller of it, is byte-for-byte
-untouched — proven, not just claimed: `scripts/regression.py`'s output
-across all seven reference clips was diffed before/after this stage's
-pipeline changes (via `git stash`), and the diff is empty.
+**Automatic re-export.** Every restore/cut-again toggle in the Edit Log
+triggers a real export and refreshes the video shown, instead of requiring
+an explicit "Re-export" button — chosen so the manifest and the video it
+describes can never drift apart, and because re-export is fast (stitching
+only, ~1s measured). Verified two ways: the real HTTP request sequence
+replayed by hand against a live backend and a real clip (restoring a
+segment correctly dropped output duration from 181.299s to 178.009s;
+reverting correctly restored it), and the actual bundled component driven
+through a `jsdom` harness confirming exactly one export fires per toggle.
+A frame-level check — not just a duration number — confirmed the restored
+footage is genuinely present in the output's pixels, not just relabeled in
+the JSON.
 
-This stage's job was to compute and validate the raw base-occupancy
-signal, not wire it into segment-closing logic (that's Stage 11's,
-mirroring exactly how Stage 2 built and validated plate-occupancy but
-Stage 3 was what actually used it). Validated against `clip_base1/3/4`
-(real defensive plays at first base; `clip_base2`'s line-drive catch has
-no base event, see its ground truth file) and found two real problems,
-not one:
+**Multi-base calibration.** `calibration.json` now optionally covers
+first/second/third base alongside home plate, entirely additive —
+`scripts/regression.py`'s output across every reference clip is
+byte-identical before and after. Validating it against real defensive
+plays at first base surfaced two real problems, both fixed: the plate's
+pixel radius is far too large for a base at a backstop camera's typical
+distance (fixed with a separate, smaller base-specific default), and a
+fielder arriving at speed doesn't satisfy the plate's "stationary entry"
+requirement the way a settling batter does (fixed with an opt-out
+parameter). It also surfaced the finding the next piece of work needed to
+design around: raw occupancy alone can't tell "a fielder standing at their
+normal position" from "a catch or tag resolving right now" — a first
+baseman can read as continuously occupied for an entire clip, play or no
+play.
 
-- **The plate's radius (280px) is wrong for bases, not just untuned.**
-  Bases sit much farther from a backstop-mounted camera than the plate,
-  so the same pixel radius that correctly bounds a batter covers roughly
-  half the visible field at first base's distance — confirmed visually
-  (a frame with both radii drawn) before touching any code. Occupancy
-  at that radius read true for nearly the entire clip. Fixed with a
-  much smaller, explicitly base-specific default
-  (`DEFAULT_BASE_RADIUS_PX`, flagged in its own docstring as
-  dataset-tuned against these three clips' framing, not derived from
-  camera geometry — a real UI-driven calibration click will refine this
-  further).
-- **A fielder arriving at speed lags the plate-style stationary-entry
-  requirement by a measured 3 seconds** (`clip_base4`: relaxed-entry
-  onset at t=11 vs. strict-entry onset at t=14) — confirmed with real
-  per-sample occupancy timelines, not assumed. `compute_occupancy()`
-  gained a `require_stationary_entry` parameter (default `True`, so
-  `fuse()`'s plate call site is provably unaffected); the new
-  `compute_all_occupancy()` (base-only, no prior callers) defaults it
-  to `False`, encoding this finding directly.
-- **A third, more fundamental finding, correctly radius-tuned or not:**
-  a first baseman stands near first continuously as normal defensive
-  positioning, not just during an active play — unlike the plate, which
-  is genuinely empty between at-bats. Quantified, not just observed:
-  `clip_base1` and `clip_base3` read occupied for 100% of pre-play
-  samples (the zone was "occupied" from t=0, long before any play
-  developed); `clip_base4` did not (15% pre-play occupied — empty until
-  the play actually approached). All three calibrated clips are
-  first-base plays, so whether this varies by base (first vs.
-  second/third) is untested and flagged for Stage 11 to check against
-  real second/third-base footage, not assumed either way from this
-  data. Raw occupancy alone cannot reliably distinguish "fielder
-  standing at their position" from "a catch/tag resolving right now" —
-  this is the load-bearing finding Stage 11 needs to design around
-  (likely pairing occupancy with motion/velocity at the zone, or a
-  sustained-vs-transient distinction), not something this stage
-  attempts to solve.
+**Zone-velocity tightening.** Answers the problem multi-base calibration
+surfaced: `compute_zone_velocity()` measures how fast the nearest tracked
+person in a zone is moving (box-heights/sec) and distinguishes a resting
+fielder (0.00-0.12 bh/s, sustained) from a genuine throw/catch arrival
+(0.32-1.01 bh/s, a clear spike) — validated directly against real
+first-base footage. It's wired into play extension for both base zones
+and, since the same spike-then-settle shape shows up there too, the plate
+zone: an incoming batter walking up and settling into the box tightens the
+same "walk-up gap" left over from the previous play. The mechanism only
+ever shortens a segment's close time, never lengthens it, and only when no
+other whole-frame motion is still happening elsewhere — a continued play
+on the field (a relay throw, a runner still advancing) still wins and
+blocks the tightening, so this can trim dead time faster but can't cut off
+real action. Two known limitations are flagged rather than shipped
+silently: a double play or continued relay at the *same* base within one
+play could look identical to "the play is over" from that zone's velocity
+alone (no reference clip currently exercises this case); and only the
+smaller, extension-layer piece of the walk-up gap is addressed this way —
+roughly half of it is already present in the raw motion segment before
+extension logic ever runs, which would need a larger, separately-scoped
+change to fix.
 
-15 new unit tests (backward-compat fixtures, partial base sets,
-per-file override resolution for bases, both entry modes,
-`compute_all_occupancy`) — 240 total pass. `scripts/validate_base_occupancy.py`
-is the standalone validation harness this stage's numbers came from,
-reusing already-cached person detections rather than re-running model
-inference.
-
-**Stage 9 (re-export flow): complete.** The spec left the choice
-between an explicit "Re-export" button and automatic background
-re-render open; automatic was chosen — every restore/cut-again toggle
-in the Edit Log now triggers a real `POST /export` itself, waits for it
-to complete, and refreshes the video shown in the Edit Log's own
-"Current output" section (no navigating to Home to see the result, per
-the spec). Chosen over a button because the manifest update and the
-regenerated video should never be allowed to drift apart — an explicit
-button adds a state where they can (a restore that's "saved" but not
-yet reflected in anything watchable), and re-export is fast (stitching
-only, not re-detection: ~1s measured against clip_300) so there's no
-real cost to doing it every time.
-
-All toggle buttons disable while a re-export from any toggle is in
-flight, which also serializes rapid successive toggles into one
-export-at-a-time rather than racing `POST /export` calls (the backend's
-existing single-job-at-a-time lock, Stage 6, would 409 an overlapping
-one anyway — this avoids ever hitting that path from normal use). The
-video's URL carries a cache-bust token that changes on every completed
-export, so the browser can't serve back the previous export's response
-for what's otherwise the same URL. On mount, the Edit Log also checks
-for an already-completed export (e.g., Stage 7's original auto-chained
-one) and shows it immediately, rather than the player only appearing
-after the first restore of the session.
-
-**Verified two ways.** First, the exact request sequence the component
-makes (`PATCH` segment → `GET` manifest → `POST /export` → poll
-`GET /jobs/export`) was replicated by hand against the real running
-backend and the real clip_300 batch: restoring `seg_002` correctly
-dropped `output.mp4`'s duration to 178.009s, and reverting it correctly
-restored 181.299s — the exact numbers from the Stage 8 frame-level
-verification, now reached by triggering through the toggle path instead
-of a manual export call. Second, the actual component source (bundled,
-unmodified) was driven through the same `jsdom` + `React.StrictMode`
-harness as the Stage 8 investigation: confirmed exactly one export
-triggers per toggle (not zero, not a duplicate), the "Re-exporting..."
-indicator and disabled buttons appear for the duration of the job, and
-the video's `src` carries a fresh cache-bust token afterward.
-
-**Confirmed by a real manual pass**: preview seek, Download, both toggle
-directions, and rapid restore→cut-again-before-export-finishes (handled
-cleanly, no errors or inconsistent state) all work correctly.
-
-**Full pre-demo checklist walked end to end, all ten items pass** — see
-the Stage 5 full-length checkpoint above for the one real scare along
-the way (an initial re-run came in at 67.6 minutes instead of ~37,
-traced to environmental contention during that specific run and
-conclusively re-confirmed clean in isolation, not a regression) and
-Setup/How to run it below for the multi-file and Edit Log checks run
-fresh against this exact codebase rather than resting on older stages'
-validation. **v1 is complete.**
-
-**Stage 8 (Edit Log UI): complete and approved.**
-
-New for this stage:
-- `GET /batches/{id}/source/{filename}` — serves one of the batch's own
-  original uploaded files (range-request support, same as `/output`),
-  for the Edit Log's "preview a cut segment by seeking into the source
-  file" requirement rather than exporting a physical clip per candidate.
-  `{filename}` is the first endpoint here where the trailing path
-  component is a client-supplied URL segment rather than a hardcoded
-  literal, so it's checked against `files.json` (the batch's own
-  recorded file list) as an allowlist, not a traversal-character
-  blocklist — a bare `..` needs no slash to climb one directory, and a
-  regex/character-based check would also miss encoded bypasses
-  (`%2e%2e`), which an exact-match allowlist can't be fooled by
-  regardless of encoding. A resolved-parent-path check backs that up.
-  Five tests cover it, including one that confirms `%2e%2e` actually
-  reaches the handler (a literal bare `..` doesn't — httpx, like a real
-  browser, collapses it during URL construction before the request is
-  even sent, so that alone would've been a test that passes for the
-  wrong reason) and one confirming the allowlist is scoped per-batch,
-  not just "does a same-named file exist somewhere under the resolved
-  path."
-- `EditLogView.jsx` — lists every segment detection ever cut. Filters on
-  `origin === "gap"` rather than current `status`: `origin` is set once
-  at manifest build time and never changes (see `pipeline/manifest.py`),
-  so it's the permanent "was this ever a cut candidate" marker,
-  independent of whether it's since been restored — which is exactly
-  what lets restored and still-cut entries both show up, visually
-  distinguished (green left-border + "Restored" badge vs. plain), per
-  the spec. Each entry has a Preview toggle (an inline `<video>` seeked
-  to the segment's `start_s` via `loadedmetadata`, auto-pausing at
-  `end_s` via `timeupdate` — bounded playback of just that span, not the
-  whole source file) and a Restore/Cut-again toggle (`PATCH
-  .../manifest/segments/{id}`, already built in Stage 6). Handles no
-  batch yet and no manifest yet as distinct non-error states, not a
-  crash.
-- Nav bar (`App.jsx`) — Home / Edit Log, independent of the existing
-  upload→calibrate→...→done stage machine, which is now nested under the
-  Home tab unchanged. Switching tabs doesn't reset in-progress upload
-  state.
-
-**What's verified:** the production build succeeds. Every endpoint the
-Edit Log depends on was exercised for real against the actual clip_300
-batch from the Stage 7 manual pass (not a fake) — `GET manifest`,
-`PATCH .../segments/{id}`, and `GET .../source/{filename}` (206 Partial
-Content) all confirmed working directly. The manual browser pass then
-covered the rest: restore toggle visual state, preview playback, and
-list rendering, plus one real bug it caught (below).
-
-**Caught during the manual pass, root-caused and fixed:** toggling a
-segment restore → cut-again showed the *first* toggle's visual result
-correctly but not the second — the backend was confirmed correct at
-every step (`PATCH` responses and the manifest itself both showed the
-right final status), so this was specifically a client-side rendering
-question. Investigated by bundling the actual `EditLogView.jsx` source
-and driving it through `jsdom` + `@testing-library/react` under
-`React.StrictMode` (matching `main.jsx` exactly) across seven scenarios
-— sequential toggles, multi-row, a rapid no-wait-between double-click,
-interleaved different-row toggles, and toggling with the preview player
-open — none reproduced it. Rather than keep guessing at an
-unreproducible cause, `handleToggle` was rewritten to eliminate the
-entire bug class regardless of root cause: it now does a fresh
-`GET .../manifest` after every successful `PATCH` and fully replaces
-local state from that response, instead of merging the `PATCH`'s own
-response into local state. A `console.log` was added at the exact
-moment a toggle is clicked, before any request goes out, specifically
-so a real click could be told apart from a request just being hard to
-spot in a busy Network tab. Confirmed resolved on a clean retest:
-Console showed both clicks firing, Network showed both `PATCH`
-requests returning 200 with a manifest refetch after each, and the page
-now visually shows the correct final state — the original symptom was
-stale visual state in an already-open tab from before the refetch fix
-landed, not a live bug in the current code.
-
-**End-to-end proof the mechanism affects real video, not just JSON**
-(requested specifically, since Stage 9 wasn't built yet to demonstrate
-this through the UI): against the real clip_300 batch, restored
-`seg_002` via `PATCH`, triggered a real `POST /export`, and confirmed
-two ways — not just a duration number. First, a real finding worth
-recording: total output duration went *down* (181.3s → 178.0s) despite
-restoring content, because merging the restored span with its two
-kept neighbors removed a keyframe-snap boundary's worth of the slack
-documented under Stitching below; `scripts/stitch.py`'s own "requested
-output duration" line confirmed the manifest-level accounting was
-still correct (170.5s → 172.3s, exactly the restored span's length),
-which is why duration alone isn't proof and a frame check was needed.
-Second, extracted a real frame at the corresponding output timestamp
-and compared it to the same timestamp in the original source: same
-field, same players, same batter mid-swing, same clouds — the restored
-segment's actual pixels are in the output. Cut it again, re-exported:
-duration returned to exactly 181.299s (byte-identical to the original
-baseline), and the same frame position now showed different, later
-content — the restored footage was genuinely gone, not just relabeled.
-
-**Stage 6 (backend API):** confirmed against a real running server (not
-just FastAPI's in-process test client) — `scripts/smoke_api.py` uploads a
-real reference clip, uploads its calibration, triggers real detection
-(real model inference, no fakes), polls progress through real stage
-transitions, restores a real cut segment via the manifest-update
-endpoint, triggers real export, and confirms the stitched output file
-exists and plays. All passed (`SMOKE TEST PASSED`).
-
-**Caught during review, fixed before this stage was signed off (not
-deferred):** the first version of this stage let a batch be processed via
-the API with no way to ever provide a plate calibration — `resolve_zone()`
-looks in the video's own directory, but uploaded files live in
-`uploads/<batch_id>/`, so every API-triggered job silently ran with
-plate-occupancy disabled, which means the Stage 3 at-bat boundary system
-(the mechanism that extends a segment through a defensive play and tells
-a real batter change apart from a step-out) never ran at all — a
-materially weaker pipeline than everything Stages 2-5 validated, not a
-cosmetic gap. Confirmed directly: the first smoke-test run *did* execute
-this degraded path (`clip_60.mkv` produced 10 kept/10 cut segments,
-visible in the job's `warnings` field) — a different, weaker result than
-the fully-calibrated CLI run. Fixed by adding `POST /batches/{id}/calibration`
-(accepts either an existing `calibration.json` to reuse, or plate pixel
-coordinates to compute a fresh one — the API equivalent of `scripts/
-calibrate.py --set x,y`) and `GET` to read it back; `pipeline/calibration.py`
-gained `build_calibration()`/`save_calibration()`, refactored out of
-`scripts/calibrate.py` so the CLI and the API write the identical schema,
-not two copies that could drift apart. Re-ran the smoke test with
-calibration uploaded first: `clip_60.mkv` now produces **7 kept/7 cut
-segments — an exact match for the original CLI run**, with no warnings.
-`tests/test_backend_api.py` includes a pair of tests that check this
-directly by inspecting the actual `zone` object `process_video` was
-called with (not inferred from the warnings list being empty, which a
-careless fake could satisfy by accident either way).
-
-**Second review round, also fixed before sign-off:** the calibration fix
-above still let a batch start processing uncalibrated by default —
-finding out only from a completed job's `warnings` field is expensive
-when a real run takes 37 minutes. `POST /batches/{id}/process` now
-checks for `calibration.json` before doing anything else and returns a
-400 immediately if it's missing, unless the caller explicitly passes
-`allow_uncalibrated: true` — a deliberate, visible opt-in instead of a
-silent default, while still preserving the CLI's existing behavior that
-calibration is not force-required (some camera setups genuinely can't
-frame the plate). Verified on the real running server, not just in
-tests: `curl`ing `/process` on an uncalibrated batch returns the 400
-immediately; the same call with `allow_uncalibrated: true` returns 200
-and a real job starts. Setting calibration is itself now rejected
-(409) once the batch's detect job is pending, in_progress, or completed
-— changing it at that point would either race an already-running job or
-silently do nothing for one that's already finished.
-
-Endpoint-level tests (`tests/test_backend_api.py`, `tests/test_jobs.py`,
-`tests/test_storage.py`) use a fast fake pipeline and cover: every
-malformed-request case the spec calls out (updating a manifest that
-doesn't exist yet, updating an unknown segment id, triggering processing
-twice on the same batch, triggering export twice), the
-single-job-at-a-time lock (a second batch is correctly rejected while one
-is active, but a batch stuck on `needs_order_confirmation` correctly does
-NOT block others), the ambiguous-order HTTP flow against real
-ffmpeg-generated multi-file clips, the calibration endpoint (both input
-modes; malformed files; out-of-bounds coordinates; negative radius;
-unknown batch; setting calibration after the detect job is in_progress
-or completed, both rejected), the trigger-processing calibration gate
-(blocked by default, the `allow_uncalibrated` opt-in, and proceeding
-normally once calibration is set), and the startup interrupt sweep.
-
-**Stage 5 full-length checkpoint (per the project spec's requirement to
-test a real 30-60+ min video before this stage is considered done):** ran
-the complete pipeline — detection through stitching — against a real
-67.5-minute (4049.9s) game recording (`reference_clips/full_game.mkv`,
-1920x1080).
-- Detection: 37.4 minutes wall-clock (0.55x realtime), peak memory ~969
-  MiB resident (2.15 GiB peak footprint per macOS's accounting) — stayed
-  bounded throughout, no runaway growth. 120 candidate segments, 84% of
-  the game (3391.7s) flagged kept.
-- Stitching: 8.2s wall-clock for all 120 spans (stream-copy path, no
-  re-encode needed — single source file). Output: 1.42 GB, fully
-  decodable (180,690 frames, matching the expected frame count for its
-  duration almost exactly — no corruption). Rendered duration (3769.5s)
-  came in 377.8s longer than the manifest's requested 3391.7s (3.15s
-  average extra per span, 6.17s max) — verified as stream-copy
-  keyframe-snap slack, never lost or duplicated content (see the
-  Stitching section below for the root cause, checked per-span against
-  this file's real 6.006s keyframe interval, not just asserted).
-- Visual spot-check (since there's no ground truth for this file): sampled
-  frames across the output — 5 spread through the full timeline plus the
-  start/middle/end of the 3 longest segments (144s, 135s, 106s). All show
-  real live action (batters mid-stance, fielders positioned and moving, one
-  frame catches a live pitch mid-flight) — this is genuinely catching real
-  plays, not just avoiding a crash. One honest caveat: the tail end of the
-  144s segment shows a batter walking toward the plate with the bat
-  lowered, not swinging — a borderline dead-time moment kept in per the
-  priority rule's bias toward not cutting early, not a detection failure.
-
-**Re-confirmed during the Stage 9 pre-demo checklist**, with a real scare
-along the way worth recording honestly: a first re-run of this same file
-(via the API, concurrently with other checklist testing) took 67.6
-minutes — nearly double. Rather than accept "the machine was probably
-busy" as an unverified excuse for a hard numeric bar this project set,
-a second run was done in genuine isolation: the one other thing found
-running was a leftover `uvicorn --reload` process that had silently
-accumulated an enormous amount of background CPU time (killed before
-re-running), the CLI was used directly instead of the API to remove the
-FastAPI/threading layer as a variable, and the stale detection cache
-entry for this exact file was deleted first (it otherwise would have
-produced a meaningless near-instant cache-hit "measurement" instead of
-a real one). Result: **2237.02s = 37 min 17s wall-clock**, peak RSS 931
-MiB, peak footprint 2.14 GiB — matching the original checkpoint within
-1-4%, i.e. no regression at all. Detection output was identical again
-too (120 segments, 84% flagged). The 67.6-minute figure was genuinely
-an artifact of that specific run's environment, not the pipeline.
+**Frontend redesign.** Replaced the original flat MVP styling with a
+persistent sidebar (nav plus a live step tracker), a self-hosted Inter
+font and consistent design tokens in place of generic gradients and pill
+buttons, a custom-styled file picker, and an intro panel next to the
+upload dropzone so the initial screen isn't just an empty card.
 
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
@@ -440,6 +169,11 @@ Open items:
   end-to-end validation without the same source files.
 - Manual "cut a kept segment" (the reverse of restore) is intentionally
   not built yet — see Known limitations.
+- Zone-velocity tightening's same-zone re-arm gap (a double play or
+  continued relay at one base within a single play) has no reference clip
+  to test against yet — see Zone-velocity tightening above.
+- The walk-up gap's larger raw-segment-level piece is deliberately not
+  started — see Zone-velocity tightening above.
 
 Notes for whoever picks this up next:
 - **The priority rule governs every threshold in this codebase**: never
@@ -453,7 +187,7 @@ Notes for whoever picks this up next:
   this is deliberate, not a bug to "fix" later.
 - `reference_clips/*.mkv` and any other test video files are gitignored
   and not in the repo. If you need them, ask the user; several were
-  provided over the course of Stages 1-4 and then intentionally not
+  provided over the course of this project and then intentionally not
   committed.
 
 ## Architecture overview
@@ -491,18 +225,18 @@ Built so far:
   constructed person-free footage (`tests/test_veto_e2e.py`), and the
   regression suite fails hard if a veto ever touches a known real play.
 
-  **Honest Stage 2 finding:** on the reference footage, person detection
+  **Honest early finding:** on the reference footage, person detection
   did not improve the keep/cut decision. Motion-only already had full
   recall (every real play), the veto never fires on real clips (measured:
   no person-free motion run longer than 0.6s — essentially all motion on
   a rec field is human), and the fused signals *increase* flagged time if
   used to hold segments open indiscriminately. The measured value of
   person/plate signals on this footage is the **plate-occupancy
-  timeline**: the input Stage 3's at-bat boundary logic needs. The
+  timeline**: the input the at-bat boundary logic below needs. The
   original hypothesis — person detection discriminates real plays from
   milling — is false for this footage, because the milling is also
   people. The discrimination has to come from game context (plate
-  occupancy over time), which is Stage 3.
+  occupancy over time), which is what at-bat boundary detection does.
 - **Shared settle logic** (`pipeline/settle.py`) — both play extension and
   at-bat detection need to answer the same question, "has the field been
   quiet for a sustained period?", and must agree on the answer: a segment
@@ -527,7 +261,7 @@ Built so far:
   constructed multi-step-out sequence (`tests/test_atbat.py`), and
   correctly identifies a real batter change in clip_300 found during this
   analysis (see ground truth `e6`).
-- **Segment refinement** (`pipeline/refine.py`) — replaces Stage 2's
+- **Segment refinement** (`pipeline/refine.py`) — replaces the earlier
   score-level sustain with an explicit play-extension step: a segment that
   closes on raw motion is held open until `pipeline/settle.py` says motion
   has genuinely settled, up to a capped trail duration, closing early if
@@ -580,7 +314,7 @@ Built so far:
   to confirm/reorder" fallback the project spec calls for, unit-tested
   (`test_resolve_order_*` in `tests/test_multifile.py`) rather than only
   checked by hand. Also flags mismatched resolution or frame rate across
-  files (Stage 5's problem to resolve at stitch time).
+  files (stitching's problem to resolve, below).
 - **Calibration resolution** (`pipeline/calibration.py`) — one
   `calibration.json` covers every file in a batch by default (the
   zero-friction path: click the plate once). A per-file override
@@ -604,13 +338,14 @@ Built so far:
 - **CLI** (`scripts/detect.py` for one file, `scripts/detect_multi.py` for
   several) — print candidate segments as timestamps (or JSON with
   `--json` for the single-file CLI), and `--manifest PATH` to write a
-  manifest; `--motion-only` gives the Stage 1 baseline.
+  manifest; `--motion-only` gives the motion-only baseline (no person
+  detection or play extension).
 - **Stitching** (`pipeline/stitch.py`, `scripts/stitch.py`) — renders a
   manifest's `kept` spans into one finished output video. Reads
   `kept_spans_by_file()` so spans are pulled per file, in
   `source_file_index` order, each file's own spans in their own local
-  order — never merged across a file boundary, matching the Stage 3/4
-  boundary decision: a play split across two files is rendered as two
+  order — never merged across a file boundary, matching the file-boundary
+  design decision: a play split across two files is rendered as two
   clips back to back, not stitched into one continuous shot (confirmed
   against the `boundary_test_part1/2` reference pair — the split hit-play
   survives the join intact, just as two consecutive clips).
@@ -660,7 +395,7 @@ Built so far:
   added and confirmed to fail without the fix.
   - `clip_60.mkv` (single file, 7 non-contiguous kept spans): stream-copy
     path, output plays and decodes cleanly.
-  - `boundary_test_part1/2.mkv` (the Stage 4 file-boundary pair): confirms
+  - `boundary_test_part1/2.mkv` (the multi-file boundary pair): confirms
     a play split across a file boundary renders as two clips back to
     back with no corruption — the specific defensive play that was cut
     mid-play by the file split is intact across the join.
@@ -729,7 +464,7 @@ Built so far:
   (rejecting anything outside it) and radius must be positive; setting
   calibration is rejected once the batch's detect job is
   pending/in_progress/completed, since it can no longer take effect at
-  that point. `GET /batches/{id}/preview.jpg` (Stage 7) is what the
+  that point. `GET /batches/{id}/preview.jpg` (below) is what the
   in-browser click-to-calibrate flow reads a frame from — see
   `frontend/src/components/CalibrateStep.jsx`.
 
@@ -743,7 +478,7 @@ Built so far:
   detection and export now auto-chain (see below) — one trigger, one
   playable output at the end.
 
-  **Preview frame + auto-chained export** (Stage 7) —
+  **Preview frame + auto-chained export** —
   `GET /batches/{id}/preview.jpg` grabs a frame fixed 20 seconds into the
   batch's first video (`pipeline.calibration.grab_preview_frame()`),
   encoded at the video's exact native resolution so the frontend's
@@ -759,7 +494,7 @@ Built so far:
   player can seek without downloading the whole file first.
 
 - **Frontend** (`frontend/`, React + Vite, own `package.json`/lockfile
-  per the Stage 0 rule to keep Node and Python dependencies separate) —
+  per the project's own rule to keep Node and Python dependencies separate) —
   a top-level Home / Edit Log nav (`App.jsx`), independent of Home's own
   linear stage machine: upload → click to calibrate → (order
   confirmation, only if needed) → progress → player + download.
@@ -776,12 +511,12 @@ Built so far:
   seeked to the segment's span) and a Restore/Cut-again toggle, restored
   entries visually marked. Every toggle auto-triggers a real re-export
   and refreshes the "Current output" player shown at the top of the
-  view (Stage 9) — see Current Status above for why automatic was
+  view — see Current Status above for why automatic was
   chosen over an explicit button.
 
   **The toggle re-fetches the manifest fresh after every `PATCH` rather
-  than merging the response into local state.** Caught during the Stage
-  8 manual pass: a restore → cut-again sequence sometimes didn't show
+  than merging the response into local state.** Caught during the Edit
+  Log manual pass: a restore → cut-again sequence sometimes didn't show
   the second toggle's result visually, even though the backend was
   confirmed correct at every step. Root-caused via a `jsdom` +
   `React.StrictMode` harness against the actual component source across
@@ -801,7 +536,7 @@ Built so far:
   (`localStorage`); on load, `App.jsx` always re-fetches the batch's
   actual job status from the server and resumes whatever stage that
   implies, rather than assuming a fresh session — durable server-side
-  job state (Stage 6) is what makes this possible at all.
+  job state (see Backend API, above) is what makes this possible at all.
 
   **Coordinate scaling for click-to-calibrate**, since this is the one
   most likely to fail silently: the browser displays `preview.jpg` at
@@ -936,7 +671,7 @@ Or run the pipeline directly from the command line, same as before:
 # also write a manifest (see "How the manifest works" below)
 ./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv --manifest out/clip_60_manifest.json
 
-# Stage 1 baseline (motion only, no person detection or play extension)
+# motion-only baseline (no person detection or play extension)
 ./venv/bin/python scripts/detect.py reference_clips/clip_60.mkv --motion-only
 
 # multiple files as one game timeline (order auto-detected from file
@@ -966,7 +701,7 @@ timestamp range (both as an `"HH:MM:SS.mmm"` string and as float seconds),
 a detection score, a `status` of `kept` or `cut`, and an `origin` of
 `"detected"` or `"gap"` recording how the entry was created — set once
 at build time and never changed afterward, unlike `status`. This is what
-lets the Edit Log (Stage 8) list "every segment that was ever cut"
+lets the Edit Log list "every segment that was ever cut"
 correctly even after some have been restored: `origin === "gap"` is a
 permanent marker, `status` is the current (possibly restored) state.
 
@@ -1002,9 +737,9 @@ local timestamps happen to look adjacent.
   preview, that's a container-compatibility gap, not the endpoint
   serving the wrong bytes — flag it if it comes up and it can be
   addressed (e.g. transcoding on the fly) then, not preemptively.
-- **Fixed during Stage 6 review: calibration wasn't reachable through the
-  backend API at all**, so every API-triggered job silently ran with the
-  Stage 3 at-bat boundary system disabled — see the Current Status
+- **Fixed during backend API review: calibration wasn't reachable through
+  the backend API at all**, so every API-triggered job silently ran with the
+  at-bat boundary system disabled — see the Current Status
   writeup above for the full account (what was actually lost, how it was
   confirmed, and the fix). Also fixed in the same review round:
   `POST /process` now actively blocks on missing calibration (400) unless
@@ -1014,16 +749,16 @@ local timestamps happen to look adjacent.
   wrote each uploaded file to `<batch_dir>/<client-supplied filename>`
   with only an extension check — a filename like `../../evil.mp4` (or
   a bare `..`, which needs no slash at all) would have written outside
-  the batch's own directory. Found while designing the Stage 8 source-file
+  the batch's own directory. Found while designing the Edit Log's source-file
   endpoint (which reads by filename and needed the same class of check),
   fixed immediately since this was a live write-side issue in already-committed
-  code, not deferred to Stage 8. `upload_batch` now rejects any filename
+  code, not deferred. `upload_batch` now rejects any filename
   containing `/`, `\`, `..`, or that doesn't equal its own
   `os.path.basename()`, before anything is written to disk. Verified with
   a test that reverts the fix and confirms the rejection tests actually
   fail without it, not just that they pass with it.
-- **Calibration accuracy depends on click precision.** The Stage 7
-  manual browser pass found the saved plate coordinates for one clip
+- **Calibration accuracy depends on click precision.** A manual browser
+  pass found the saved plate coordinates for one clip
   offset from the reference calibration by about 14px on a 1080px-tall
   frame (checked: `CalibrateStep.jsx`'s marker is drawn from the raw
   on-screen click position, not run back through the scaling math, so
@@ -1059,9 +794,9 @@ local timestamps happen to look adjacent.
   sensible on unseen real footage, not proof of recall on it. If this
   file (or one like it) is going to be relied on for tuning decisions
   later, it needs real ground truth annotation first, the same as the
-  three reference clips got.
+  other reference clips got.
 - **A real play split across a file boundary becomes two separate
-  segments, not one continuous one.** Per the Stage 3/4 design decision,
+  segments, not one continuous one.** Per the file-boundary design decision,
   play extension and at-bat state never cross a file boundary — so if
   recording genuinely stops mid-play (not just between innings) and
   resumes in a new file, each half is detected and kept independently:
@@ -1088,7 +823,7 @@ local timestamps happen to look adjacent.
   affect the three original reference clips too, by a smaller margin
   (~4.1-4.7s each) — likely the same container/frame-rate quirk at a
   smaller scale — so every clip's reported duration is now a few seconds
-  shorter and more accurate than in the Stage 1-3 checkpoints. Recall and
+  shorter and more accurate than in the earliest checkpoints. Recall and
   continuity on all reference clips are unaffected (`scripts/regression.py`
   still passes in full); only the never-real "dead time" past each file's
   true end changed.
@@ -1131,7 +866,11 @@ local timestamps happen to look adjacent.
 ```
 
 - **Reference clips** live in `reference_clips/` (gitignored — video files
-  are never committed). Currently three 190-second softball clips, with a
+  are never committed). Currently nine softball clips: three ~190-second
+  general clips (`clip_60`, `clip_300`, `clip_540`), four shorter clips
+  for base-occupancy validation (`clip_base1`-`clip_base4`, three with a
+  per-file calibration override for bases), and two short clips added for
+  a foul ball and a missed swing (`clip_foul1`, `clip_whiff1`) — plus a
   shared `calibration.json` for the plate zone.
 - **Ground truth** lives in `tests/ground_truth/*.json`, one file per clip,
   hand-annotated by frame-level visual review. Each lists action *events*
@@ -1198,7 +937,7 @@ local timestamps happen to look adjacent.
   clip, it uploads, uploads calibration, triggers real detection, polls
   real stage transitions, restores a real cut segment, re-exports, and
   confirms the stitched output plays — see "How to run it" above.
-- **Source-file endpoint tests** (in `tests/test_backend_api.py`, Stage 8)
+- **Source-file endpoint tests** (in `tests/test_backend_api.py`)
   cover the allowlist specifically: serving a real upload, an unknown
   batch, a filename the batch doesn't have, a percent-encoded `%2e%2e`
   (the actual adversarial case — a literal bare `..` never reaches the
