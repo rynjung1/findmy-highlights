@@ -855,6 +855,47 @@ local timestamps happen to look adjacent.
   more reference footage covering quiet-contact events, or lowering
   `enter_thresh` and accepting the resulting over-inclusion cost — haven't
   been scoped yet; flagging this now so it doesn't get rediscovered later.
+- **`enter_thresh`'s margin above has only ever been measured at one fixed
+  camera distance/zoom — there is a plausible, physically-reasoned path by
+  which a real play fails to open a segment at all on a more distant camera
+  setup, independent of anything else in this codebase.** Found while
+  scoping the v2 enter-side sub-track's margin table (above): all 9
+  reference clips — not just clip_60/300/540, but clip_foul1, clip_whiff1,
+  and all four clip_base clips too — share the *literally identical*
+  calibration coordinate (`plate_xy = [1147.0, 840.0]`, same
+  `zone_radius_px`), confirmed directly by inspecting every calibration
+  file in `reference_clips/`. That means the entire reference set, and
+  every margin number ever measured against it (including the 1.11x/1.17x
+  figures directly above), comes from one single, unvaried camera
+  position and zoom. `pipeline/motion.py`'s score is a *fraction of frame
+  pixels moving* — not scale-invariant — so for a fixed real action, it
+  scales down roughly with the **square** of the subject's linear size in
+  frame. A camera positioned twice as far back (an entirely ordinary
+  variation: a different field, a stands angle instead of behind the
+  backstop, a different phone/GoPro zoom) would shrink the same physical
+  play's score to roughly a **quarter** of its current value. Applied to
+  `clip_foul1`'s already-thin 1.11x margin, that lands comfortably
+  *below* `enter_thresh` — a segment that never opens at all for a real
+  play, on footage no more unusual than what this project already expects
+  to handle. Raw per-frame inspection also showed the two thinnest events
+  share a short (~1-1.5s) real-motion burst barely as wide as the 1-second
+  smoothing window itself, meaning burst duration is a second, independent
+  risk axis on top of camera distance, also unexercised by the current set.
+  A follow-up feasibility check (using existing person-detection box
+  heights as a camera-distance proxy, so a scale-normalized score could
+  keep a roughly consistent margin regardless of distance) found the raw
+  ingredient is free — boxes are already computed and cached — but a naive
+  per-frame implementation is measurably unreliable (nearest-box height
+  swings ~59px to ~429px across consecutive ~1s samples on the same real
+  subject, an identity-tracking artifact, not real depth change) and, more
+  fundamentally, **cannot be validated against this reference set at all**:
+  since every clip shares one camera distance, any correction tested only
+  here would look like a no-op regardless of whether it actually
+  generalizes. This blocks the v2 "touching the enter/open-side decision"
+  sub-track specifically — not resuming that work until real (or
+  deliberately simulated) footage from a genuinely different camera
+  distance exists to validate against. Flagging this now, at length, so
+  the reasoning and the exact numbers don't need re-deriving later.
 - **No outcome classification (Tier 2).** v1 keeps every action segment,
   including missed swings. Telling a whiff from a hit is a later, harder
   problem.
