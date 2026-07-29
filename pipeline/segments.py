@@ -33,6 +33,32 @@ class SegmentConfig:
     # section for this flagged as its own standalone safety concern, not
     # just a note here.
     enter_thresh: float = 0.006
+    # Reference near-plate person-box width (px), median of
+    # pipeline.fusion.robust_box_width() across clip_60/300/540 -- the
+    # SAME clips enter_thresh's own 0.006 was tuned against. Used by
+    # pipeline.run.process_video (via pipeline.fusion.scale_boost_factor)
+    # to boost a batch's motion score before the enter-side comparison
+    # when its own near-plate box width reads smaller than this -- i.e.
+    # when the camera is more distant than the one every reference clip
+    # shares. Ships as a real default following the enter_thresh
+    # camera-distance investigation: motion score is not scale-invariant
+    # (confirmed directly against distance_test_close/far.mov, two real
+    # clips of the same subject/motion filmed at two distances -- see
+    # tests/test_distance_scaling.py), so a real play at a more distant
+    # setup than these 9 clips could otherwise fail to cross enter_thresh
+    # at all, a silent total miss. The boost is structurally one-directional
+    # (never reduces a score, only ever raises it for a more-distant
+    # batch than this reference) -- confirmed zero regression on required-
+    # event recall across all 9 reference clips before shipping, and a
+    # concrete rescue of a synthetically distance-degraded clip_foul1
+    # (its own thinnest-margin required event: 0.43x margin at simulated
+    # 1.6x distance -> segment fails to open at all -> 1.35x margin and
+    # opens correctly with this boost applied). A companion ambient-
+    # motion discount (to also cut dead time on the enter side, not just
+    # protect recall) was investigated alongside this and explicitly
+    # NOT shipped -- see README's Known Limitations for why that's a
+    # structural dead end, not a tuning gap.
+    reference_plate_box_width_px: float = 121.4
     # exit_thresh WAS re-measured and raised (0.003 -> 0.0045, v2 segments.py
     # retune): several required check_continuity events legitimately dip far
     # below the old 0.003 inside their own window (e.g. clip_60's e5 down to

@@ -271,6 +271,32 @@ def robust_box_width(det_times, det_boxes, frame_size, zone: PlateZone | None = 
     return float(np.median(widths))
 
 
+def scale_boost_factor(det_times, det_boxes, frame_size, zone: PlateZone,
+                       reference_width_px: float) -> float:
+    """max(1.0, reference_width_px / w_batch) -- the LINEAR scale-boost
+    factor. Callers must SQUARE this before multiplying a motion score,
+    since pipeline.motion's score scales with subject AREA in frame
+    (roughly the square of linear size), not linear size directly.
+
+    Returns exactly 1.0 (no boost) whenever `robust_box_width` can't
+    measure a reliable width (too few non-edge-clipped, in-zone
+    detections) -- no signal means behave exactly as before this
+    existed, never guess. Also 1.0 whenever the batch's subject reads
+    AS BIG OR BIGGER than the reference (closer than or equal to the
+    distance enter_thresh was tuned against): this function only ever
+    boosts for a MORE distant camera than the reference clips, it never
+    reduces a score for a closer one. That asymmetry is the entire
+    safety property this exists for -- see
+    pipeline.segments.SegmentConfig.reference_plate_box_width_px for the
+    full derivation and the enter_thresh camera-distance investigation
+    this closes out.
+    """
+    w_batch = robust_box_width(det_times, det_boxes, frame_size, zone=zone)
+    if w_batch is None or w_batch <= 0:
+        return 1.0
+    return max(1.0, reference_width_px / w_batch)
+
+
 def compute_all_occupancy(det_times, det_boxes, zones: dict,
                           stationary_v: float,
                           require_stationary_entry: bool = False) -> dict:

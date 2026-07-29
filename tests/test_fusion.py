@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.fusion import (FusionConfig, PlateZone, apply_veto,
                              boxes_to_grid_mask, compute_occupancy, fuse,
-                             robust_box_width,
+                             robust_box_width, scale_boost_factor,
                              vetoed_overlapping_required, FusedResult)
 
 # Geometry used throughout: 1920x1080 source, 480x270 analysis, no border,
@@ -340,3 +340,34 @@ def test_robust_box_width_respects_zone():
 def test_robust_box_width_none_below_min_samples():
     boxes = [[centered_box(1147, 840, w=300)] for _ in range(3)]
     assert robust_box_width(list(range(3)), boxes, FRAME, min_samples=5) is None
+
+
+# ---------- scale_boost_factor ----------
+
+def test_scale_boost_is_noop_at_reference_distance():
+    # w_batch == reference -> factor is exactly 1.0
+    boxes = [[centered_box(1147, 840, w=200)] for _ in range(6)]
+    f = scale_boost_factor(list(range(6)), boxes, FRAME, ZONE, reference_width_px=200)
+    assert f == 1.0
+
+
+def test_scale_boost_is_noop_when_batch_is_closer_than_reference():
+    # w_batch BIGGER than reference (closer camera) -> never reduce
+    boxes = [[centered_box(1147, 840, w=400)] for _ in range(6)]
+    f = scale_boost_factor(list(range(6)), boxes, FRAME, ZONE, reference_width_px=200)
+    assert f == 1.0
+
+
+def test_scale_boost_raises_factor_when_batch_is_farther():
+    # w_batch HALF the reference -> boost factor is exactly 2.0 (linear;
+    # caller squares it before applying to a score)
+    boxes = [[centered_box(1147, 840, w=100)] for _ in range(6)]
+    f = scale_boost_factor(list(range(6)), boxes, FRAME, ZONE, reference_width_px=200)
+    assert f == 2.0
+
+
+def test_scale_boost_is_noop_with_no_reliable_width_signal():
+    # too few in-zone detections to trust a reading -> exactly 1.0, never a guess
+    boxes = [[centered_box(1147, 840, w=100)] for _ in range(2)]
+    f = scale_boost_factor(list(range(2)), boxes, FRAME, ZONE, reference_width_px=200)
+    assert f == 1.0

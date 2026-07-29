@@ -22,7 +22,7 @@ the detection pipeline, multi-file handling and stitching, the backend API,
 the full Home/Upload and Edit Log frontend, multi-base calibration, and the
 zone-velocity signal built on top of it — is done, tested, and has been
 exercised end to end against real footage and a real running server, not
-just in-process test clients. `pytest tests/` covers 254 unit tests,
+just in-process test clients. `pytest tests/` covers 259 unit tests,
 `pytest tests/ -m e2e` covers 5 tests that run real model inference, and a
 full ten-item pre-demo checklist (upload, calibrate, process, watch, Edit
 Log restore/cut-again, multi-file, re-export) has been walked end to end in
@@ -207,7 +207,14 @@ Built so far:
   threshold than it closes at, so brief dips mid-play don't split it),
   merges near-adjacent segments, and drops sub-second blips. Thresholds are
   deliberately permissive: over-flagging is acceptable, missing a play is
-  not. Pure logic, fully unit-tested without video.
+  not. Pure logic, fully unit-tested without video. The ENTER comparison
+  specifically runs against a scale-boosted score, not raw
+  `motion.scores` directly — see `pipeline.fusion.scale_boost_factor()`
+  and `SegmentConfig.reference_plate_box_width_px` below and in Known
+  Limitations for why (a more distant camera than the reference clips
+  share can otherwise shrink a real play's score below `enter_thresh`
+  entirely); the exit/sustain side is untouched, still raw
+  `motion.scores`, via `scores_to_segments`' `sustain_scores` parameter.
 - **Person detection** (`pipeline/detection.py`) — RF-DETR Base
   (Apache-2.0, code and weights) detects players on frames sampled at
   ~1 fps, run at 1120px input resolution (validated to catch distant
@@ -896,6 +903,71 @@ local timestamps happen to look adjacent.
   deliberately simulated) footage from a genuinely different camera
   distance exists to validate against. Flagging this now, at length, so
   the reasoning and the exact numbers don't need re-deriving later.
+  **RESOLVED**, once `distance_test_close/far.mov` (two real clips of the
+  same subject/motion filmed at two actual distances) made real
+  validation possible — see `SegmentConfig.reference_plate_box_width_px`
+  and the scale-boost entry directly below for what shipped, and
+  `tests/test_distance_scaling.py` for the permanent regression check.
+- **Enter-side scale boost: shipped. Enter-side ambient-motion discount:
+  investigated and explicitly NOT shipped, for a structural reason, not a
+  tuning gap.** Two designs came out of the enter_thresh camera-distance
+  finding above, both scale-aware (built on
+  `pipeline.fusion.robust_box_width()`/`scale_boost_factor()`), only one
+  of which could be given a real safety floor:
+
+  **Shipped: the scale boost** (`SegmentConfig.reference_plate_box_width_px`,
+  wired into `pipeline.run.process_video` and mirrored in
+  `scripts/regression.py`). A batch whose near-plate person box reads
+  smaller than the reference clips' own (i.e. a more distant camera than
+  every clip enter_thresh was tuned against) gets its motion score boosted
+  before the ENTER comparison only — the exit/sustain side still sees raw,
+  unboosted `motion.scores`, via `scores_to_segments`' existing
+  `sustain_scores` parameter, so this cannot affect how long a segment
+  stays open once it opens, only whether it opens at all. The boost factor
+  is `max(1.0, w_ref / w_batch)²`: structurally never less than 1.0, so
+  `normalized_score(t) >= raw_score(t)` for every t, unconditionally —
+  recall on anything already captured is provably unchanged, not just
+  empirically hoped for. Confirmed zero regression re-running
+  `scripts/regression.py` across all 9 reference clips (ALL PASS, same as
+  before this shipped) and a concrete rescue in simulation: a synthetically
+  distance-degraded `clip_foul1` (its own thinnest-margin required event,
+  scaled 1.6x farther using the design's own exponent-2 model) drops to a
+  0.43x margin and fails to open a segment under today's unmodified logic,
+  then recovers to a 1.35x margin and opens correctly with the boost
+  applied. On the real, unmodified reference clips the boost is a near
+  no-op as expected (1.0x-1.225x — same camera distance as the reference,
+  so there's little to correct) but not perfectly inert: `clip_base2`
+  measures a real 1.5x boost on the enter-side score today, harmlessly,
+  since recall there was already 1/1 either way.
+
+  **Not shipped: an ambient-motion discount**, the other half of what was
+  proposed (suppressing motion score outside at-bat windows specifically
+  to cut the walk-up gap, scoped to time outside today's real kept
+  segments). Every scoping rule tried hits the same wall: **there is no
+  signal, available today, that can tell "genuine ambient milling" apart
+  from "a real play the system is currently failing to recognize due to
+  distance"** — by construction, a play the boosted enter-side still
+  fails to catch looks IDENTICAL to true dead time to any classifier built
+  from the current system's own segment/at-bat state, because neither is
+  inside a kept segment. Concretely demonstrated, not just argued: in the
+  same synthetic distance-degraded `clip_foul1` scenario above, the
+  rescued event (1.35x margin) is *eligible* for the proposed discount
+  under its own scoping rule (outside the segment, after a real at-bat
+  fire at t=6.0) — and even a mild 0.7x discount applied on top drops the
+  margin back to 0.945x, undoing the rescue. Tightening the eligibility
+  window (protecting the whole active at-bat span, not just literal
+  kept-segment time) doesn't close the gap either: "when does the current
+  play end" is itself computed from segment/extension state that depends
+  on the enter-side decision having already fired, so widening the
+  protected window enough to close the gap collapses it to protecting the
+  entire clip (zero dead-time benefit), while narrowing it enough to have
+  any effect reopens the exact same danger. This is the same category of
+  honest dead end as the Tier 2 audio investigation and the v2
+  person-proximity sustain-side finding above: real, structurally
+  understood, and not worth forcing — cutting the ambient walk-up gap on
+  the enter side would need a genuinely different signal not yet
+  considered (not a different threshold or scoping rule on the signals
+  available today), and isn't pursued further against this footage.
 - **No outcome classification (Tier 2) — investigated this session and
   closed, not merely deferred.** v1 keeps every action segment, including
   missed swings; telling a whiff from a hit was explicitly authorized as a

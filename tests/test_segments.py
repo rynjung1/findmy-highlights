@@ -125,6 +125,35 @@ def test_dual_equals_single_when_sustain_is_same():
             == scores_to_segments(t, s, cfg()))
 
 
+def test_enter_side_boost_opens_segment_raw_alone_would_miss():
+    """Mirrors exactly what pipeline.run.process_video does with the
+    scale boost: raw motion never reaches enter_thresh on its own (a
+    distance-degraded real event), but the boosted 'enter' signal does,
+    while the UNBOOSTED raw signal still governs the sustain/exit side
+    -- confirming the boost only ever affects whether a segment opens,
+    never how long it stays open once it has."""
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3)
+    t = np.arange(0, 10, 0.1)
+    raw = np.where((t >= 3) & (t <= 5), 0.4, 0.05)   # peaks at 0.4, below enter_thresh=0.5
+    boost = 1.5
+    boosted = raw * boost ** 2                        # 0.4*2.25 = 0.9, clears enter_thresh
+
+    assert scores_to_segments(t, raw, c) == []         # raw alone: never opens
+
+    segs = scores_to_segments(t, boosted, c, sustain_scores=raw)
+    assert len(segs) == 1
+    a, b = segs[0]
+    assert abs(a - 3.0) < 0.2
+    assert b < 5.2   # closes promptly once raw drops below exit_thresh=0.3
+
+    # a DIFFERENT boost factor (still enough to cross enter_thresh) must
+    # produce the exact same close time -- proof the boost magnitude
+    # cannot leak into the exit/sustain decision, only sustain_scores can
+    other_boosted = raw * 3.0 ** 2
+    other_segs = scores_to_segments(t, other_boosted, c, sustain_scores=raw)
+    assert other_segs[0][1] == b
+
+
 def test_smooth_scores_preserves_length_and_mean():
     t = np.arange(0, 10, 0.1)
     s = np.random.RandomState(0).rand(len(t))

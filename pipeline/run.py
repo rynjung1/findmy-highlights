@@ -15,7 +15,8 @@ from pathlib import Path
 from pipeline.atbat import AtBatConfig, atbat_start_times
 from pipeline.calibration import resolve_base_zones
 from pipeline.detection import DetectionConfig, detect_persons
-from pipeline.fusion import apply_veto, compute_occupancy, compute_zone_velocity, fuse
+from pipeline.fusion import (apply_veto, compute_occupancy, compute_zone_velocity,
+                             fuse, scale_boost_factor)
 from pipeline.motion import compute_motion
 from pipeline.refine import RefineConfig, refine_segments
 from pipeline.segments import SegmentConfig, scores_to_segments, smooth_scores
@@ -69,13 +70,28 @@ def process_video(video: str, zone, motion_only: bool = False,
     fused = fuse(motion.times, motion.scores, motion.grids,
                  motion.frame_size, motion.analysis_size, motion.border_px,
                  det.times, det.boxes, zone)
+    # Enter-side scale boost (camera-distance investigation): a batch
+    # filmed more distantly than the reference clips reads a smaller
+    # near-plate box, so its raw motion score is boosted before the
+    # ENTER comparison only (never the exit/sustain side -- raw
+    # motion.scores is passed separately as sustain_scores below,
+    # completely unaffected). See SegmentConfig.reference_plate_box_width_px
+    # for the full derivation and safety proof; scale_boost_factor()
+    # itself returns exactly 1.0 (no-op) when zone is None or too few
+    # reliable near-plate detections exist to trust a reading.
+    seg_cfg = SegmentConfig()
+    boost = 1.0
+    if zone is not None:
+        boost = scale_boost_factor(det.times, det.boxes, motion.frame_size,
+                                   zone, seg_cfg.reference_plate_box_width_px)
+    enter_scores = motion.scores * (boost ** 2)
     # motion alone owns segment open AND raw exit (Stage 3 replaced the
     # Stage 2 score-sustain with the explicit play-extension below)
-    raw = scores_to_segments(motion.times, motion.scores, SegmentConfig())
+    raw = scores_to_segments(motion.times, enter_scores, seg_cfg,
+                             sustain_scores=motion.scores)
     kept, vetoed = apply_veto(raw, fused)
 
-    sm = smooth_scores(motion.times, motion.scores,
-                       SegmentConfig().smooth_window_s)
+    sm = smooth_scores(motion.times, motion.scores, seg_cfg.smooth_window_s)
     # one SettleConfig, shared explicitly between the at-bat detector and
     # play extension so "has motion settled" can't silently drift apart
     settle_cfg = SettleConfig()

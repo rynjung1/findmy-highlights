@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.motion import compute_motion
 from pipeline.segments import (SegmentConfig, scores_to_segments, smooth_scores,
                                segment_covers, total_duration)
-from pipeline.fusion import (FusionConfig, apply_veto, fuse,
+from pipeline.fusion import (FusionConfig, apply_veto, fuse, scale_boost_factor,
                              vetoed_overlapping_required, PlateZone)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,8 +110,20 @@ def main() -> None:
         fused = fuse(motion.times, motion.scores, motion.grids,
                      motion.frame_size, motion.analysis_size, motion.border_px,
                      det.times, det.boxes, zone)
-        raw = scores_to_segments(motion.times, motion.scores, seg_cfg)
+        # mirrors pipeline.run.process_video's enter-side scale boost --
+        # kept in sync deliberately so this script measures the SAME
+        # pipeline that actually ships, not a stale reimplementation.
+        boost = 1.0
+        if zone is not None:
+            boost = scale_boost_factor(det.times, det.boxes, motion.frame_size,
+                                       zone, seg_cfg.reference_plate_box_width_px)
+        enter_scores = motion.scores * (boost ** 2)
+        raw = scores_to_segments(motion.times, enter_scores, seg_cfg,
+                                 sustain_scores=motion.scores)
         raw_kept, vetoed = apply_veto(raw, fused)
+        if boost > 1.0:
+            print(f"    scale boost: {boost:.3f}x (linear), "
+                  f"{boost**2:.3f}x applied to enter-side score")
         sm_motion = smooth_scores(motion.times, motion.scores,
                                   seg_cfg.smooth_window_s)
         # one SettleConfig shared explicitly between both consumers
