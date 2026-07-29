@@ -15,6 +15,38 @@ hit swing both count as "action" and both get kept. Distinguishing outcomes
 (whiff vs. hit vs. called strike) is explicitly out of scope for now; see
 [Known limitations](#known-limitations--non-goals-for-this-version).
 
+## Priority rule: v1 default vs. current live setting
+
+This rule changed partway through the project, on purpose, by explicit
+decision. Both parts apply, to different things.
+
+**v1 default** (everything through the enter-side scale boost) was built
+under a strict bias-toward-inclusion rule: missing a real play was treated
+as worse than keeping extra dead time, always err toward keeping a
+borderline segment. That rule is why several designs got built, tested,
+and explicitly rejected for introducing real (if small) recall risk: the
+plate-distance and person-proximity segments.py designs, more aggressive
+zone-velocity and bat-anchored discount factors, and the ambient-discount
+enter-side idea. All of those were safe-but-rejected, not broken.
+
+**As of this point forward**, the project's owner has explicitly decided
+to accept real risk of occasionally trimming into or missing a real play,
+in exchange for more aggressive dead-time cutting — a deliberate, informed
+choice made after seeing the actual tradeoff data on every rejected
+design, not a default to assume lightly or revert to quietly. Going
+forward: previously-rejected designs are back on the table for real
+implementation, not just simulation; thresholds (`enter_thresh`,
+`exit_thresh`, padding, discount factors) can be pushed more aggressively
+than the margins established during the v1 safety work; but the real
+tradeoff — recall/continuity impact alongside dead-time gained — still
+gets reported honestly every time, and a change that clips into or fully
+misses a real, unambiguous play on a reference clip still gets flagged
+plainly, not silently absorbed as "expected now." `enter_thresh` itself
+was explicitly considered and explicitly left alone (see Known
+Limitations) — this rule change doesn't mean every dial gets turned to
+its riskiest setting by default, each one still gets proposed and reviewed
+on its own.
+
 ## Current status
 
 **v1 is complete.** Every piece of work originally scoped for this version —
@@ -968,6 +1000,58 @@ local timestamps happen to look adjacent.
   the enter side would need a genuinely different signal not yet
   considered (not a different threshold or scoping rule on the signals
   available today), and isn't pursued further against this footage.
+- **Padding and `exit_thresh` pushed to their current real limits, under
+  the new priority rule.** `exit_thresh`: 0.0045 → 0.0058 — the ~25%
+  hysteresis-gap cushion below `enter_thresh` (0.006) was always a
+  spendable margin, not a recall floor (already zero-cost up to 0.01 per
+  the original sweep), so this was a clean win, confirmed safe alone
+  before combining with the padding change below. Landed at 0.0058, not
+  literally up to 0.01, since equaling/exceeding `enter_thresh` collapses
+  the hysteresis band into a degenerate, nonsensical configuration, not
+  "more aggressive."
+
+  Padding: attempted to ship the previously-documented bare minimum
+  (2.8s pre / 1.3s post) directly and **it failed** — re-running
+  `scripts/regression.py` at that exact value regressed continuity on 2 of
+  the 9 known clips (`clip_540`'s e4, `clip_base3`'s e1) *today*, not
+  hypothetically on unseen footage. That number was measured before the
+  enter-side scale boost existed and had gone stale; isolated before
+  shipping anything (per standing process) to confirm it was the padding
+  change alone, not an interaction with the `exit_thresh` raise — it was.
+  Re-binary-searched fresh against the current pipeline: pre_pad_s=2.8
+  still holds, post_pad_s needed to grow from 1.3 to 1.85 (1.82 still
+  fails `clip_base3`'s e1 by a hair). Shipped at 2.8s/1.85s, confirmed 9/9
+  recall and continuity fresh at that exact value. The lesson isn't
+  "2.8/1.85 is now safe forever" — it's that a literal bare-minimum number
+  has zero headroom against *any* other pipeline change, including ones
+  that don't touch padding at all.
+
+  **Real `full_game.mkv` cost, both changes combined, everything else
+  (including the enter-side boost) held identical:**
+
+  | | segments | kept | cut | flagged |
+  |---|---|---|---|---|
+  | old (4.5s/2.2s, 0.0045) | 74 | 59.52 min | 7.97 min | 88.2% |
+  | new (2.8s/1.85s, 0.0058) | 130 | 54.00 min | 13.50 min | 80.0% |
+
+  **+5.53 additional minutes cut** (7.97 → 13.50 min, a ~69% relative
+  increase in real dead time removed) on the one real 67.5-minute
+  recording. Segment count nearly doubled (74 → 130): tighter padding
+  merges fewer nearby plays into single large blobs, so more of the
+  game's actual distinct plays surface as their own segments instead of
+  being absorbed into a neighbor's padding. This is the real cost/benefit
+  now on record — recall/continuity on the 9 known clips is unchanged
+  (both confirmed fresh via `scripts/regression.py`, `ALL PASS`), but
+  there is deliberately no margin left for anything the reference set
+  doesn't already cover.
+
+  `enter_thresh` itself was explicitly considered and explicitly declined
+  even under the new rule: the margin table above names, precisely, which
+  real play a given raise deletes outright (past 0.00665, `clip_foul1`'s
+  foul ball never opens a segment at all — not trimmed, a total miss).
+  That's a guaranteed loss on a known, confirmed play, not a statistical
+  risk on unseen footage, judged a different category of cost than the
+  ones actually spent above. `enter_thresh` stays at 0.006.
 - **No outcome classification (Tier 2) — investigated this session and
   closed, not merely deferred.** v1 keeps every action segment, including
   missed swings; telling a whiff from a hit was explicitly authorized as a

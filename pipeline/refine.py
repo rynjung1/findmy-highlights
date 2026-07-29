@@ -136,6 +136,22 @@ lands with real headroom rather than the tightest value that merely
 passes today's nine clips. Confirmed clean (9/9 recall, 9/9 continuity)
 against all nine clips at this exact value, run fresh, not inferred from
 a nearby candidate.
+
+PRIORITY RULE CHANGE (post enter-side scale boost): the 4.5s/2.2s
+headroom above was a deliberate choice, not a forced one -- the owner
+has since explicitly decided to spend it, accepting real recall risk in
+exchange for more aggressive dead-time cutting (README's "Priority rule:
+v1 default vs. current live setting"). Attempting to ship the literal
+2.8s/1.3s bare minimum from this section's own binary search FAILED --
+that number is stale, measured before the enter-side boost existed, and
+re-running scripts/regression.py at exactly that value regresses
+continuity on 2 of the 9 known clips (clip_540's e4, clip_base3's e1)
+today. Re-binary-searched fresh against the current pipeline instead:
+RefineConfig now ships pre_pad_s=2.8/post_pad_s=1.85 (only post needed to
+grow), confirmed 9/9 recall and continuity fresh, zero margin beyond
+that. See README's Current Status for the real full_game.mkv cut-time
+delta this bought, and for why "bare minimum" needed re-deriving instead
+of reusing the old number.
 """
 
 from dataclasses import dataclass, field
@@ -155,14 +171,37 @@ class RefineConfig:
     # catcher, next batter — is inside it), so the recorded departure can
     # land just AFTER the raw segment end; allow that slack for eligibility.
     departure_slack_s: float = 2.0
-    # Padding defaults: re-measured across all nine current reference
-    # clips (real max need 2.8s pre / 1.3s post, clip_540's e4) -- see
-    # this module's PADDING VALIDATION docstring section for the full
-    # derivation, the full_game.mkv cost curve that ruled out a literal
-    # 2.5x margin, and the Edit Log asymmetry that argues for landing
-    # above the bare minimum (~1.6x here, not the tightest passing value).
-    pre_pad_s: float = 4.5
-    post_pad_s: float = 2.2
+    # Padding defaults: PRIORITY RULE CHANGE (post enter-side scale boost) --
+    # the project's owner explicitly, deliberately loosened the standing
+    # never-miss-a-play bias, accepting real recall risk in exchange for
+    # more aggressive dead-time cutting (see README's "Priority rule: v1
+    # default vs. current live setting" for the full decision). The
+    # previous default (4.5s/2.2s, ~1.6x over the then-measured 2.8s/1.3s
+    # bare minimum) was a deliberate safety cushion against the Edit Log's
+    # cut-into-a-play asymmetry; that cushion is what's being spent here.
+    #
+    # IMPORTANT, found while making this exact change: the OLD bare
+    # minimum (2.8s/1.3s, from this module's PADDING VALIDATION section)
+    # is stale and NO LONGER SUFFICIENT -- it was measured before the
+    # enter-side scale boost shipped. Re-running scripts/regression.py at
+    # the literal old 2.8s/1.3s value FAILS continuity today, on 2 of the
+    # 9 known clips (clip_540's e4 and clip_base3's e1), not hypothetically
+    # on unseen footage -- a real regression on the very clips this number
+    # was calibrated against. Isolated before shipping anything (per
+    # standing process): the exit_thresh raise alone is NOT the cause
+    # (confirmed clean by itself); the padding reduction alone reproduces
+    # both failures even with exit_thresh unchanged. Re-binary-searched
+    # fresh against TODAY's actual pipeline (boost included): pre_pad_s=2.8
+    # holds, post_pad_s needed to grow from 1.3 to 1.85 (1.82 still fails
+    # clip_base3's e1 by a hair; 1.85 passes clean). This value carries
+    # deliberately ZERO margin beyond what's needed for today's 9 clips --
+    # the takeaway isn't "2.8/1.85 is now safe forever," it's that a
+    # literal bare-minimum number has no headroom against ANY other
+    # pipeline change, including ones (like the enter boost) that don't
+    # touch padding at all. Confirmed via scripts/regression.py, ALL PASS,
+    # both previously-failing continuity checks explicitly re-verified.
+    pre_pad_s: float = 2.8
+    post_pad_s: float = 1.85
     final_merge_gap_s: float = 0.5
     # Stage 11: box-heights/sec (pipeline.fusion.compute_zone_velocity's
     # units). 0.20 sits above every resting-fielder sample measured across

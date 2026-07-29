@@ -59,23 +59,37 @@ class SegmentConfig:
     # NOT shipped -- see README's Known Limitations for why that's a
     # structural dead end, not a tuning gap.
     reference_plate_box_width_px: float = 121.4
-    # exit_thresh WAS re-measured and raised (0.003 -> 0.0045, v2 segments.py
-    # retune): several required check_continuity events legitimately dip far
-    # below the old 0.003 inside their own window (e.g. clip_60's e5 down to
-    # 0.00004), meaning raw hysteresis already fragments some real plays
-    # today and continuity survives via pipeline.refine's separate,
-    # settle-based extension logic, not via this threshold -- so there was
-    # real, unused room here, unlike enter_thresh above. Swept safely up to
-    # 0.01 (above enter_thresh itself, a degenerate configuration) with zero
-    # recall/continuity failures on all 9 clips, but landed on 0.0045
-    # deliberately short of that: keeps a comfortable ~25% hysteresis gap
-    # below enter_thresh rather than compounding enter_thresh's own thin
-    # margin on the same underlying mechanism. Confirmed on full_game.mkv
-    # (the one real 67.5-minute recording): cuts 8.8 real minutes of dead
-    # time vs. 7.6 at the old default, a genuine improvement, not just a
-    # short-reference-clip artifact -- see scripts/regression.py output and
-    # README's Current Status for the full before/after.
-    exit_thresh: float = 0.0045
+    # exit_thresh: re-measured and raised twice now.
+    #
+    # First pass (0.003 -> 0.0045, v2 segments.py retune): several required
+    # check_continuity events legitimately dip far below the old 0.003
+    # inside their own window (e.g. clip_60's e5 down to 0.00004), meaning
+    # raw hysteresis already fragments some real plays today and
+    # continuity survives via pipeline.refine's separate, settle-based
+    # extension logic, not via this threshold -- so there was real, unused
+    # room here, unlike enter_thresh above. Swept safely up to 0.01 (AT/
+    # above enter_thresh itself, a degenerate configuration where the
+    # hysteresis band collapses to nothing or inverts) with zero
+    # recall/continuity failures found anywhere in that swept range on all
+    # 9 clips, but first landed on 0.0045 deliberately short of the
+    # ceiling: keeps a comfortable ~25% hysteresis gap below enter_thresh
+    # rather than compounding enter_thresh's own thin margin on the same
+    # underlying mechanism.
+    #
+    # Second pass, PRIORITY RULE CHANGE (post enter-side scale boost): the
+    # ~25% gap above was that same kind of deliberate, spendable cushion,
+    # not a recall floor -- the sweep already showed zero recall cost
+    # anywhere in range. The owner has since explicitly decided to spend
+    # it for more aggressive dead-time cutting (README's "Priority rule:
+    # v1 default vs. current live setting"). Raised to 0.0058: as close to
+    # enter_thresh (0.006) as this ships without landing ON the literal
+    # degenerate boundary the sweep flagged above, on purpose -- not
+    # 0.01, since equaling or exceeding enter_thresh isn't "more
+    # aggressive," it's a different, nonsensical mechanism (no hysteresis
+    # band left at all). Confirmed fresh: still 9/9 recall and continuity
+    # on all 9 known clips at this value (scripts/regression.py). See
+    # README's Current Status for the real full_game.mkv cut-time delta.
+    exit_thresh: float = 0.0058
     # Merge segments separated by less than this (seconds).
     merge_gap_s: float = 3.0
     # Drop segments shorter than this (seconds) AFTER merging.
