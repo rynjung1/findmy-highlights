@@ -25,8 +25,31 @@ class SegmentConfig:
     # permissively: on the reference clips the quiet-field baseline sits
     # around 0.001-0.005 and confirmed plays peak at 0.014-0.05, so 0.006
     # catches every known play at the cost of also flagging busy milling.
+    #
+    # enter_thresh has essentially NO real margin (v2 segments.py retune,
+    # measured across all 9 current reference clips): clip_foul1's required
+    # event peaks at just 0.00665, a 1.11x margin, clip_300's e4 at 1.17x.
+    # NOT raised for exactly this reason -- see README's Known Limitations
+    # section for this flagged as its own standalone safety concern, not
+    # just a note here.
     enter_thresh: float = 0.006
-    exit_thresh: float = 0.003
+    # exit_thresh WAS re-measured and raised (0.003 -> 0.0045, v2 segments.py
+    # retune): several required check_continuity events legitimately dip far
+    # below the old 0.003 inside their own window (e.g. clip_60's e5 down to
+    # 0.00004), meaning raw hysteresis already fragments some real plays
+    # today and continuity survives via pipeline.refine's separate,
+    # settle-based extension logic, not via this threshold -- so there was
+    # real, unused room here, unlike enter_thresh above. Swept safely up to
+    # 0.01 (above enter_thresh itself, a degenerate configuration) with zero
+    # recall/continuity failures on all 9 clips, but landed on 0.0045
+    # deliberately short of that: keeps a comfortable ~25% hysteresis gap
+    # below enter_thresh rather than compounding enter_thresh's own thin
+    # margin on the same underlying mechanism. Confirmed on full_game.mkv
+    # (the one real 67.5-minute recording): cuts 8.8 real minutes of dead
+    # time vs. 7.6 at the old default, a genuine improvement, not just a
+    # short-reference-clip artifact -- see scripts/regression.py output and
+    # README's Current Status for the full before/after.
+    exit_thresh: float = 0.0045
     # Merge segments separated by less than this (seconds).
     merge_gap_s: float = 3.0
     # Drop segments shorter than this (seconds) AFTER merging.

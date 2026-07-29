@@ -27,7 +27,8 @@ from dataclasses import dataclass
 import numpy as np
 
 # Empirically set against the reference clips (see pipeline/refine.py):
-# 0.002 sits below the segment exit_thresh (0.003) so brief real dips in
+# 0.002 sits below the segment exit_thresh (0.0045 as of the v2 segments.py
+# retune -- was 0.003 when this was first set) so brief real dips in
 # a defensive play don't read as settled, and 1.5s bridges the longest
 # such dip observed (clip_60, ~0.9s) without number bridging genuinely
 # separate bursts of activity.

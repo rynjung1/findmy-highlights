@@ -837,6 +837,24 @@ local timestamps happen to look adjacent.
   committed (gitignored, like all reference clips), so a fresh checkout
   can run the synthetic-metadata unit tests but not re-run this exact
   end-to-end validation without the same source files.
+- **`enter_thresh` (0.006, `pipeline/segments.py`) has almost no real
+  margin — a live safety concern, not just an implementation detail.**
+  Measured directly while investigating `segments.py`'s raw thresholds
+  (v2): across all 9 current reference clips, the required event with the
+  least motion-score headroom is `clip_foul1`'s foul ball, peaking at just
+  0.00665 — a bare **1.11x** margin over the threshold that decides
+  whether motion counts as "action" at all. `clip_300`'s `e4` pitch event
+  is similarly thin (1.17x). This isn't something padding or extension can
+  paper over: recall depends on a segment ever OPENING, which happens
+  strictly before either of those mechanisms gets a chance to help. On
+  real footage even a little quieter than what's in the reference set, a
+  foul-ball-type event is a plausible candidate to be missed outright, not
+  just trimmed. Deliberately *not* raised as part of the `exit_thresh`
+  retune below (raising `enter_thresh` was explicitly ruled out for
+  exactly this reason). The two obvious ways to build real margin here —
+  more reference footage covering quiet-contact events, or lowering
+  `enter_thresh` and accepting the resulting over-inclusion cost — haven't
+  been scoped yet; flagging this now so it doesn't get rediscovered later.
 - **No outcome classification (Tier 2).** v1 keeps every action segment,
   including missed swings. Telling a whiff from a hit is a later, harder
   problem.
