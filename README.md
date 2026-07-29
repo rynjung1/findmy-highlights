@@ -896,9 +896,68 @@ local timestamps happen to look adjacent.
   deliberately simulated) footage from a genuinely different camera
   distance exists to validate against. Flagging this now, at length, so
   the reasoning and the exact numbers don't need re-deriving later.
-- **No outcome classification (Tier 2).** v1 keeps every action segment,
-  including missed swings. Telling a whiff from a hit is a later, harder
-  problem.
+- **No outcome classification (Tier 2) — investigated this session and
+  closed, not merely deferred.** v1 keeps every action segment, including
+  missed swings; telling a whiff from a hit was explicitly authorized as a
+  feasibility investigation, per the original scoping note's three
+  candidate approaches, and all three are now closed with real, documented
+  reasons rather than left open by default.
+
+  **Audio amplitude** (bat-crack loudness) was tried first and failed: a
+  miss's glove-pop and a hit's bat-crack are comparably loud on this
+  recording, so amplitude alone can't structurally tell them apart — it
+  failed specifically on `clip_whiff1`/`clip_foul1` even with tight
+  (±0.25s) windowing locked to the frame-verified swing instant.
+
+  **Audio spectral ratio** ((800-6000Hz)/(200-800Hz) energy via periodogram,
+  same ±0.25s windowing) looked promising on an initial 7-point hand-picked
+  sample (contact ≥0.73, non-contact ≤0.54) but was re-derived from scratch
+  and stress-tested against 9 additional events mined from `full_game.mkv`
+  — deliberately hunting hard cases (clean hits, weak/bunt-like contact,
+  and long confirmed no-swing "take" stretches), each frame-verified before
+  trusting it as ground truth, the same discipline that caught `clip_540`'s
+  `e4` mislabel earlier in this project. The gap collapsed on the larger
+  set: a confirmed, unambiguous real hit scored 0.506 — lower than four
+  separate confirmed non-contact instants (0.771-1.734) — and a confirmed
+  20+-second no-swing "take" scored 1.734, higher than four of the eight
+  confirmed hits. No threshold is both safe and useful: the only cutoff
+  that guarantees zero missed hits (≤0.506) misclassifies half of all true
+  non-contact instants as hits (50% false-positive rate, no better than not
+  classifying at all), while a cutoff that discriminates usefully
+  (12.5-25% false-positive rate) carries a **12.5-25% false-negative
+  rate** — real hits, including a completely unambiguous one, silently
+  reclassified as misses. Given this project's standing priority rule that
+  a missed real play is the worst possible failure, that's disqualifying
+  on its own, not a tuning problem. Root cause: this camera/mic setup's
+  background noise floor (wind, ambient field noise, distance-dependent
+  recording level) varies enough between at-bats that no single fixed
+  threshold — amplitude or frequency-ratio — holds across the game; the
+  clean small-sample separation was an artifact of the small sample, not
+  a sign the approach was sound.
+
+  **Defensive-reaction proxy (approach 3) was ruled out without
+  re-testing**, not overlooked: it's mechanically the same design as the
+  person-proximity motion signal already built and tested in the `v2`
+  `segments.py` investigation (any detected person, not just near the
+  plate, weighting nearby motion) — and that design already failed on
+  exactly this class of event, confirmed missing `clip_540`'s `e4` hit and
+  `clip_foul1`'s foul ball, for a specific structural reason: a swing and
+  the ball's flight extend past the batter's own bounding box and past
+  whichever fielder eventually reacts, so proximity-to-a-person weighting
+  reliably misses the swing/contact instant itself. A defensive-reaction
+  audio or motion proxy inherits the identical blind spot — a fielder's
+  reaction is not a reliable stand-in for the swing that caused it — so
+  re-running it under this different name would very likely just
+  reconfirm a result already on record, not produce new information.
+
+  **All three candidate approaches from the original Tier 2 scoping note
+  are now closed with real, documented failure reasons**, not left
+  half-tried. This is treated as a genuine, useful outcome per this
+  project's own rule that an honest "doesn't work" is as valid a result as
+  a shipped feature — Tier 2 hit/miss classification is not being pursued
+  further against this footage without either new camera/mic conditions
+  (a controlled noise floor) or a genuinely different signal category not
+  yet considered.
 - v1 targets **one sport at a time** (softball first); basketball comes later
   as a separate modular ruleset.
 - No login, accounts, or user profiles.
