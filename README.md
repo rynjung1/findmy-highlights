@@ -22,8 +22,8 @@ the detection pipeline, multi-file handling and stitching, the backend API,
 the full Home/Upload and Edit Log frontend, multi-base calibration, and the
 zone-velocity signal built on top of it — is done, tested, and has been
 exercised end to end against real footage and a real running server, not
-just in-process test clients. `pytest tests/` covers 247 unit tests,
-`pytest tests/ -m e2e` covers 2 tests that run real model inference, and a
+just in-process test clients. `pytest tests/` covers 254 unit tests,
+`pytest tests/ -m e2e` covers 5 tests that run real model inference, and a
 full ten-item pre-demo checklist (upload, calibrate, process, watch, Edit
 Log restore/cut-again, multi-file, re-export) has been walked end to end in
 an actual browser.
@@ -989,7 +989,12 @@ local timestamps happen to look adjacent.
   for base-occupancy validation (`clip_base1`-`clip_base4`, three with a
   per-file calibration override for bases), and two short clips added for
   a foul ball and a missed swing (`clip_foul1`, `clip_whiff1`) — plus a
-  shared `calibration.json` for the plate zone.
+  shared `calibration.json` for the plate zone. Two more,
+  `distance_test_close.mov`/`distance_test_far.mov`, are not softball
+  footage — same camera, same subject, same motion pattern, filmed at two
+  real subject-to-camera distances specifically to validate the
+  enter_thresh camera-distance finding below against real footage instead
+  of theory alone; see `tests/test_distance_scaling.py`.
 - **Ground truth** lives in `tests/ground_truth/*.json`, one file per clip,
   hand-annotated by frame-level visual review. Each lists action *events*
   with a time window, a type, and a `required` flag: required events are
@@ -1018,6 +1023,20 @@ local timestamps happen to look adjacent.
   photo crop riding the same motion) to give the veto positive-case
   evidence beyond "it never misfired" — the reference clips alone never
   exercise it (longest person-free motion run measured: 0.6s).
+- `tests/test_distance_scaling.py` re-derives the enter_thresh camera-
+  distance finding on every run, rather than trusting it as a one-time
+  measurement: real model inference against `distance_test_close/far.mov`
+  confirms motion score still scales down with distance (directionally,
+  not exactly quadratically — the measured exponent is ~1.09 on this
+  footage, see the test's own docstring for why) and that `far`'s own
+  margin over `enter_thresh` hasn't silently collapsed. Backed by
+  `pipeline.fusion.robust_box_width()`, a new per-clip (not per-frame)
+  scale-measurement utility with its own unit tests in
+  `tests/test_fusion.py` — building it caught a real bug in its first
+  version (excluding vertically-clipped boxes from a WIDTH measurement,
+  which discarded every sample from `distance_test_close.mov` since all
+  of them are bottom-cropped by design; only left/right clipping can
+  actually corrupt a width reading).
 - **Multi-file tests** (no committed multi-file reference set yet — see
   Known limitations): `tests/test_multifile.py` covers file ordering
   against synthetic metadata (clean ordering, missing metadata, two files

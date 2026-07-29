@@ -208,6 +208,69 @@ def compute_zone_velocity(det_times, det_boxes, zone: PlateZone):
     return out
 
 
+def robust_box_width(det_times, det_boxes, frame_size, zone: PlateZone | None = None,
+                     edge_margin_frac: float = 0.02, min_samples: int = 5):
+    """A robust, per-CLIP (not per-frame) person-box-width estimate: the
+    median width of detections that (a) fall inside `zone` if given (e.g.
+    the plate zone, to compare like-for-like against how far away the
+    batter/catcher/pitcher normally are), and (b) are NOT clipped by the
+    LEFT/RIGHT frame edge.
+
+    This exists to measure camera-to-subject scale as a defense against
+    the failure this project's enter_thresh margin investigation found:
+    `pipeline.motion`'s score is NOT scale-invariant (it scales with
+    roughly the square of the subject's linear size in frame), so a more
+    distant camera setup than the reference clips share could plausibly
+    push a real play's score below `enter_thresh` outright. A per-frame
+    "nearest box" reading was tried and rejected as a fix for that same
+    investigation: box height swung ~59px to ~429px across consecutive
+    ~1s samples of the SAME real subject (an RF-DETR identity-tracking
+    artifact, not real depth change), so only a robust, clip-wide
+    aggregate is trustworthy here, never a single frame's box.
+
+    Height is deliberately NOT used, unlike compute_zone_velocity's own
+    normalization -- confirmed directly with two controlled clips filmed
+    at two different real distances (distance_test_close/far.mov, same
+    camera, same subject, same motion): the close clip frames the subject
+    so tightly that their feet are clipped by the frame's BOTTOM edge in
+    every single sample (box bottom sits within a few px of the frame
+    edge throughout), which silently caps box HEIGHT at close range and
+    erases the real distance difference a naive height comparison would
+    show (median height came out ~666px for both clips, despite the
+    subject being dramatically closer in one). Width isn't vulnerable to
+    THAT failure mode for a person standing upright in a landscape frame
+    -- vertical cropping doesn't touch a box's horizontal extent -- which
+    is exactly why this function must NOT also reject vertically-clipped
+    boxes (an earlier version of this function did, by checking top/bottom
+    margins here too, and it silently discarded every single sample from
+    distance_test_close.mov as a result, since all of them are bottom-
+    clipped; caught by tests/test_distance_scaling.py, not a fresh check
+    added after the fact). Only LEFT/RIGHT clipping (someone exiting frame
+    sideways) can corrupt a width reading, so only that is excluded below.
+
+    Returns None if fewer than `min_samples` boxes survive filtering --
+    an honest "not enough signal to trust a scale reading" rather than a
+    noisy guess from one or two samples.
+    """
+    fw, fh = frame_size
+    margin = edge_margin_frac * fw
+    widths = []
+    for boxes in det_boxes:
+        for b in boxes:
+            x1, y1, x2, y2 = b
+            if x1 <= margin or x2 >= fw - margin:
+                continue
+            if zone is not None:
+                cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+                cx0, cy0 = zone.center_xy
+                if (cx - cx0) ** 2 + (cy - cy0) ** 2 > zone.radius_px ** 2:
+                    continue
+            widths.append(x2 - x1)
+    if len(widths) < min_samples:
+        return None
+    return float(np.median(widths))
+
+
 def compute_all_occupancy(det_times, det_boxes, zones: dict,
                           stationary_v: float,
                           require_stationary_entry: bool = False) -> dict:

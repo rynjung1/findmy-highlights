@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.fusion import (FusionConfig, PlateZone, apply_veto,
                              boxes_to_grid_mask, compute_occupancy, fuse,
+                             robust_box_width,
                              vetoed_overlapping_required, FusedResult)
 
 # Geometry used throughout: 1920x1080 source, 480x270 analysis, no border,
@@ -287,3 +288,55 @@ def test_veto_safety_net_flags_required_overlap():
 def test_veto_safety_net_clean_when_no_overlap():
     assert vetoed_overlapping_required(
         [(30.0, 32.0)], [{"id": "e9", "window": [14, 20]}]) == []
+
+
+# ---------- robust_box_width ----------
+
+def test_robust_box_width_returns_median():
+    boxes = [[centered_box(1147, 840, w=300)] for _ in range(6)]
+    boxes[2] = [centered_box(1147, 840, w=100)]   # outlier, still not clipped
+    times = list(range(6))
+    w = robust_box_width(times, boxes, FRAME)
+    assert w == 300.0   # median of five 300s and one 100 is 300
+
+
+def test_robust_box_width_ignores_bottom_edge_clipping():
+    # box bottom sits 5px from the 1080-tall frame's edge (feet cropped) --
+    # must NOT be excluded: vertical cropping doesn't corrupt a WIDTH
+    # reading (this is the exact distance_test_close.mov shape; an
+    # earlier version of this function wrongly excluded it -- see the
+    # function's own docstring).
+    clipped = [[627, 400, 991, 1075]] * 6
+    boxes = [clipped for _ in range(6)]
+    assert robust_box_width(list(range(6)), boxes, FRAME) == 364.0
+
+
+def test_robust_box_width_ignores_top_edge_clipping():
+    clipped = [[627, 2, 991, 400]] * 6
+    boxes = [clipped for _ in range(6)]
+    assert robust_box_width(list(range(6)), boxes, FRAME) == 364.0
+
+
+def test_robust_box_width_excludes_left_edge_clipped():
+    clipped = [[2, 400, 400, 900]] * 6
+    boxes = [clipped for _ in range(6)]
+    assert robust_box_width(list(range(6)), boxes, FRAME) is None
+
+
+def test_robust_box_width_excludes_right_edge_clipped():
+    clipped = [[1500, 400, 1918, 900]] * 6
+    boxes = [clipped for _ in range(6)]
+    assert robust_box_width(list(range(6)), boxes, FRAME) is None
+
+
+def test_robust_box_width_respects_zone():
+    in_zone = centered_box(1147, 840, w=300)
+    out_zone = centered_box(50, 50, w=100)
+    boxes = [[in_zone, out_zone] for _ in range(6)]
+    w = robust_box_width(list(range(6)), boxes, FRAME, zone=ZONE)
+    assert w == 300.0   # the out-of-zone box never counted
+
+
+def test_robust_box_width_none_below_min_samples():
+    boxes = [[centered_box(1147, 840, w=300)] for _ in range(3)]
+    assert robust_box_width(list(range(3)), boxes, FRAME, min_samples=5) is None
