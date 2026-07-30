@@ -173,3 +173,61 @@ def segment_covers(segments, window) -> bool:
 
 def total_duration(segments) -> float:
     return float(sum(b - a for a, b in segments))
+
+
+@dataclass
+class SkipSuggestionConfig:
+    """Skip-ahead is a purely manual, non-destructive UI affordance (see
+    pipeline/manifest.py's skip_suggestions field): nothing is ever
+    deleted, the viewer chooses whether to use it, and the worst case of
+    a wrong suggestion is a slightly-off button, not a missed play. That's
+    a fundamentally different risk than real cutting, so this is
+    deliberately MORE permissive than anything used for actual segment
+    boundaries:
+      - quiet_thresh reuses SegmentConfig.exit_thresh (0.0058) directly,
+        not the much stricter pad_quiet_thresh (0.002) dynamic padding
+        uses for real, safety-relevant shrink decisions -- "quiet enough
+        that a live segment wouldn't even stay open on this motion alone"
+        is a fine bar for a dismissable suggestion, tighter than that
+        would just mean fewer, over-cautious suggestions for no reason.
+      - min_dip_s is UX-driven, not safety-driven: 2.0s is long enough
+        that skipping it is actually worth the viewer's action, short
+        enough to catch a real in-play lull (a batter settling, a pause
+        before the next pitch) without needing the multi-part
+        floor/buffer machinery real padding shrink requires.
+    No floor, no safety buffer, no contiguity-from-a-specific-edge scan --
+    those exist for padding because padding protects against unknown real
+    events; a skip suggestion the viewer can simply not click needs none
+    of that.
+    """
+    quiet_thresh: float = 0.0058   # == SegmentConfig.exit_thresh
+    min_dip_s: float = 2.0
+
+
+def find_skip_suggestions(seg_start, seg_end, motion_times, motion_scores,
+                          config: SkipSuggestionConfig | None = None):
+    """Contiguous quiet stretches within [seg_start, seg_end] long enough
+    to be worth a manual skip-ahead suggestion. Returns a list of
+    (dip_start, dip_end) spans, in the SAME timeline as seg_start/seg_end
+    (source-file-local seconds, matching the rest of the manifest)."""
+    cfg = config or SkipSuggestionConfig()
+    motion_times = np.asarray(motion_times, dtype=float)
+    motion_scores = np.asarray(motion_scores, dtype=float)
+    idx = (motion_times >= seg_start) & (motion_times <= seg_end)
+    t, s = motion_times[idx], motion_scores[idx]
+    order = np.argsort(t)
+    t, s = t[order], s[order]
+
+    suggestions = []
+    dip_start = None
+    for i in range(len(t)):
+        quiet = s[i] < cfg.quiet_thresh
+        if quiet and dip_start is None:
+            dip_start = t[i]
+        elif not quiet and dip_start is not None:
+            if t[i] - dip_start >= cfg.min_dip_s:
+                suggestions.append((float(dip_start), float(t[i])))
+            dip_start = None
+    if dip_start is not None and len(t) and t[-1] - dip_start >= cfg.min_dip_s:
+        suggestions.append((float(dip_start), float(t[-1])))
+    return suggestions

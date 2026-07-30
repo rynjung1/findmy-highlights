@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getJob, getManifest, outputUrl, sourceUrl, triggerExport, updateSegmentStatus } from '../api'
+import SkippableVideo from './SkippableVideo'
 
 const EXPORT_POLL_MS = 1000
 
@@ -180,10 +181,9 @@ export default function EditLogView({ batchId }) {
         {exportError && <p className="alert alert-danger">{exportError}</p>}
         {exportVersion ? (
           <>
-            <video
-              controls
+            <SkippableVideo
               src={outputUrl(batchId, exportVersion)}
-              style={{ maxWidth: '100%', width: '100%', background: '#000' }}
+              segments={manifest.segments}
             />
             <p>
               <a href={outputUrl(batchId, exportVersion)} download="highlights.mp4">

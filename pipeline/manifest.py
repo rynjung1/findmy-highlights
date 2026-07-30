@@ -12,6 +12,16 @@ human-readable) and as float seconds (lossless for tooling). The `origin`
 field records how an entry came to be ("detected" / "gap"); a future
 manual-cut feature can add its own origin without schema changes.
 
+Every "kept" entry also carries `skip_suggestions`: a list of
+{"start_s", "end_s"} spans (source-file-local, same timeline as the
+segment's own start_s/end_s) marking quiet stretches WITHIN that segment
+a viewer might want to manually skip ahead past during playback. This is
+a purely manual UI affordance, not a detection change — nothing here ever
+gets removed from the exported video or the kept/cut model; it's just
+data the frontend player can use to offer a "skip ahead" button. Always
+`[]` for "cut"/gap entries (nothing plays there to skip within) and for
+any manifest built without a skip_fn.
+
 Multi-file (Stage 4): `start_s`/`end_s` are always LOCAL to a segment's own
 `source_file` (matching the spec's example, which shows plain timestamps
 per source file, not one global concatenated clock). Every segment also
@@ -59,16 +69,23 @@ def _spans_with_gaps(kept_segments, duration):
 
 
 def build_manifest(source_file: str, duration: float, kept_segments,
-                   score_fn=None) -> dict:
+                   score_fn=None, skip_fn=None) -> dict:
     """Build a single-file manifest from final kept segments. Gaps become
     cut entries. For multiple files, use build_multi_file_manifest.
 
     score_fn(start_s, end_s) -> float, optional, supplies detection_score
     per span (e.g. peak smoothed motion); defaults to 0.0 for gaps and 1.0
     for kept spans if not given.
+
+    skip_fn(start_s, end_s) -> list[(dip_start, dip_end)], optional,
+    supplies the manual skip-ahead candidates (see
+    pipeline.segments.find_skip_suggestions) for each KEPT span; never
+    called for gap/cut spans (nothing plays there to skip within).
+    Defaults to [] if not given -- purely additive, existing callers and
+    manifests are unaffected.
     """
     segments = _segments_for_file(source_file, 0, duration, kept_segments,
-                                  score_fn, start_id=1)
+                                  score_fn, skip_fn, start_id=1)
     return {
         "version": MANIFEST_VERSION,
         "source_files": [source_file],
@@ -78,7 +95,7 @@ def build_manifest(source_file: str, duration: float, kept_segments,
 
 
 def _segments_for_file(source_file, source_file_index, duration,
-                       kept_segments, score_fn, start_id):
+                       kept_segments, score_fn, skip_fn, start_id):
     segments = []
     for i, (a, b, status) in enumerate(
             _spans_with_gaps(kept_segments, duration), start=start_id):
@@ -86,6 +103,11 @@ def _segments_for_file(source_file, source_file_index, duration,
             score = round(float(score_fn(a, b)), 3)
         else:
             score = 1.0 if status == "kept" else 0.0
+        skip_suggestions = []
+        if status == "kept" and skip_fn is not None:
+            skip_suggestions = [
+                {"start_s": round(float(ds), 3), "end_s": round(float(de), 3)}
+                for ds, de in skip_fn(a, b)]
         segments.append({
             "id": f"seg_{i:03d}",
             "source_file": source_file,
@@ -95,6 +117,7 @@ def _segments_for_file(source_file, source_file_index, duration,
             "detection_score": score,
             "status": status,
             "origin": "detected" if status == "kept" else "gap",
+            "skip_suggestions": skip_suggestions,
         })
     return segments
 
@@ -107,7 +130,8 @@ def build_multi_file_manifest(files) -> dict:
     — this function does not re-derive or verify order, callers must have
     resolved any ambiguity first):
         {"source_file": str, "duration": float, "kept_segments": [...],
-         "score_fn": callable or None (optional)}
+         "score_fn": callable or None (optional),
+         "skip_fn": callable or None (optional)}
 
     Each file's segments are local to that file (see module docstring);
     `source_file_index` is each file's position in this list, which also
@@ -119,7 +143,7 @@ def build_multi_file_manifest(files) -> dict:
     for idx, f in enumerate(files):
         file_segments = _segments_for_file(
             f["source_file"], idx, f["duration"], f["kept_segments"],
-            f.get("score_fn"), start_id=next_id)
+            f.get("score_fn"), f.get("skip_fn"), start_id=next_id)
         segments.extend(file_segments)
         next_id += len(file_segments)
     return {

@@ -54,7 +54,7 @@ def main() -> None:
     if args.manifest:
         import numpy as np
         from pipeline.manifest import build_manifest, save_manifest
-        from pipeline.segments import smooth_scores
+        from pipeline.segments import find_skip_suggestions, smooth_scores
         sm = smooth_scores(motion.times, motion.scores,
                            SegmentConfig().smooth_window_s)
 
@@ -62,8 +62,11 @@ def main() -> None:
             idx = (motion.times >= a) & (motion.times <= b)
             return float(sm[idx].max()) if idx.any() else 0.0
 
+        def skip_fn(a, b):
+            return find_skip_suggestions(a, b, motion.times, motion.scores)
+
         manifest = build_manifest(Path(args.video).name, duration, segments,
-                                  score_fn=peak_score)
+                                  score_fn=peak_score, skip_fn=skip_fn)
         save_manifest(manifest, args.manifest)
         print(f"manifest written to {args.manifest}", file=sys.stderr)
 

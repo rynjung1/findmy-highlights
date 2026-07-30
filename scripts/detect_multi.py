@@ -38,7 +38,8 @@ from pipeline.calibration import resolve_zone
 from pipeline.manifest import build_multi_file_manifest, save_manifest
 from pipeline.multifile import AmbiguousOrderError, order_files, resolve_order
 from pipeline.run import DEFAULT_CACHE_DIR, process_video
-from pipeline.segments import SegmentConfig, smooth_scores, total_duration
+from pipeline.segments import (SegmentConfig, find_skip_suggestions,
+                               smooth_scores, total_duration)
 
 CACHE_DIR = DEFAULT_CACHE_DIR
 
@@ -106,9 +107,13 @@ def main() -> None:
             idx = (mt >= a) & (mt <= b)
             return float(sm[idx].max()) if idx.any() else 0.0
 
+        def skip_fn(a, b, mt=motion.times, sc=motion.scores):
+            return find_skip_suggestions(a, b, mt, sc)
+
         files_for_manifest.append({
             "source_file": Path(path).name, "duration": duration,
             "kept_segments": segments, "score_fn": peak_score,
+            "skip_fn": skip_fn,
         })
 
     if args.manifest:

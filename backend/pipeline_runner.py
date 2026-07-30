@@ -13,7 +13,7 @@ from pipeline.calibration import resolve_zone
 from pipeline.manifest import (build_manifest, build_multi_file_manifest,
                                load_manifest, save_manifest)
 from pipeline.run import DEFAULT_CACHE_DIR, process_video
-from pipeline.segments import SegmentConfig, smooth_scores
+from pipeline.segments import SegmentConfig, find_skip_suggestions, smooth_scores
 from pipeline.stitch import run_stitch
 
 from backend.jobs import create_job, save_job
@@ -47,9 +47,19 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list) -> None:
                 idx = (mt >= a) & (mt <= b)
                 return float(sm[idx].max()) if idx.any() else 0.0
 
+            # Manual, non-destructive skip-ahead suggestions (see
+            # pipeline/manifest.py's skip_suggestions field): uses RAW
+            # motion.scores, not the smoothed `sm` peak_score reads above --
+            # this is a UI affordance the viewer can simply not click, not
+            # a real cutting decision, so it's deliberately more permissive
+            # than anything used for actual segment boundaries or padding.
+            def skip_fn(a, b, mt=motion.times, sc=motion.scores):
+                return find_skip_suggestions(a, b, mt, sc)
+
             files_for_manifest.append({
                 "source_file": Path(path).name, "duration": duration,
                 "kept_segments": segments, "score_fn": peak_score,
+                "skip_fn": skip_fn,
             })
 
         on_stage("building manifest")
@@ -57,7 +67,8 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list) -> None:
             f = files_for_manifest[0]
             manifest = build_manifest(f["source_file"], f["duration"],
                                       f["kept_segments"],
-                                      score_fn=f["score_fn"])
+                                      score_fn=f["score_fn"],
+                                      skip_fn=f["skip_fn"])
         else:
             manifest = build_multi_file_manifest(files_for_manifest)
 

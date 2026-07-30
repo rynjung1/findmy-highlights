@@ -7,8 +7,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.segments import (SegmentConfig, merge_segments, scores_to_segments,
-                               segment_covers, smooth_scores, total_duration)
+from pipeline.segments import (SegmentConfig, SkipSuggestionConfig,
+                               find_skip_suggestions, merge_segments,
+                               scores_to_segments, segment_covers, smooth_scores,
+                               total_duration)
 
 
 def cfg(**kw):
@@ -160,3 +162,63 @@ def test_smooth_scores_preserves_length_and_mean():
     sm = smooth_scores(t, s, 1.0)
     assert len(sm) == len(s)
     assert abs(np.mean(sm) - np.mean(s)) < 0.05
+
+
+SKIP_CFG = SkipSuggestionConfig(quiet_thresh=0.006, min_dip_s=2.0)
+
+
+def test_skip_suggestions_finds_real_dip():
+    t = np.arange(0, 30, 0.1)
+    s = np.full(len(t), 0.02)          # active throughout
+    s[(t >= 10.0) & (t < 15.0)] = 0.001   # 5s genuine quiet stretch
+    out = find_skip_suggestions(0.0, 30.0, t, s, SKIP_CFG)
+    assert len(out) == 1
+    (a, b), = out
+    assert abs(a - 10.0) < 0.15
+    assert abs(b - 15.0) < 0.15
+
+
+def test_skip_suggestions_ignores_short_dip():
+    # 1.0s dip, below min_dip_s=2.0 -- not worth a suggestion
+    t = np.arange(0, 30, 0.1)
+    s = np.full(len(t), 0.02)
+    s[(t >= 10.0) & (t < 11.0)] = 0.001
+    out = find_skip_suggestions(0.0, 30.0, t, s, SKIP_CFG)
+    assert out == []
+
+
+def test_skip_suggestions_none_when_no_dip():
+    t = np.arange(0, 30, 0.1)
+    s = np.full(len(t), 0.02)
+    assert find_skip_suggestions(0.0, 30.0, t, s, SKIP_CFG) == []
+
+
+def test_skip_suggestions_dip_touching_segment_end():
+    # dip runs right up to the segment's own end (no active sample after
+    # it within this segment) -- must still be reported, not dropped
+    t = np.arange(0, 30, 0.1)
+    s = np.full(len(t), 0.02)
+    s[(t >= 20.0)] = 0.001
+    out = find_skip_suggestions(0.0, 25.0, t, s, SKIP_CFG)
+    assert len(out) == 1
+    (a, b), = out
+    assert abs(a - 20.0) < 0.15
+    assert abs(b - 24.9) < 0.2
+
+
+def test_skip_suggestions_restricted_to_segment_window():
+    # a real dip OUTSIDE [seg_start, seg_end] must not be reported
+    t = np.arange(0, 30, 0.1)
+    s = np.full(len(t), 0.02)
+    s[(t >= 1.0) & (t < 6.0)] = 0.001   # dip before the segment starts
+    out = find_skip_suggestions(10.0, 20.0, t, s, SKIP_CFG)
+    assert out == []
+
+
+def test_skip_suggestions_multiple_dips():
+    t = np.arange(0, 40, 0.1)
+    s = np.full(len(t), 0.02)
+    s[(t >= 5.0) & (t < 8.0)] = 0.001
+    s[(t >= 20.0) & (t < 23.5)] = 0.001
+    out = find_skip_suggestions(0.0, 40.0, t, s, SKIP_CFG)
+    assert len(out) == 2

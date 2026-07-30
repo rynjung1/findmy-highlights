@@ -48,6 +48,24 @@ def test_score_fn_applied():
     assert scores["seg_002"] == pytest.approx(0.15)
 
 
+def test_skip_suggestions_default_empty():
+    # backward compatible: no skip_fn given -> every segment (kept or cut)
+    # gets an empty list, existing manifests/callers are unaffected
+    m = build_manifest("g.mp4", 20.0, [(5.0, 10.0)])
+    assert all(s["skip_suggestions"] == [] for s in m["segments"])
+
+
+def test_skip_fn_applied_only_to_kept_segments():
+    def skip_fn(a, b):
+        return [(a + 1, a + 2)]
+
+    m = build_manifest("g.mp4", 20.0, [(5.0, 10.0)], skip_fn=skip_fn)
+    by_status = {s["status"]: s["skip_suggestions"] for s in m["segments"]}
+    assert by_status["kept"] == [{"start_s": 6.0, "end_s": 7.0}]
+    # gap/cut entries never call skip_fn -- nothing plays there to skip
+    assert by_status["cut"] == []
+
+
 def test_save_load_round_trip(tmp_path):
     m = build_manifest("g.mp4", 20.0, [(5.0, 10.0)])
     p = tmp_path / "manifest.json"

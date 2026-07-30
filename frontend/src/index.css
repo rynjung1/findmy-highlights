@@ -91,6 +91,44 @@ button.pill {
   font-size: 12px;
 }
 
+/* ---------- skip-ahead (SkippableVideo) ---------- */
+
+.skippable-video-wrap {
+  position: relative;
+}
+
+.skip-ahead-button {
+  position: absolute;
+  right: 16px;
+  bottom: 56px; /* clears the native <video> controls bar */
+  height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(24, 24, 27, 0.82);
+  backdrop-filter: blur(4px);
+  animation: skip-ahead-in 0.15s ease;
+}
+
+.skip-ahead-button:hover:not(:disabled) {
+  background: rgba(24, 24, 27, 0.95);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.skip-ahead-duration {
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 400;
+}
+
+@keyframes skip-ahead-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ---------- layout / surfaces ---------- */
 
 .app-layout {
