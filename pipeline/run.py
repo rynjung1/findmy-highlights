@@ -124,5 +124,5 @@ def process_video(video: str, zone, motion_only: bool = False,
         zone_velocities["plate"] = (det.times, compute_zone_velocity(det.times, det.boxes, zone))
     final = refine_segments(kept, motion.times, sm, det.times, occ, fires,
                             motion.duration, RefineConfig(settle=settle_cfg),
-                            zone_velocities)
+                            zone_velocities, motion_scores=motion.scores)
     return final, vetoed, motion.duration, motion

@@ -4,10 +4,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.refine import (RefineConfig, departure_times, extend_segments,
+from pipeline.refine import (RefineConfig, departure_times, dynamic_pad_and_merge,
+                             dynamic_post_pad, dynamic_pre_pad, extend_segments,
                              pad_and_merge, refine_segments,
                              zone_close_candidate)
 from pipeline.settle import SettleConfig
@@ -246,6 +248,131 @@ def test_zone_velocities_default_none_is_unchanged():
     with_default = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG)
     explicit_none = extend_segments([(2.0, 5.0)], t, m, [4.0], [], 20.0, CFG, None)
     assert with_default == explicit_none
+
+
+DYN_CFG = RefineConfig(pre_pad_s=4.0, post_pad_s=2.0,
+                       pre_pad_floor_s=1.0, post_pad_floor_s=0.5,
+                       pad_quiet_thresh=0.002, pre_pad_min_contig_s=1.5,
+                       post_pad_min_contig_s=0.5, pad_safety_buffer_s=1.0,
+                       final_merge_gap_s=0.5)
+
+
+def test_dynamic_pre_pad_shrinks_when_fully_quiet():
+    # entire eligible window [a-4.0, a-1.0] reads quiet -> shrinks toward
+    # (ceiling - eligible_span + buffer), never below the floor
+    t = np.arange(0, 150) * 0.1
+    s = np.full(len(t), 0.0005)
+    result = dynamic_pre_pad(10.0, t, s, DYN_CFG)
+    assert 1.0 <= result < 4.0        # shrank, but never below the floor
+    assert result == pytest.approx(2.0, abs=0.2)
+
+
+def test_dynamic_pre_pad_stays_at_ceiling_when_active_throughout():
+    # real motion present across the whole eligible window -- no quiet
+    # run to trust at all, must stay at the full ceiling
+    t = np.arange(0, 150) * 0.1
+    s = np.full(len(t), 0.0025)   # above pad_quiet_thresh
+    result = dynamic_pre_pad(10.0, t, s, DYN_CFG)
+    assert result == 4.0
+
+
+def test_dynamic_pre_pad_stays_at_ceiling_when_quiet_run_too_short():
+    # only 1.0s of contiguous quiet from the far edge, below
+    # pre_pad_min_contig_s=1.5 -- must not be trusted at all
+    t = np.arange(0, 150) * 0.1
+    s = np.full(len(t), 0.0025)
+    s[(t >= 6.0) & (t < 7.0)] = 0.0005   # 1.0s quiet right at the far edge
+    result = dynamic_pre_pad(10.0, t, s, DYN_CFG)
+    assert result == 4.0
+
+
+def test_dynamic_pre_pad_stance_shift_case_not_clipped():
+    # the exact risk this design targets: the window looks quiet for the
+    # FAR portion, then a slow ramp begins partway through (a stance shift
+    # before an early swing) -- the ramp itself must never be trimmed into,
+    # and the safety buffer must keep real margin between the trim point
+    # and where the ramp actually starts.
+    t = np.arange(0, 150) * 0.1
+    s = np.full(len(t), 0.0005)
+    s[(t >= 8.2) & (t < 10.0)] = 0.003   # ramp starts at 8.2, well inside
+                                          # the eligible window [6.0, 9.0]
+    result = dynamic_pre_pad(10.0, t, s, DYN_CFG)
+    kept_from = 10.0 - result
+    assert kept_from <= 8.2 - 0.5   # real margin before the ramp, not clipped
+
+
+def test_dynamic_post_pad_direction_matches_pre_pad():
+    # regression test for a real bug found while validating this design:
+    # the far-edge-inward scan must handle the post side's DESCENDING time
+    # order correctly (far edge has the LARGER timestamp) -- an earlier
+    # version computed a negative duration here and silently never shrank
+    # the post side at all, on any clip. Mirrors the pre-side quiet case
+    # exactly, just on the trailing side.
+    t = np.arange(0, 150) * 0.1
+    s = np.full(len(t), 0.0005)
+    result = dynamic_post_pad(10.0, t, s, DYN_CFG)
+    assert 0.5 <= result < 2.0
+    assert result == pytest.approx(1.5, abs=0.2)
+
+
+def test_dynamic_post_pad_stays_at_ceiling_when_active_throughout():
+    t = np.arange(0, 150) * 0.1
+    s = np.full(len(t), 0.0025)
+    result = dynamic_post_pad(10.0, t, s, DYN_CFG)
+    assert result == 2.0
+
+
+def test_dynamic_pad_floor_never_violated_even_when_entire_clip_silent():
+    t = np.arange(0, 300) * 0.1
+    s = np.full(len(t), 0.0)
+    assert dynamic_pre_pad(10.0, t, s, DYN_CFG) >= DYN_CFG.pre_pad_floor_s
+    assert dynamic_post_pad(10.0, t, s, DYN_CFG) >= DYN_CFG.post_pad_floor_s
+
+
+def test_dynamic_pad_and_merge_shrinks_and_merges():
+    t = np.arange(0, 300) * 0.1
+    s = np.full(len(t), 0.0005)   # quiet everywhere
+    out = dynamic_pad_and_merge([(10.0, 12.0)], 29.0, t, s, DYN_CFG)
+    (a, b), = out
+    assert a > 10.0 - 4.0     # shrank below the fixed ceiling
+    assert b < 12.0 + 2.0
+    assert a >= 10.0 - 4.0 and b <= 12.0 + 2.0   # never exceeds the ceiling
+
+
+def test_refine_segments_without_motion_scores_matches_pad_and_merge():
+    # backward compatibility: omitting motion_scores must be byte-for-byte
+    # identical to the previous fixed-padding behavior
+    t, m = motion(n=600, base=0.0005)
+    m[(t >= 20) & (t < 26)] = 0.0025
+    det_t = list(range(0, 60))
+    occ = [5 <= x < 19 for x in det_t]
+    via_refine = refine_segments([(10.0, 20.0)], t, m, det_t, occ, [40.0], 60.0, CFG)
+    extended = extend_segments([(10.0, 20.0)], t, m, departure_times(det_t, occ),
+                               [40.0], 60.0, CFG)
+    via_static = pad_and_merge(extended, 60.0, CFG)
+    assert via_refine == via_static
+
+
+def test_refine_segments_with_motion_scores_shrinks_padding():
+    # a genuinely quiet run-up (raw scores, separate from motion_smooth)
+    # lets refine_segments shrink pre-padding below the fixed ceiling
+    t, m = motion(n=600, base=0.0005)
+    m[(t >= 20) & (t < 26)] = 0.0025
+    raw = np.full(len(t), 0.0005)   # quiet raw scores throughout
+    det_t = list(range(0, 60))
+    occ = [5 <= x < 19 for x in det_t]
+    dyn_cfg = RefineConfig(settle=CFG.settle, trail_cap_s=CFG.trail_cap_s,
+                           occupancy_lookback_s=CFG.occupancy_lookback_s,
+                           departure_slack_s=CFG.departure_slack_s,
+                           pre_pad_s=CFG.pre_pad_s, post_pad_s=CFG.post_pad_s,
+                           final_merge_gap_s=CFG.final_merge_gap_s,
+                           pre_pad_floor_s=1.0, post_pad_floor_s=0.5,
+                           pre_pad_min_contig_s=1.5, post_pad_min_contig_s=0.5,
+                           pad_safety_buffer_s=1.0)
+    final = refine_segments([(10.0, 20.0)], t, m, det_t, occ, [40.0], 60.0,
+                            dyn_cfg, motion_scores=raw)
+    (a, b), = final
+    assert a > 10.0 - CFG.pre_pad_s   # pre-pad shrank below the fixed 4.0 ceiling
 
 
 def test_full_refine_pipeline():

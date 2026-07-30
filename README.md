@@ -1052,6 +1052,59 @@ local timestamps happen to look adjacent.
   That's a guaranteed loss on a known, confirmed play, not a statistical
   risk on unseen footage, judged a different category of cost than the
   ones actually spent above. `enter_thresh` stays at 0.006.
+- **Dynamic (shrink-only) padding: shipped, and the honest number is much
+  smaller than a first look suggested.** Padding's own 14.80 real minutes
+  on `full_game.mkv` (of the 54.00 kept) is fixed-duration regardless of
+  what's actually happening inside that window — a first pass classifying
+  padding time by its own average motion score suggested up to 14.2 of
+  those 14.80 minutes merely "reads quiet." That number does not survive
+  a properly conservative test, and shipping on the raw figure would have
+  reintroduced real risk for no honest reason.
+
+  `RefineConfig.pre_pad_s`/`post_pad_s` are now a **ceiling**, never
+  exceeded — real per-segment padding can shrink toward, but never below,
+  a hard floor (`pre_pad_floor_s=1.0`, `post_pad_floor_s=0.3`), and only
+  when the OUTER part of the window (farthest from the segment) reads
+  genuinely, contiguously quiet, scanned from its own far edge inward —
+  the same direction-matters principle as the play-extension bug fix
+  above, so a real dip-then-resume can't be mistaken for a safe-to-trim
+  stretch. A `pad_safety_buffer_s=1.0` (tied to `smooth_window_s`, the
+  time resolution below which "quiet" isn't a meaningful reading) is
+  subtracted from whatever quiet run is measured, so the trim always
+  stops short of the observed wake point rather than shrinking exactly up
+  to it — this is the direct answer to a real, physically-grounded risk:
+  padding protects against a real event's pre/post-roll running longer
+  than anything in the 9 reference clips, which is a different safety
+  claim than "this specific instance reads quiet right now" (a subtle
+  lead-in, e.g. a stance shift before an early swing, can look quiet for
+  its first second before ramping up).
+
+  **The safety buffer is confirmed load-bearing, not just theoretical
+  caution.** Running the identical mechanism with it set to 0 recovers
+  more (3.12 of the 14.80 minutes) but reintroduces a real continuity
+  regression on `clip_300`'s e6 and `clip_base1`'s e1 — a third and fourth
+  failure mode, distinct from the two clips already known to be fragile.
+  With the buffer at 1.0, all 9 clips pass clean, confirmed via
+  `scripts/regression.py`, specifically including `clip_540`'s e4 and
+  `clip_base3`'s e1 (the two clips that already broke once tonight on a
+  more naive padding cut): both are contiguously covered, and both
+  segments' post-padding — the side that broke last time — correctly
+  stays at its full ceiling, untouched, while other real segments shrink.
+
+  **Real, shipped numbers (via `pipeline.run.process_video`, not a
+  simulation): `full_game.mkv` now keeps 53.19 min / cuts 14.31 min**
+  (144 final segments, up from 130 — shrunk padding no longer bridges a
+  few previously-touching segments into one). That's **0.81 of the 14.80
+  padding minutes recovered (~5.5%)** — the rest stays as genuine
+  protection. Documenting this plainly so the bigger 14.2-minute figure
+  doesn't get re-chased later without redoing this same validation: most
+  of what merely reads quiet on average does not survive a properly
+  conservative per-segment test, and this asymmetry (recoverable margin
+  concentrates on the post side — 77 of 229 segments there vs. 52 of 229
+  on the pre side, since a pre-padding window sits right up against the
+  plate-approach lull before a play, which is quiet less often than a
+  post-padding window's outer edge is) is itself part of the honest
+  result, not a detail to average away.
 - **No outcome classification (Tier 2) — investigated this session and
   closed, not merely deferred.** v1 keeps every action segment, including
   missed swings; telling a whiff from a hit was explicitly authorized as a

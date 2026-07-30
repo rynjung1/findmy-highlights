@@ -146,7 +146,8 @@ def main() -> None:
             zone_velocities["plate"] = (det.times, compute_zone_velocity(det.times, det.boxes, zone))
         kept = refine_segments(raw_kept, motion.times, sm_motion, det.times,
                                occ, fires, motion.duration,
-                               RefineConfig(settle=settle_cfg), zone_velocities)
+                               RefineConfig(settle=settle_cfg), zone_velocities,
+                               motion_scores=motion.scores)
         fus_rec, fus_tot, fus_missed = recall_line("refined", kept, truth,
                                                    motion.duration)
         print(f"    at-bat fires: {[round(f, 1) for f in fires]}")

@@ -203,6 +203,62 @@ class RefineConfig:
     pre_pad_s: float = 2.8
     post_pad_s: float = 1.85
     final_merge_gap_s: float = 0.5
+    # DYNAMIC PADDING (shrink-only, ceiling unchanged): pre_pad_s/post_pad_s
+    # above are now a CEILING, never exceeded -- real per-segment padding
+    # can shrink toward (but never below) a hard floor, and only when the
+    # OUTER part of the padding window (farthest from the segment) reads
+    # genuinely, contiguously quiet. This is deliberately NOT "shrink
+    # whenever the window reads quiet by average score" -- padding's whole
+    # purpose is protecting against a real event's pre/post-roll running
+    # longer than anything in the 9 reference clips, which is a different
+    # safety claim than "this specific instance reads quiet right now."
+    # Three separate conservative mechanisms, all required together:
+    #   1. A hard floor immediately adjacent to the segment (never shrunk,
+    #      regardless of score) -- pre_pad_floor_s=1.0, post_pad_floor_s=0.3.
+    #      Asymmetric because post_pad_s's own ceiling (1.85s) is already
+    #      documented above as having zero margin beyond the 9 clips' own
+    #      need -- there's less room to give on that side to begin with.
+    #   2. A minimum contiguous-quiet requirement before trusting ANY of
+    #      the eligible region, scanned from its own far edge inward (same
+    #      principle as the extension bug fix: real motion dips and
+    #      resumes, so a scan must start at the far end, not average the
+    #      whole window). pre_pad_min_contig_s=1.5 reuses SettleConfig's
+    #      own already-validated min_quiet_s directly. post_pad_min_contig_s
+    #      must be smaller (0.5) -- post_pad_s's ceiling minus a real floor
+    #      leaves less than 1.5s of even POSSIBLE eligible window, so
+    #      demanding 1.5s there is an arithmetic dead end, not a safety
+    #      choice (found as a real bug while building this: with the 1.5s
+    #      value on both sides, the post side silently never shrank at all,
+    #      on any of the 9 clips OR on full_game.mkv -- not because
+    #      post-padding is never quiet, but because the check could never
+    #      mathematically pass).
+    #   3. pad_safety_buffer_s=1.0 (tied to smooth_window_s -- the time
+    #      resolution below which "quiet" isn't even a meaningful reading):
+    #      the trim always stops this much short of the observed wake
+    #      point, rather than shrinking exactly up to it. CONFIRMED
+    #      load-bearing, not just theoretical caution: running the
+    #      identical mechanism with this set to 0 reintroduces a real
+    #      continuity regression (clip_300's e6, clip_base1's e1 -- not
+    #      even the two clips already known to be fragile, a THIRD and
+    #      FOURTH failure mode) on the real 9-clip suite. With the buffer
+    #      at 1.0, all 9 clips pass clean, confirmed fresh via
+    #      scripts/regression.py.
+    #
+    # Validated directly against full_game.mkv (the one real 67.5-minute
+    # recording): of the 14.80 minutes the fixed padding ceiling adds to
+    # kept output, only ~0.81 minutes (~5.5%) is safely recoverable at
+    # these values -- the rest stays as genuine protection. That's a much
+    # smaller opportunity than a naive "padding time that reads quiet by
+    # average score" figure (14.2 of the 14.8 minutes) suggested -- most of
+    # what merely reads quiet on average does not survive a properly
+    # conservative per-segment test. See README's Current Status for the
+    # full account.
+    pre_pad_floor_s: float = 1.0
+    post_pad_floor_s: float = 0.3
+    pad_quiet_thresh: float = 0.002        # == SettleConfig.DEFAULT_THRESHOLD
+    pre_pad_min_contig_s: float = 1.5      # == SettleConfig.DEFAULT_MIN_QUIET_S
+    post_pad_min_contig_s: float = 0.5
+    pad_safety_buffer_s: float = 1.0
     # Stage 11: box-heights/sec (pipeline.fusion.compute_zone_velocity's
     # units). 0.20 sits above every resting-fielder sample measured across
     # clip_base1/3/4 (max 0.12) and below the real arrival spikes (min
@@ -345,14 +401,105 @@ def pad_and_merge(segments, duration, config: RefineConfig | None = None):
     return merge_segments(padded, cfg.final_merge_gap_s)
 
 
+def _contiguous_quiet_from_far_edge(t_far_to_near, s_far_to_near, threshold):
+    """`t`/`s` ordered starting at the FAR edge of a padding window
+    (farthest from the real segment) proceeding toward the NEAR edge.
+    Returns how long the quiet run starting at the far edge lasts before
+    the first sample at/above threshold -- i.e. this only ever trims from
+    the far end inward, never from the middle, so a real dip-then-resume
+    can't be mistaken for a trim-safe stretch (same principle as the
+    extension bug fix above). `t` may be ascending (pre side) or
+    descending (post side); abs() makes the duration direction-agnostic."""
+    if len(t_far_to_near) == 0:
+        return 0.0
+    if s_far_to_near[0] >= threshold:
+        return 0.0
+    for i in range(1, len(t_far_to_near)):
+        if s_far_to_near[i] >= threshold:
+            return float(abs(t_far_to_near[i] - t_far_to_near[0]))
+    return float(abs(t_far_to_near[-1] - t_far_to_near[0]))
+
+
+def dynamic_pre_pad(a, motion_times, motion_scores, cfg: RefineConfig):
+    """How much pre-padding to actually use before segment start `a`.
+    [a-pre_pad_floor_s, a] is a hard floor -- NEVER trimmed regardless of
+    score. Only [a-pre_pad_s, a-pre_pad_floor_s] (the part farthest from
+    the segment) is eligible, and only if it's contiguously quiet, from
+    its own far edge, for at least pre_pad_min_contig_s -- with
+    pad_safety_buffer_s of that quiet run always held back rather than
+    trimmed. See RefineConfig's DYNAMIC PADDING docstring for why each
+    piece is there."""
+    ceiling_s, floor_s = cfg.pre_pad_s, cfg.pre_pad_floor_s
+    if floor_s >= ceiling_s:
+        return ceiling_s
+    lo, hi = a - ceiling_s, a - floor_s
+    idx = (motion_times >= lo) & (motion_times <= hi)
+    t, s = motion_times[idx], motion_scores[idx]
+    order = np.argsort(t)
+    t, s = t[order], s[order]  # ascending time = far -> near for the pre side
+    quiet_run = _contiguous_quiet_from_far_edge(t, s, cfg.pad_quiet_thresh)
+    if quiet_run < cfg.pre_pad_min_contig_s:
+        return ceiling_s
+    trim = min(max(0.0, quiet_run - cfg.pad_safety_buffer_s), ceiling_s - floor_s)
+    return ceiling_s - trim
+
+
+def dynamic_post_pad(b, motion_times, motion_scores, cfg: RefineConfig):
+    """Mirror of dynamic_pre_pad for the trailing side. [b, b+post_pad_floor_s]
+    is the hard floor; [b+post_pad_floor_s, b+post_pad_s] is eligible,
+    scanned from its far edge (b+post_pad_s) inward toward b."""
+    ceiling_s, floor_s = cfg.post_pad_s, cfg.post_pad_floor_s
+    if floor_s >= ceiling_s:
+        return ceiling_s
+    lo, hi = b + floor_s, b + ceiling_s
+    idx = (motion_times >= lo) & (motion_times <= hi)
+    t, s = motion_times[idx], motion_scores[idx]
+    order = np.argsort(t)[::-1]  # descending time = far -> near for the post side
+    t, s = t[order], s[order]
+    quiet_run = _contiguous_quiet_from_far_edge(t, s, cfg.pad_quiet_thresh)
+    if quiet_run < cfg.post_pad_min_contig_s:
+        return ceiling_s
+    trim = min(max(0.0, quiet_run - cfg.pad_safety_buffer_s), ceiling_s - floor_s)
+    return ceiling_s - trim
+
+
+def dynamic_pad_and_merge(segments, duration, motion_times, motion_scores,
+                          config: RefineConfig | None = None):
+    """Shrink-only dynamic-padding counterpart to pad_and_merge(): each
+    segment's pre/post pad shrinks from the fixed ceiling toward (never
+    below) a hard floor, using the LOCAL raw motion score around that
+    specific segment. `motion_scores` is raw (unsmoothed) motion.scores,
+    matching the values this was validated against -- see RefineConfig's
+    DYNAMIC PADDING docstring for the full safety case and the real
+    full_game.mkv numbers."""
+    cfg = config or RefineConfig()
+    motion_times = np.asarray(motion_times, dtype=float)
+    motion_scores = np.asarray(motion_scores, dtype=float)
+    padded = []
+    for a, b in segments:
+        pre = dynamic_pre_pad(a, motion_times, motion_scores, cfg)
+        post = dynamic_post_pad(b, motion_times, motion_scores, cfg)
+        padded.append((max(0.0, a - pre), min(duration, b + post)))
+    return merge_segments(padded, cfg.final_merge_gap_s)
+
+
 def refine_segments(segments, motion_times, motion_smooth, det_times,
                     occupied, atbat_fires, duration,
                     config: RefineConfig | None = None,
-                    zone_velocities: dict | None = None):
+                    zone_velocities: dict | None = None,
+                    motion_scores=None):
     """Full refinement: extension then padding/merge. `segments` should
-    already be veto-filtered. `zone_velocities` -- see extend_segments()."""
+    already be veto-filtered. `zone_velocities` -- see extend_segments().
+    `motion_scores`, if given, is RAW (unsmoothed) motion.scores, which
+    switches padding from the fixed pad_and_merge() to the shrink-only
+    dynamic_pad_and_merge() -- see RefineConfig's DYNAMIC PADDING
+    docstring. Omitting it (the default) is byte-for-byte identical to
+    the previous fixed-padding behavior; every existing caller that
+    doesn't pass it is unaffected."""
     cfg = config or RefineConfig()
     deps = departure_times(det_times, occupied)
     extended = extend_segments(segments, motion_times, motion_smooth, deps,
                                atbat_fires, duration, cfg, zone_velocities)
-    return pad_and_merge(extended, duration, cfg)
+    if motion_scores is None:
+        return pad_and_merge(extended, duration, cfg)
+    return dynamic_pad_and_merge(extended, duration, motion_times, motion_scores, cfg)
