@@ -759,6 +759,133 @@ local timestamps happen to look adjacent.
 
 ## Known limitations / non-goals for this version
 
+- **CORRECTNESS BUG, FIXED: `pipeline/stitch.py` could silently drop real
+  kept footage from the tail of a segment starting at the very beginning
+  of a source file — a direct violation of this project's own "never
+  less, only extra" stitching guarantee.** Found and fixed independently
+  of any feature work tonight (surfaced while manually testing an
+  unrelated UI feature, then investigated and fixed as its own priority
+  before that feature's review continued) — documented here on its own
+  because of what it could have affected, not folded into any feature's
+  writeup.
+
+  **Root cause.** `build_extract_cmd()` passed a kept span's `start_s`/
+  `end_s` straight through as ffmpeg's `-ss`/`-to`, assuming the
+  container's own PTS timeline starts at 0. It doesn't, for real
+  footage: every current reference clip's video stream has a nonzero
+  `start_time` (confirmed via `ffprobe` on every file) —
+  `clip_540`/`clip_300`/`clip_60`/`boundary_test_part1`/
+  `multi_ambig_part1` all 4.0-4.5s, `clip_base3` 4.14s, `clip_base4`
+  3.22s, `clip_base1` 2.73s, `clip_whiff1` 2.48s, `clip_foul1` 2.40s,
+  `clip_base2` 1.02s — **`full_game.mkv` is the one exception, at
+  exactly 0.0s.**
+
+  **The real trigger condition is `start_s < start_offset` — a whole
+  window, not literally `start_s == 0.0`.** First written up (and first
+  fixed) assuming only the exact-zero case; corrected after a real
+  post-fix stitch on a fresh `clip_300.mkv` batch showed slack numbers
+  worth double-checking, which led to testing `clip_60.mkv` at
+  `start_s=0.545` (nonzero, but still under its own 4.026s offset) — old
+  code rendered 5.330s against an 8.775s request, still a 3.4s shortfall.
+  A direct sweep (`-ss` from 1.0 to 6.0 against the same file) shows why:
+  the shortfall shrinks roughly linearly as `-ss` rises toward
+  `start_offset` and only clears once `-ss >= start_offset`; at
+  `-ss 1.0 -to 4.0` (both under the 4.026s offset) the result was a
+  **completely empty/invalid clip** — total content loss, not just a
+  few seconds short. The shipped fix (below) was never affected by this
+  correction — it shifts every span from an affected file uniformly,
+  regardless of that span's own `start_s` — what was wrong was the
+  bug's *documented* scope, not the fix.
+
+  Confirmed directly, isolated from any server/frontend/browser
+  involvement: a 120.155s request against `clip_540.mkv` (start_time
+  4.506s, `start_s=0.0`) rendered at 115.690s under the old code — 4.465s
+  of real footage never made it into the output.
+
+  **Fix:** `VideoParams` now probes and carries `start_offset` (the video
+  stream's real `start_time`); `plan_stitch()` propagates each
+  contributing file's own offset onto its `SpanJob`s; `build_extract_cmd`
+  shifts both `-ss` and `-to` by it. Verified by hand first, then in
+  code: the same 120.155s request now renders at 120.195s (extra, as the
+  module has always documented, never short). 5 new tests in
+  `tests/test_stitch.py`, including two against the real `clip_540.mkv`
+  (skip-if-missing, same convention as `tests/test_veto_e2e.py`) that
+  fail without the fix — a synthetic reproduction was tried first
+  (`-itsoffset`) but produces a different, unrelated symptom, so an
+  honest synthetic stand-in for this specific bug doesn't exist; the
+  real clip is what actually proves it. Full suite: 282 passed.
+
+  **Scope, checked directly rather than assumed — and corrected once
+  already when the first pass turned out to be wrong.** The first
+  version of this writeup checked only `start_s == 0.0` and used
+  `reference_clips/calibration.json` to re-derive segments rather than
+  checking real batches that already existed on disk. Both were mistakes
+  — corrected below, with the correction left visible rather than
+  quietly edited away, per this project's own standing rule that a wrong
+  hypothesis gets admitted plainly, not smoothed over.
+
+  1. *Could the shortfall ever reach past padding into real kept
+     action, not just trim margin?* Re-checked against the CORRECT
+     precondition (`start_s < start_offset`, not just `== 0`): **7 of 9**
+     reference clips have at least one real final segment at risk (up
+     from an earlier undercount of 3 of 9) — only `clip_base3`/
+     `clip_base4` have none. Checked every at-risk segment's tail against
+     ground truth: no *required* event is ever overlapped, but
+     `clip_60`'s at-risk segment (0.745, 9.149) DOES overlap a real
+     *borderline* (non-required) event — `e1`, `at_bat_activity`,
+     window `[0,7]`. The earlier claim that no borderline event was ever
+     touched either was wrong; corrected here. `boundary_test_part1.mkv`
+     (no ground-truth file, not one of the 9 annotated clips) remains an
+     honest, unresolved gap — flagged, not asserted clean.
+  2. *Does `full_game.mkv` having `start_time=0` mean tonight's headline
+     numbers (13.50 min / 14.31 min cut, the padding-recovery numbers)
+     are unaffected?* Yes, unchanged from the first pass, for two
+     independent reasons: `full_game.mkv`'s own start_time is exactly 0
+     (the bug's precondition never applied), and — more fundamentally —
+     every one of those numbers was computed directly from
+     `pipeline.run.process_video()`'s returned segment list via plain
+     Python summation (`total_duration()`); none of them were ever
+     computed by calling `pipeline.stitch.run_stitch()` or probing a
+     rendered file at all.
+  3. *Were any historically-reported real-stitched-duration numbers
+     wrong?* **Yes — the first pass got this wrong too, and the error is
+     worth naming precisely.** Re-deriving `clip_300`'s segments with
+     `reference_clips/calibration.json` (a shared, non-batch-specific
+     file) gave a first segment at 3.87s and led to concluding the
+     historical clip_300 checks ("191s source... 170.5s requested vs.
+     181.3s rendered"; the Edit Log's 181.299s → 178.009s, confirmed the
+     same batch by its matching number) were unaffected. That was the
+     wrong artifact to check. The REAL historical batch
+     (`uploads/465a9590a016`, still on disk) used its own real
+     click-to-calibrate result, whose first segment starts at exactly
+     `0.000` — genuinely at risk. Replaying that exact real manifest
+     through the pre-fix code reproduced **181.299000s exactly**
+     (confirming the reconstruction, not an approximation); replaying
+     the identical manifest through the fixed code gives **203.336s** —
+     22.037s more than history ever reported, every span's slack
+     individually still under clip_300's own real 6.006s GOP (checked
+     via real keyframe packet flags, not assumed). So: the historical
+     181.299s number DID reflect the bug — it just didn't happen to cut
+     into anything annotated for that clip (`e1`'s window `[14,26]` ends
+     before the truncated tail `~27.3-31.53` begins). "Unaffected" was
+     wrong; "affected, but nothing annotated was lost" is correct.
+     Independently reconfirmed on a SECOND, freshly-created clip_300
+     batch today (`uploads/06aafca1c27a`, 5 real stitch spans after
+     adjacent-merge, 158.217s requested): old code gives 167.528s, fixed
+     code gives 176.884s (matches the real, actually-rendered output),
+     every span's slack real and under 1 GOP (max 5.251s of 6.006s) —
+     the same pattern, independently confirmed on different real footage
+     and a different real calibration.
+
+  This is a real correctness fix to already-shipped stitching, not
+  scoped to any one feature. Every real export produced tonight or
+  historically from a clip with an at-risk segment — confirmed:
+  `clip_540`, `clip_base1`, `clip_base2`, `clip_foul1`, `clip_whiff1`,
+  and both real `clip_300`/`clip_60` batches on disk — was silently
+  shorter than intended until now. The pre-fix `output.mp4` files still
+  sitting in `uploads/465a9590a016`, `f44f29520bcf`, `d954ef5103d7`, and
+  `fdc70235adb5` are stale artifacts of the bug, not re-exported since;
+  anyone actually relying on those specific files should re-export them.
 - **Fixed: `ProcessingStep` could poll for a detect job before it
   existed, logging a real (if harmless) 404.** `App.jsx`'s
   `handleCalibrated` called `setStage('processing')` — which mounts

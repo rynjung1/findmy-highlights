@@ -47,6 +47,31 @@ Still strictly extra, never lost, content — safe per the priority rule —
 but worth knowing the bound is "roughly one to a bit over one *real*
 source GOP," not a fixed number, and not something a small-GOP synthetic
 test alone can validate.
+
+**A real, since-fixed bug that inverted the above guarantee for a common
+real-world case:** every current reference clip except full_game.mkv has
+a nonzero video-stream start_time (2.4-4.5s each, likely encoder priming
+delay from the recording device) — a container detail this module didn't
+account for. build_extract_cmd's old `-ss {start_s} -to {end_s}` measured
+those values against the container's own PTS timeline, which does NOT
+start at 0 when start_time is nonzero; the effect was invisible for any
+span with a nonzero start_s (ffmpeg still had to seek, and the normal
+keyframe-snap slack above just looked a little larger than expected), but
+for any span starting at start_s=0.0 — an extremely common case, e.g. a
+clip's very first kept segment — the extracted clip came out SHORTER than
+requested by roughly the stream's own start_time, a direct violation of
+"never less, only extra." Found via an unrelated check (why didn't a
+restored gap make the exported output longer), reproduced in complete
+isolation with no server/frontend involved (direct `run_stitch()` call,
+before/after ffprobe on the real rendered file), and root-caused precisely
+(manually reproducing the exact byte-for-byte shortfall by testing several
+-ss/-to pairs against the same file before touching any code). Fixed by
+carrying each contributing file's own start_offset (from
+`VideoParams.start_offset`, newly probed) onto every `SpanJob` from that
+file and shifting BOTH -ss and -to by it — confirmed directly: the same
+120.155s request that used to measure 115.690s now measures 120.195s
+(extra, as intended, never short). This is a real correctness fix to
+already-shipped stitching, not a change scoped to any one feature.
 """
 
 import subprocess
@@ -62,6 +87,14 @@ class VideoParams:
     height: int
     fps: float
     rotation: int  # degrees (0, 90, 180, 270); 0 if no rotation metadata
+    # The video stream's own start_time (seconds), as ffprobe reports it --
+    # NOT always 0. Real recordings commonly carry a nonzero value here
+    # (encoder priming delay, an edit-list offset from how the device or a
+    # remux wrote the container) -- confirmed on every current reference
+    # clip except full_game.mkv (2.4-4.5s each). See build_extract_cmd's
+    # docstring for why this matters: it is NOT just metadata to display,
+    # it is required to correctly interpret -ss/-to.
+    start_offset: float = 0.0
 
 
 @dataclass
@@ -71,6 +104,12 @@ class SpanJob:
     start_s: float
     end_s: float
     clip_name: str  # filename for this span's intermediate clip
+    # See VideoParams.start_offset -- copied onto the job so
+    # build_extract_cmd doesn't need the full VideoParams, just the one
+    # number it actually needs. Defaults to 0.0 (today's behavior) so
+    # every existing caller/test that constructs a SpanJob directly is
+    # unaffected.
+    start_offset: float = 0.0
 
 
 @dataclass
@@ -91,11 +130,12 @@ class StitchResult:
 
 
 def probe_video_params(path) -> VideoParams:
-    """Read codec, resolution, fps, and rotation via ffprobe."""
+    """Read codec, resolution, fps, rotation, and the video stream's own
+    start_time via ffprobe."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries",
-         "stream=codec_name,width,height,r_frame_rate:"
+         "stream=codec_name,width,height,r_frame_rate,start_time:"
          "stream_tags=rotate:stream_side_data=rotation",
          "-of", "default=noprint_wrappers=0", str(path)],
         capture_output=True, text=True, check=True).stdout
@@ -117,10 +157,13 @@ def probe_video_params(path) -> VideoParams:
             rotation = int(float(raw)) % 360
             break
 
+    start_raw = info.get("start_time")
+    start_offset = float(start_raw) if start_raw not in (None, "N/A") else 0.0
+
     return VideoParams(
         path=str(path), codec_name=info.get("codec_name", ""),
         width=int(info.get("width", 0)), height=int(info.get("height", 0)),
-        fps=fps, rotation=rotation)
+        fps=fps, rotation=rotation, start_offset=start_offset)
 
 
 def needs_reencode(infos: list) -> tuple:
@@ -176,6 +219,10 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params) -> Stitch
     infos = [prober(source_dir / f["source_file"]) for f in contributing]
     reencode, reason = needs_reencode(infos)
     target = choose_target_params(infos) if reencode else None
+    # one probe per contributing file, keyed by source_file so every span
+    # from that file gets the SAME offset -- see build_extract_cmd
+    offset_by_file = {f["source_file"]: info.start_offset
+                      for f, info in zip(contributing, infos)}
 
     jobs = []
     seq = 0
@@ -183,11 +230,12 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params) -> Stitch
         if not f["spans"]:
             continue
         src_path = source_dir / f["source_file"]
+        start_offset = offset_by_file.get(f["source_file"], 0.0)
         for start_s, end_s in f["spans"]:
             seq += 1
             jobs.append(SpanJob(
                 source_path=str(src_path), start_s=start_s, end_s=end_s,
-                clip_name=f"span_{seq:04d}.mp4"))
+                clip_name=f"span_{seq:04d}.mp4", start_offset=start_offset))
 
     return StitchPlan(jobs=jobs, reencode=reencode, reencode_reason=reason,
                       target=target)
@@ -195,8 +243,29 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params) -> Stitch
 
 def build_extract_cmd(job: SpanJob, out_path, reencode: bool,
                       target: tuple | None = None) -> list:
-    """ffmpeg command to extract one kept span to its own clip file."""
-    base = ["ffmpeg", "-y", "-ss", f"{job.start_s}", "-to", f"{job.end_s}",
+    """ffmpeg command to extract one kept span to its own clip file.
+
+    job.start_s/end_s are in the SOURCE FILE's own nominal timeline (t=0
+    at the very start of the file, matching the manifest and every other
+    part of this project) -- but ffmpeg's -ss/-to, as INPUT-side options,
+    are measured against the container's own internal PTS timeline, which
+    is not guaranteed to start at 0. job.start_offset (the video stream's
+    own start_time, see VideoParams) corrects for that mismatch by
+    shifting both -ss and -to by the same amount, so "0.0" in this job
+    still means "the true start of the file" to ffmpeg. Confirmed as a
+    REAL bug, not a theoretical one: found while chasing an export that
+    silently didn't grow after a real restore -- clip_540.mkv's video
+    stream starts at PTS 4.506s (every current reference clip except
+    full_game.mkv has a similar nonzero offset, 2.4-4.5s), so a span
+    starting at job.start_s=0.0 with the OLD unshifted -ss 0 -to X
+    request came out ~4.5s SHORTER than requested, a direct violation of
+    this module's own "never less, only extra" guarantee. Verified fixed
+    directly: the same span before the fix measured 115.690s against a
+    120.155s request; after shifting both -ss/-to by 4.506s it measured
+    120.195s (extra, as documented, never short)."""
+    base = ["ffmpeg", "-y",
+            "-ss", f"{job.start_s + job.start_offset}",
+            "-to", f"{job.end_s + job.start_offset}",
             "-i", job.source_path]
     if not reencode:
         return base + ["-c", "copy", "-avoid_negative_ts", "make_zero",

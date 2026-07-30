@@ -23,9 +23,10 @@ from pipeline.stitch import (VideoParams, build_concat_cmd, build_concat_list,
                              run_stitch)
 
 
-def vp(path="a.mp4", codec="h264", w=1920, h=1080, fps=30.0, rotation=0):
+def vp(path="a.mp4", codec="h264", w=1920, h=1080, fps=30.0, rotation=0,
+      start_offset=0.0):
     return VideoParams(path=path, codec_name=codec, width=w, height=h,
-                       fps=fps, rotation=rotation)
+                       fps=fps, rotation=rotation, start_offset=start_offset)
 
 
 # ---- needs_reencode ----
@@ -159,6 +160,25 @@ def test_plan_stitch_probes_only_files_with_kept_spans(tmp_path):
     assert "part1.mp4" in probed[0]
 
 
+def test_plan_stitch_propagates_per_file_start_offset(tmp_path):
+    # regression test for a real bug: every job from a given file must
+    # carry THAT file's own start_offset (probed once per contributing
+    # file), not a shared/default value -- a multi-file batch can easily
+    # mix a file with a nonzero start_time and one without
+    m = two_file_manifest()
+
+    def prober(path):
+        if "part1" in str(path):
+            return vp(path=str(path), start_offset=4.506)
+        return vp(path=str(path), start_offset=0.0)
+
+    plan = plan_stitch(m, tmp_path, prober=prober)
+    part1_jobs = [j for j in plan.jobs if "part1" in j.source_path]
+    part2_jobs = [j for j in plan.jobs if "part2" in j.source_path]
+    assert all(j.start_offset == 4.506 for j in part1_jobs)
+    assert all(j.start_offset == 0.0 for j in part2_jobs)
+
+
 def test_plan_stitch_empty_manifest_yields_no_jobs(tmp_path):
     m = build_multi_file_manifest([
         {"source_file": "part1.mp4", "duration": 30.0, "kept_segments": []}])
@@ -178,6 +198,33 @@ def test_extract_cmd_copy_path_uses_stream_copy():
     assert "-ss" in cmd and "1.5" in cmd
     assert "-to" in cmd and "4.0" in cmd
     assert "-vf" not in cmd
+
+
+def test_extract_cmd_shifts_ss_and_to_by_start_offset():
+    # regression test for a real bug (see pipeline/stitch.py's module
+    # docstring and build_extract_cmd's docstring): a source file whose
+    # video stream doesn't start at PTS 0 needs BOTH -ss and -to shifted
+    # by that offset, or a span starting at start_s=0.0 comes out
+    # SHORTER than requested -- a direct violation of "never less, only
+    # extra". Confirmed on a real reference clip below; this is the pure,
+    # deterministic check that the shift is applied correctly.
+    from pipeline.stitch import SpanJob
+    job = SpanJob(source_path="in.mp4", start_s=0.0, end_s=120.155,
+                 clip_name="span_0001.mp4", start_offset=4.506)
+    cmd = build_extract_cmd(job, "out/span_0001.mp4", reencode=False)
+    ss = cmd[cmd.index("-ss") + 1]
+    to = cmd[cmd.index("-to") + 1]
+    assert float(ss) == pytest.approx(4.506)
+    assert float(to) == pytest.approx(124.661)
+
+
+def test_extract_cmd_zero_offset_is_unaffected():
+    # default start_offset=0.0 -> byte-identical to pre-fix behavior
+    from pipeline.stitch import SpanJob
+    job = SpanJob(source_path="in.mp4", start_s=1.5, end_s=4.0,
+                 clip_name="span_0001.mp4")
+    cmd = build_extract_cmd(job, "out/span_0001.mp4", reencode=False)
+    assert "1.5" in cmd and "4.0" in cmd
 
 
 def test_extract_cmd_reencode_path_scales_and_pads():
@@ -389,3 +436,55 @@ def test_reencode_path_normalizes_mismatched_inputs_and_plays(tmp_path):
     # slack, unlike the stream-copy path above
     actual = probe_real_duration_s(out)
     assert actual == pytest.approx(2.0, abs=0.2)
+
+
+def test_probe_video_params_reads_real_nonzero_start_offset():
+    """probe_video_params's ffprobe query gained start_time alongside the
+    existing codec/width/height/fps/rotation fields -- confirm the extra
+    field didn't break parsing of the others, and that a real file's
+    genuinely nonzero start_time is read correctly, not silently
+    defaulted to 0.0."""
+    clip = Path(__file__).parent.parent / "reference_clips" / "clip_540.mkv"
+    if not clip.exists():
+        pytest.skip("reference clip not available for start_offset probe check")
+
+    info = probe_video_params(clip)
+    assert info.codec_name == "h264"
+    assert info.width == 1920 and info.height == 1080
+    assert info.start_offset == pytest.approx(4.506, abs=0.01)
+
+
+def test_stream_copy_span_from_zero_not_shortened_by_real_stream_start_offset(tmp_path):
+    """Regression test for a real bug, not a theoretical one -- found
+    while chasing why a restored gap didn't make an exported output any
+    longer. Every current reference clip except full_game.mkv has a
+    nonzero video-stream start_time (2.4-4.5s, likely recording-device
+    encoder delay) -- a real container property the synthetic
+    write_tiny_video() clips above never reproduce (confirmed directly:
+    a plain lavfi-encoded synthetic clip measures start_time=0.0), which
+    is exactly why this class of bug survived until now. Before the fix,
+    a span requested as (0.0, 30.0) against clip_540.mkv (start_time
+    4.506s) rendered at ~25.5s -- SHORTER than requested, a direct
+    violation of this module's own "never less, only extra" guarantee.
+    Uses a real reference clip specifically because reproducing the exact
+    mechanism synthetically (tried: -itsoffset) produces a DIFFERENT,
+    unrelated symptom, not the same bug -- an honest synthetic stand-in
+    for this one isn't available, so this test skips gracefully if the
+    clip isn't present rather than pretending a fake substitute proves
+    the same thing (same pattern as tests/test_veto_e2e.py's real-clip
+    dependency)."""
+    clip = Path(__file__).parent.parent / "reference_clips" / "clip_540.mkv"
+    if not clip.exists():
+        pytest.skip("reference clip not available for real start-offset check")
+
+    requested = 30.0
+    m = build_manifest(clip.name, 190.0, [(0.0, requested)])
+    out = tmp_path / "out.mp4"
+    result = run_stitch(m, clip.parent, out, work_dir=tmp_path / "work")
+
+    assert result.reencoded is False
+    actual = probe_real_duration_s(out)
+    assert actual >= requested - 0.5, (
+        f"rendered output ({actual:.2f}s) is SHORTER than the requested "
+        f"{requested:.2f}s span starting at 0.0 -- real content was lost, "
+        f"the video stream's own nonzero start_time was not corrected for")
