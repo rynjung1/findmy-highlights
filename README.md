@@ -1070,6 +1070,65 @@ local timestamps happen to look adjacent.
   honest-dead-end category as the Tier 2 audio investigation and the
   ambient-motion discount, not a tuning gap. Nothing from this was wired
   into anything real; it stayed in a scratch simulation.
+
+  **Re-investigated later the same night, this time implemented for
+  real (not simulation) and closed again, with a wider real failure
+  set than first found.** Re-examining `clip_300`'s `seg_002`
+  `[3.873, 30.879]` first (real frames across the full window: a real
+  batter change and settle-in, no ball or swing anywhere — confirmed
+  ambient milling, not a detection error) motivated one more attempt: hard-cut
+  everything EXCEPT any window overlapping a required or
+  `check_continuity`-flagged ground-truth event, protecting the two
+  known casualties above by construction instead of by luck. Simulated
+  first against all 9 clips (`quiet_thresh=0.002`, merge dips within
+  1.5s, 0.5s buffer): with the exclusion, 9/9 clean, real 9-clip gain
+  ~3.3% of kept time (19.67 of 600.90s), ~68% of the naive cutting
+  benefit survives the exclusion (19.67 of 29.08s). A real
+  `full_game.mkv` run (naive, unexcluded — no ground truth exists for
+  that file, so this number was never more than a labeled estimate)
+  showed +2.54 real minutes on top of today's shipped 14.31; scaling by
+  the 9-clip survival ratio suggested a plausible ~1.7 real minutes
+  with the exclusion, explicitly never claimed as measured. Before
+  implementing anything, one open question needed resolving: real user
+  footage has no ground truth to exclude against, so the exclusion
+  can't run as a live filter in production. Resolved explicitly: ground
+  truth is this mechanism's *shipping gate* (a new
+  `hard_cut_overlaps_required` check in `scripts/regression.py`,
+  mirroring the existing veto-overlap safety net), not a runtime
+  filter — production applies the four parameters unconditionally, same
+  as every other threshold in this project, and the gate either passes
+  clean on the known clips or the feature doesn't ship.
+
+  Implemented for real (`pipeline.segments.HardCutConfig`/
+  `find_cut_windows`/`apply_hard_cuts`, wired into
+  `pipeline.run.process_video`'s final step, with real unit test
+  coverage) and run through the actual regression suite, not the
+  simulation. **The real implementation reproduced the same failure
+  the simulation predicted, almost to the decimal — but on 4 of 9
+  clips, not the 2 originally documented**: `clip_300`/`e6`
+  (`[95.59,97.20]` inside `[95,103]`, matching before), `clip_60`/`e5`
+  (`[137.30,138.60]` inside `[137,148]`, matching before), plus two
+  the original scratch simulation never surfaced — `clip_540`/`e4`
+  (`[176.61,179.16]` inside `[177,185]`) and `clip_base1`/`e1`
+  (`[8.53,9.41]` inside `[8,20]`). All four broke `check_continuity`
+  for real, not just recall. Per the shipping-gate design agreed
+  before implementing, this does not clear it — reverted in full
+  (`pipeline/run.py`, `pipeline/segments.py`, `scripts/regression.py`,
+  and their tests all restored), nothing left wired into anything real.
+
+  Root cause is the same one already named above, now demonstrated on
+  real committed code instead of a scratch script: raw motion score
+  cannot reliably tell a genuinely dead stretch from a real, fast,
+  brief action, and this shows up as soon as the quiet bar is pushed
+  low enough to catch real dead time — confirmed directly on
+  `clip_base3` during the same investigation (a different, non-shipped
+  parameter variant): a candidate cut window sat squarely on a real
+  swing/contact at ~12.0s, frame-verified (bat mid-swing, runner
+  starting to sprint), not a coarse-window false alarm. This closes the
+  hard-cut idea a second time, on firmer evidence than the first pass —
+  not worth a third attempt without the same genuinely different,
+  context-aware signal the ambient-discount and Tier 2 audio dead ends
+  already concluded is what's actually needed here.
 - **Fixed: `ProcessingStep` could poll for a detect job before it
   existed, logging a real (if harmless) 404.** `App.jsx`'s
   `handleCalibrated` called `setStage('processing')` — which mounts
