@@ -181,13 +181,9 @@ export default function EditLogView({ batchId }) {
         {exportError && <p className="alert alert-danger">{exportError}</p>}
         {exportVersion ? (
           <>
-            {/* Skip-ahead suggestions temporarily disabled (not passing
-                segments) -- see the comment in ResultStep.jsx and README
-                Known limitations: computeSkipWindows' cumulative-duration
-                mapping was confirmed to diverge from the real rendered
-                output by up to 17s on a real batch. */}
             <SkippableVideo
               src={outputUrl(batchId, exportVersion)}
+              segments={manifest.segments}
             />
             <p>
               <a href={outputUrl(batchId, exportVersion)} download="highlights.mp4">
