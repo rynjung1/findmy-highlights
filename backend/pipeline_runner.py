@@ -10,8 +10,9 @@ pipeline logic lives in pipeline/, never duplicated in a caller.
 from pathlib import Path
 
 from pipeline.calibration import resolve_zone
-from pipeline.manifest import (build_manifest, build_multi_file_manifest,
-                               load_manifest, save_manifest)
+from pipeline.manifest import (apply_output_offsets, build_manifest,
+                               build_multi_file_manifest, load_manifest,
+                               save_manifest)
 from pipeline.run import DEFAULT_CACHE_DIR, process_video
 from pipeline.segments import SegmentConfig, find_skip_suggestions, smooth_scores
 from pipeline.stitch import run_stitch
@@ -109,7 +110,12 @@ def run_detect_then_export_job(batch_dir, detect_job: dict,
 
 def run_export_job(batch_dir, job: dict) -> None:
     """Stitches the batch's current manifest into a final output video
-    (the Edit Log's re-export action)."""
+    (the Edit Log's re-export action). Also persists each kept segment's
+    REAL rendered position in that output (output_start_s/output_end_s,
+    see pipeline.manifest.apply_output_offsets) back into manifest.json
+    -- runs on every export, including every restore/cut-again-triggered
+    re-export, so these never go stale for whatever output.mp4 this job
+    just produced."""
     def on_stage(stage):
         job["stage"] = stage
         save_job(batch_dir, job)
@@ -118,9 +124,13 @@ def run_export_job(batch_dir, job: dict) -> None:
         job["status"] = "in_progress"
         save_job(batch_dir, job)
 
-        manifest = load_manifest(Path(batch_dir) / "manifest.json")
+        manifest_path = Path(batch_dir) / "manifest.json"
+        manifest = load_manifest(manifest_path)
         output_path = Path(batch_dir) / "output.mp4"
-        run_stitch(manifest, batch_dir, output_path, on_stage=on_stage)
+        result = run_stitch(manifest, batch_dir, output_path, on_stage=on_stage)
+
+        apply_output_offsets(manifest, result.segment_output_offsets)
+        save_manifest(manifest, manifest_path)
 
         job["status"] = "completed"
         job["stage"] = None

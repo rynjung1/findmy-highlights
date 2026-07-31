@@ -22,6 +22,20 @@ data the frontend player can use to offer a "skip ahead" button. Always
 `[]` for "cut"/gap entries (nothing plays there to skip within) and for
 any manifest built without a skip_fn.
 
+A kept entry MAY also carry `output_start_s`/`output_end_s`: its real
+position in the CURRENT `output.mp4`, written by
+`apply_output_offsets()` once per (re-)export from
+`pipeline.stitch.run_stitch`'s measured (not predicted) results. These
+are absent until the first export and get overwritten on every
+subsequent one -- a segment's `start_s`/`end_s` describe where it lives
+in the SOURCE file forever, but its `output_start_s`/`output_end_s`
+only describe where it lives in whichever output.mp4 is currently on
+disk, which changes on every restore/cut-again re-export. Consumers
+(e.g. the skip-ahead player affordance) must treat a segment with no
+`output_start_s` as "position unknown," not fall back to guessing one --
+see README's skip-ahead retraction writeup for exactly the bug that
+guessing caused.
+
 Multi-file (Stage 4): `start_s`/`end_s` are always LOCAL to a segment's own
 `source_file` (matching the spec's example, which shows plain timestamps
 per source file, not one global concatenated clock). Every segment also
@@ -178,6 +192,28 @@ def set_status(manifest: dict, seg_id: str, status: str) -> dict:
             seg["status"] = status
             return seg
     raise KeyError(f"no segment with id {seg_id!r}")
+
+
+def apply_output_offsets(manifest: dict, offsets: dict) -> None:
+    """Writes each kept segment's REAL rendered position in the current
+    output -- `output_start_s`/`output_end_s` -- from
+    `pipeline.stitch.compute_output_offsets`'s result (keyed by segment
+    id). Called once per (re-)export so these never go stale for the
+    output.mp4 currently being served; a segment with no entry in
+    `offsets` (nothing should hit this in practice -- every kept segment
+    is covered by exactly one real stitch job) is left without the
+    fields rather than given a wrong guess.
+
+    These are what the frontend's skip-ahead affordance reads instead of
+    re-deriving a segment's rendered position itself from nominal
+    durations -- see README's skip-ahead retraction writeup for why that
+    used to be wrong (merge_overlapping_spans/keyframe-snap can both move
+    a segment's real position, and the frontend has no way to know)."""
+    for seg in manifest["segments"]:
+        if seg["id"] in offsets:
+            out_start, out_end = offsets[seg["id"]]
+            seg["output_start_s"] = round(float(out_start), 3)
+            seg["output_end_s"] = round(float(out_end), 3)
 
 
 def kept_spans(manifest: dict):

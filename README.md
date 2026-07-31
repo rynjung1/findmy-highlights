@@ -54,7 +54,7 @@ the detection pipeline, multi-file handling and stitching, the backend API,
 the full Home/Upload and Edit Log frontend, multi-base calibration, and the
 zone-velocity signal built on top of it — is done, tested, and has been
 exercised end to end against real footage and a real running server, not
-just in-process test clients. `pytest tests/` covers 259 unit tests,
+just in-process test clients. `pytest tests/` covers 306 unit tests,
 `pytest tests/ -m e2e` covers 5 tests that run real model inference, and a
 full ten-item pre-demo checklist (upload, calibrate, process, watch, Edit
 Log restore/cut-again, multi-file, re-export) has been walked end to end in
@@ -985,14 +985,42 @@ local timestamps happen to look adjacent.
   at-bat the button was supposedly skipping past — clicking it does not
   skip the quiet stretch it claims to.
 
-  **Disabled, not fixed.** `ResultStep.jsx` and `EditLogView.jsx` no
-  longer pass `segments` to `SkippableVideo`, so the button never renders;
-  the players themselves are unaffected. Shipped ahead of any real fix so
-  a known-wrong button isn't left live for anyone while one gets designed.
-  The real fix — the manifest carrying real per-span rendered offsets
-  computed once at stitch time, rather than `computeSkipWindows`
-  re-deriving them client-side from an assumption already proven false —
-  is scoped as its own piece of work, not yet implemented.
+  **First disabled, then actually fixed and re-enabled, in that
+  order.** `ResultStep.jsx`/`EditLogView.jsx` stopped passing `segments`
+  to `SkippableVideo` as an immediate, isolated commit ahead of any real
+  fix, so a known-wrong button wasn't left live for anyone while one got
+  designed. The real fix: every kept manifest segment now carries
+  `output_start_s`/`output_end_s`, its real position in the *current*
+  `output.mp4`, written by `pipeline.manifest.apply_output_offsets` once
+  per (re-)export from `pipeline.stitch.run_stitch`'s own measurements —
+  never re-derived client-side again. Two different real quantities,
+  deliberately not conflated: a job's real ANCHOR (where its content
+  actually starts, stream-copy path) reuses `predicted_seek_start`
+  against the source's own real keyframes, since a stream-copy start
+  MUST land on a real keyframe — a hard constraint, not a guess (its one
+  known residual risk, the MKV cue-index quirk documented above, still
+  applies here). A job's real DURATION (how far the output cursor
+  advances for the next job) is measured directly from the actually-
+  extracted span file instead, not derived from that anchor — an initial
+  version that back-derived the anchor from measured duration
+  (`job.end_s - real_duration`) was caught by this fix's own new test
+  suite to be wrong: a stream-copied span's trailing frame near its
+  `-to` cutoff can be reordered by B-frame remuxing in a way that
+  inflates measured duration by about one frame without moving where the
+  content actually starts — confirmed directly (a real frame-content
+  mismatch on a synthetic clip) before it was fixed, not assumed correct
+  on the first attempt.
+
+  Re-validated against the exact real batch that started this
+  investigation (`06aafca1c27a`/clip_300): all 11 previously-wrong skip
+  suggestions now carry real, correct offsets (re-derived independently
+  and cross-checked by real frame content, not just re-running the same
+  code that produced them), and a live re-export through the actual
+  running backend plus a real headless-browser pass confirmed the button
+  appears only inside the real quiet window and clicking it lands
+  exactly on the window's real end (`58.913s`), not mid-action. Fixed
+  and re-enabled as two separate commits, mirroring how disabling it was
+  its own isolated commit.
 - **Not shipped: converting skip-ahead's manual suggestion windows into
   real hard cuts — investigated and closed as a structural dead end, the
   same category as the ambient-discount finding above.** Skip-ahead (the

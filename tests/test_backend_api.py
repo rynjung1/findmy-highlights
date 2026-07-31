@@ -93,9 +93,13 @@ def fake_run_stitch(manifest, source_dir, output_path, work_dir=None,
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_bytes(b"fake output video")
     from pipeline.stitch import StitchResult
+    # empty by default -- most tests here aren't exercising the
+    # output-offset wiring itself; see
+    # test_export_persists_real_output_offsets_onto_manifest below for a
+    # variant that returns a real one
     return StitchResult(output_path=str(output_path), span_count=1,
                         reencoded=False, reencode_reason=None,
-                        output_duration_s=2.0)
+                        output_duration_s=2.0, segment_output_offsets={})
 
 
 @pytest.fixture(autouse=True)
@@ -871,6 +875,66 @@ def test_export_can_be_retriggered_after_completion(tmp_path):
         job = r.json()
         assert job["status"] == "completed"
         assert Path(job["output_path"]).exists()
+
+
+def test_export_persists_real_output_offsets_onto_manifest(tmp_path, monkeypatch):
+    """Wiring test for the skip-ahead output-time mapping fix (see
+    README's retraction writeup): run_export_job must take
+    StitchResult.segment_output_offsets and write it onto the saved
+    manifest via apply_output_offsets, for every export -- not just the
+    first one, since a restore/cut-again re-export is exactly when a
+    segment's real rendered position can change. Uses a fake_run_stitch
+    variant returning a real (nonzero) offset for one segment, since the
+    default autouse fake returns {} and wouldn't catch a broken wiring
+    (e.g. the result being computed but never applied/saved)."""
+    def fake_run_stitch_with_offsets(manifest, source_dir, output_path,
+                                     work_dir=None, prober=None,
+                                     runner=None, on_stage=None):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"fake output video")
+        from pipeline.stitch import StitchResult
+        kept = next(s for s in manifest["segments"] if s["status"] == "kept")
+        return StitchResult(
+            output_path=str(output_path), span_count=1, reencoded=False,
+            reencode_reason=None, output_duration_s=2.0,
+            segment_output_offsets={kept["id"]: (0.25, 2.25)})
+
+    monkeypatch.setattr(pipeline_runner, "run_stitch",
+                        fake_run_stitch_with_offsets)
+
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        post_process(client, batch_id)
+
+        m = client.get(f"/batches/{batch_id}/manifest").json()
+        kept = next(s for s in m["segments"] if s["status"] == "kept")
+        assert kept["output_start_s"] == pytest.approx(0.25)
+        assert kept["output_end_s"] == pytest.approx(2.25)
+
+        # re-export (e.g. after a restore/cut-again) must refresh it too,
+        # not just leave the value from the first export in place
+        def fake_run_stitch_second_export(manifest, source_dir, output_path,
+                                          work_dir=None, prober=None,
+                                          runner=None, on_stage=None):
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"fake output video 2")
+            from pipeline.stitch import StitchResult
+            kept = next(s for s in manifest["segments"] if s["status"] == "kept")
+            return StitchResult(
+                output_path=str(output_path), span_count=1, reencoded=False,
+                reencode_reason=None, output_duration_s=2.0,
+                segment_output_offsets={kept["id"]: (1.0, 3.0)})
+
+        monkeypatch.setattr(pipeline_runner, "run_stitch",
+                            fake_run_stitch_second_export)
+        r = client.post(f"/batches/{batch_id}/export")
+        assert r.status_code == 200
+
+        m2 = client.get(f"/batches/{batch_id}/manifest").json()
+        kept2 = next(s for s in m2["segments"] if s["status"] == "kept")
+        assert kept2["output_start_s"] == pytest.approx(1.0)
+        assert kept2["output_end_s"] == pytest.approx(3.0)
 
 
 def test_export_rejected_while_still_in_progress(tmp_path):

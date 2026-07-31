@@ -166,6 +166,28 @@ class SpanJob:
     # every existing caller/test that constructs a SpanJob directly is
     # unaffected.
     start_offset: float = 0.0
+    # Which manifest source_files entry this job came from -- lets
+    # compute_output_offsets match a real job back to the original
+    # manifest segment(s) it was built from without string-matching on
+    # source_path. Defaults to 0 so every existing caller/test that
+    # constructs a SpanJob directly (single-file, index 0) is unaffected.
+    source_file_index: int = 0
+
+
+@dataclass
+class SpanPlacement:
+    """Where one real, already-extracted SpanJob actually landed in the
+    output, measured from the real produced file rather than predicted
+    from keyframe timestamps -- see compute_output_offsets and
+    run_stitch's docstring for why measuring beats predicting here."""
+    job: SpanJob
+    output_start_s: float
+    # The real source-local instant this job's rendered content actually
+    # begins at. Equal to job.start_s on the re-encode path (frame-exact,
+    # no keyframe-snap slack) and to job.end_s - <real measured duration>
+    # on the stream-copy path (may be earlier than job.start_s: extra
+    # real footage from keyframe-snap and/or merge_overlapping_spans).
+    snapped_source_local_start: float
 
 
 @dataclass
@@ -183,6 +205,14 @@ class StitchResult:
     reencoded: bool
     reencode_reason: str | None
     output_duration_s: float
+    # {segment_id: (output_start_s, output_end_s)}, the REAL rendered
+    # position of every kept manifest segment in this output -- measured
+    # from the actually-extracted span files, not predicted. See
+    # compute_output_offsets. Callers persist this onto the manifest via
+    # pipeline.manifest.apply_output_offsets so the frontend never has to
+    # re-derive it (see README's skip-ahead retraction writeup for why
+    # re-deriving it client-side was wrong).
+    segment_output_offsets: dict
 
 
 def probe_video_params(path) -> VideoParams:
@@ -220,6 +250,33 @@ def probe_video_params(path) -> VideoParams:
         path=str(path), codec_name=info.get("codec_name", ""),
         width=int(info.get("width", 0)), height=int(info.get("height", 0)),
         fps=fps, rotation=rotation, start_offset=start_offset)
+
+
+def probe_duration(path) -> float:
+    """Real duration of an ALREADY-EXTRACTED span file's video stream --
+    measured directly from the file ffmpeg actually produced, not
+    predicted from keyframe timestamps. This is the ground-truth input
+    to compute_output_offsets: predicting a real ffmpeg seek's landing
+    point (predicted_seek_start, used for the merge decision) is a MODEL
+    of ffmpeg's behavior, already documented elsewhere in this module as
+    imperfect (the MKV cue-index quirk); measuring the file that was
+    actually produced has no such risk. Reads the video stream's own
+    duration first (matching pipeline.motion.py's own precedent of
+    trusting only what's actually decodable over a nominal container
+    value), falling back to the container-level duration only if the
+    stream doesn't report one."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, check=True).stdout.strip()
+    if out and out != "N/A":
+        return float(out)
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, check=True).stdout.strip()
+    return float(out)
 
 
 def get_keyframe_times(path) -> list:
@@ -398,7 +455,8 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
             seq += 1
             jobs.append(SpanJob(
                 source_path=str(src_path), start_s=start_s, end_s=end_s,
-                clip_name=f"span_{seq:04d}.mp4", start_offset=start_offset))
+                clip_name=f"span_{seq:04d}.mp4", start_offset=start_offset,
+                source_file_index=f["source_file_index"]))
 
     return StitchPlan(jobs=jobs, reencode=reencode, reencode_reason=reason,
                       target=target)
@@ -459,17 +517,72 @@ def build_concat_cmd(list_path, out_path) -> list:
             "-i", str(list_path), "-c", "copy", str(out_path)]
 
 
+def compute_output_offsets(manifest: dict, placements: list) -> dict:
+    """Maps every KEPT manifest segment's id to its real
+    (output_start_s, output_end_s) position in the actually-rendered
+    output, given each job's REAL measured placement (see run_stitch) --
+    not a value re-derived from nominal segment durations, which is
+    exactly the assumption that was proven wrong (see README's skip-ahead
+    retraction writeup): merge_overlapping_spans can pull several kept
+    segments into one physical rendered span, and stream-copy keyframe-
+    snap can shift a span's real start earlier than its nominal one.
+
+    A kept segment always lies fully inside exactly one placement's job
+    range: merge_overlapping_spans only ever WIDENS a job's range to
+    include more original spans, never splits one apart, and
+    kept_spans_by_file already merges any segments that were literally
+    adjacent before plan_stitch ever runs."""
+    offsets = {}
+    for seg in manifest["segments"]:
+        if seg["status"] != "kept":
+            continue
+        for p in placements:
+            if (p.job.source_file_index == seg["source_file_index"]
+                    and p.job.start_s <= seg["start_s"]
+                    and seg["end_s"] <= p.job.end_s):
+                rel_start = seg["start_s"] - p.snapped_source_local_start
+                rel_end = seg["end_s"] - p.snapped_source_local_start
+                offsets[seg["id"]] = (p.output_start_s + rel_start,
+                                      p.output_start_s + rel_end)
+                break
+    return offsets
+
+
 def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
               prober=probe_video_params, keyframe_prober=get_keyframe_times,
+              duration_prober=probe_duration,
               runner=None, on_stage=None) -> StitchResult:
     """Execute a stitch plan: extract every kept span, then concat them
     into `output_path`. `work_dir` holds intermediate per-span clips
     (a temp dir is used and cleaned up if not given). `runner` defaults
     to actually invoking ffmpeg via subprocess; tests can inject a fake
-    to check commands without running real video I/O. `on_stage`, if
-    given, is called with a human-readable stage name before extraction
-    and again before the final concat (added for the backend's progress
-    reporting; scripts/stitch.py doesn't pass one)."""
+    to check commands without running real video I/O -- when doing so,
+    also inject a fake `duration_prober` (real ffprobe has nothing to
+    measure if `runner` never actually wrote the extracted files).
+    `on_stage`, if given, is called with a human-readable stage name
+    before extraction and again before the final concat (added for the
+    backend's progress reporting; scripts/stitch.py doesn't pass one).
+
+    Also computes where every kept manifest segment REALLY landed in the
+    output -- see compute_output_offsets -- this is what fixed the
+    skip-ahead output-time mapping bug (see README). Two different
+    sources of truth, deliberately not conflated: each job's real
+    ANCHOR (where its content actually starts, on the stream-copy path)
+    is predicted_seek_start against the source's own real keyframes --
+    reused, not re-derived, because a stream-copy start MUST land on a
+    real keyframe, so this is a hard constraint, not a soft guess (its
+    one known residual risk, the MKV cue-index quirk documented above,
+    still applies here same as everywhere else it's used). Each job's
+    real DURATION (how far the cursor advances for the next job) is
+    measured directly from the extracted file instead
+    (`duration_prober`), NOT derived from that anchor, because an
+    initial version that back-derived the anchor from measured duration
+    (`job.end_s - real_duration`) was caught by this fix's own test
+    suite to be wrong: a stream-copied span's trailing frame near its
+    `-to` cutoff can be reordered/duplicated by B-frame remuxing in a way
+    that inflates measured duration by about one frame without moving
+    where the content actually starts, corrupting exactly the number
+    this whole fix depends on getting right."""
     import tempfile
 
     if runner is None:
@@ -493,24 +606,45 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
         if on_stage:
             on_stage("extracting kept segments")
         clip_paths = []
+        placements = []
+        cursor = 0.0
+        keyframes_by_path = {}
         for job in plan.jobs:
             out = work_dir / job.clip_name
             cmd = build_extract_cmd(job, out, plan.reencode, plan.target)
             runner(cmd)
             clip_paths.append(out)
 
+            if plan.reencode:
+                # every frame is actually decoded and re-encoded starting
+                # at the requested time -- no keyframe-snap slack
+                snapped_source_local_start = job.start_s
+            else:
+                if job.source_path not in keyframes_by_path:
+                    keyframes_by_path[job.source_path] = keyframe_prober(job.source_path)
+                snapped_abs = predicted_seek_start(
+                    job.start_s + job.start_offset,
+                    keyframes_by_path[job.source_path], conservative=False)
+                snapped_source_local_start = snapped_abs - job.start_offset
+
+            placements.append(SpanPlacement(
+                job=job, output_start_s=cursor,
+                snapped_source_local_start=snapped_source_local_start))
+            cursor += duration_prober(out)
+
         if on_stage:
             on_stage("stitching output")
         list_path = work_dir / "concat_list.txt"
         list_path.write_text(build_concat_list(clip_paths))
         runner(build_concat_cmd(list_path, output_path))
+        return placements
 
     if work_dir is not None:
         Path(work_dir).mkdir(parents=True, exist_ok=True)
-        _do_work(work_dir)
+        placements = _do_work(work_dir)
     else:
         with tempfile.TemporaryDirectory(prefix="fmh_stitch_") as tmp:
-            _do_work(tmp)
+            placements = _do_work(tmp)
 
     # sum of requested span lengths, not a re-probe of the rendered file:
     # a stream-copy export may include a little extra before a span's
@@ -521,4 +655,5 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
     return StitchResult(
         output_path=str(output_path), span_count=len(plan.jobs),
         reencoded=plan.reencode, reencode_reason=plan.reencode_reason,
-        output_duration_s=duration)
+        output_duration_s=duration,
+        segment_output_offsets=compute_output_offsets(manifest, placements))

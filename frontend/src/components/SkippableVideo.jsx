@@ -1,36 +1,38 @@
 import { useMemo, useRef, useState } from 'react'
 
-// KNOWN BROKEN, callers currently don't pass `segments` because of this
-// (see ResultStep.jsx/EditLogView.jsx) -- do not re-enable by passing
-// segments again without fixing this first. The assumption below --
-// that a kept segment's position in the rendered output is just the
-// cumulative sum of every earlier kept segment's own nominal duration --
-// is false whenever pipeline/stitch.py's merge_overlapping_spans merges
-// adjacent kept segments (any real gap shorter than the source's GOP,
-// which is the common case, not an edge case) or a span's start shifts
-// via keyframe-snap. Confirmed on a real batch: computed windows diverged
-// from the real rendered output by up to 17s, meaning the skip button
-// could appear at the wrong moment and jump to the wrong point on click.
-// See README Known limitations for the full writeup. The real fix is for
-// the manifest to carry real per-span rendered offsets computed once at
-// stitch time, not re-derived here from an assumption already proven
-// false.
+// Each kept segment's REAL position in the current output --
+// output_start_s/output_end_s -- is computed once at stitch time
+// (pipeline.stitch.compute_output_offsets, from the actually-extracted
+// span files) and written onto the manifest by
+// pipeline.manifest.apply_output_offsets. This function no longer
+// re-derives that position itself: an earlier version assumed a kept
+// segment's rendered position was the cumulative sum of every earlier
+// kept segment's own nominal duration, which is false whenever
+// pipeline.stitch.merge_overlapping_spans merges adjacent kept segments
+// (the common case, not an edge case) or a span's start shifts via
+// keyframe-snap -- confirmed on a real batch to diverge from the real
+// rendered output by up to 17s. See README's skip-ahead retraction
+// writeup for the full account. A segment with no output_start_s (an
+// old manifest, or one that hasn't been (re-)exported since this
+// shipped) simply contributes no suggestions -- position unknown is
+// treated as "nothing to offer," never guessed.
+//
+// A suggestion's own real position is a simple linear offset within its
+// segment's already-correct output_start_s: stream-copy/re-encode both
+// preserve frame timing (this project never does variable-speed
+// playback), so real time flows 1:1 with source-local time within one
+// segment's own footage.
 function computeSkipWindows(segments) {
   if (!segments) return []
-  const kept = segments
-    .filter((s) => s.status === 'kept')
-    .sort((a, b) => a.source_file_index - b.source_file_index || a.start_s - b.start_s)
-  let cursor = 0
   const windows = []
-  for (const seg of kept) {
-    const segDuration = seg.end_s - seg.start_s
+  for (const seg of segments) {
+    if (seg.status !== 'kept' || seg.output_start_s == null) continue
     for (const sug of seg.skip_suggestions || []) {
       windows.push({
-        start: cursor + (sug.start_s - seg.start_s),
-        end: cursor + (sug.end_s - seg.start_s),
+        start: seg.output_start_s + (sug.start_s - seg.start_s),
+        end: seg.output_start_s + (sug.end_s - seg.start_s),
       })
     }
-    cursor += segDuration
   }
   return windows
 }

@@ -16,12 +16,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.manifest import build_manifest, build_multi_file_manifest
-from pipeline.stitch import (VideoParams, build_concat_cmd, build_concat_list,
+from pipeline.manifest import (apply_output_offsets, build_manifest,
+                               build_multi_file_manifest)
+from pipeline.stitch import (SpanJob, SpanPlacement, VideoParams,
+                             build_concat_cmd, build_concat_list,
                              build_extract_cmd, choose_target_params,
-                             get_keyframe_times, merge_overlapping_spans,
-                             needs_reencode, plan_stitch, predicted_seek_start,
-                             probe_video_params, run_stitch)
+                             compute_output_offsets, get_keyframe_times,
+                             merge_overlapping_spans, needs_reencode,
+                             plan_stitch, predicted_seek_start,
+                             probe_duration, probe_video_params, run_stitch)
 
 
 def vp(path="a.mp4", codec="h264", w=1920, h=1080, fps=30.0, rotation=0,
@@ -386,6 +389,161 @@ def test_concat_cmd_uses_demuxer_and_stream_copy():
     assert "list.txt" in cmd and "out.mp4" in cmd
 
 
+# ---- compute_output_offsets ----
+# Pure-logic coverage for the skip-ahead output-time mapping fix (see
+# README's retraction writeup): a kept segment's real position in the
+# rendered output is NOT the cumulative sum of nominal segment
+# durations whenever merge_overlapping_spans pulled several original
+# kept segments into one physical job, or a job's real (measured, not
+# predicted) duration differs from its nominal one. These tests
+# construct SpanPlacements directly -- no ffmpeg, no real files -- to
+# check the offset arithmetic in isolation.
+
+def test_compute_output_offsets_single_job_no_slack():
+    # job's real measured duration exactly matches its nominal range ->
+    # snapped_source_local_start == job.start_s, offsets are a pure shift
+    m = build_manifest("a.mp4", 20.0, [(2.0, 8.0)])
+    job = SpanJob(source_path="a.mp4", start_s=2.0, end_s=8.0,
+                 clip_name="span_0001.mp4", source_file_index=0)
+    placements = [SpanPlacement(job=job, output_start_s=0.0,
+                                snapped_source_local_start=2.0)]
+    offsets = compute_output_offsets(m, placements)
+    kept = [s for s in m["segments"] if s["status"] == "kept"]
+    assert len(kept) == 1
+    assert offsets[kept[0]["id"]] == pytest.approx((0.0, 6.0))
+
+
+def test_compute_output_offsets_reflects_a_real_merge():
+    # mirrors the real clip_300 case investigated tonight: two original
+    # kept segments (with a cut gap between them in the manifest) end up
+    # inside ONE real merged job -- the naive frontend cumulative-sum
+    # model would place the second segment right after the first one's
+    # OWN nominal duration; the real answer is anchored to the job's
+    # real measured start instead
+    m = build_manifest("clip_300.mkv", 100.0,
+                       [(3.873, 30.879), (33.486, 43.892)])
+    kept = [s for s in m["segments"] if s["status"] == "kept"]
+    assert [s["start_s"] for s in kept] == [3.873, 33.486]
+
+    # one merged job spanning both original segments, with a bit of real
+    # keyframe-snap slack before the first one too (snapped start 0.0,
+    # earlier than the nominal 3.873)
+    job = SpanJob(source_path="clip_300.mkv", start_s=3.873, end_s=43.892,
+                 clip_name="span_0001.mp4", source_file_index=0)
+    placements = [SpanPlacement(job=job, output_start_s=0.0,
+                                snapped_source_local_start=0.0)]
+    offsets = compute_output_offsets(m, placements)
+
+    # first segment's real position: its own source-local start minus
+    # the job's real snapped start
+    assert offsets[kept[0]["id"]] == pytest.approx((3.873, 30.879))
+    # second segment's real position is NOT its nominal-cumulative-sum
+    # position (27.006 + 0 = 27.006) -- it's anchored to the same real
+    # job start, i.e. still at its own real source-local offset
+    assert offsets[kept[1]["id"]] == pytest.approx((33.486, 43.892))
+
+
+def test_compute_output_offsets_second_job_cursor_continues_from_first():
+    m = build_manifest("a.mp4", 100.0, [(0.0, 10.0), (20.0, 25.0)])
+    kept = [s for s in m["segments"] if s["status"] == "kept"]
+    job1 = SpanJob(source_path="a.mp4", start_s=0.0, end_s=10.0,
+                   clip_name="span_0001.mp4", source_file_index=0)
+    job2 = SpanJob(source_path="a.mp4", start_s=20.0, end_s=25.0,
+                   clip_name="span_0002.mp4", source_file_index=0)
+    placements = [
+        SpanPlacement(job=job1, output_start_s=0.0,
+                     snapped_source_local_start=0.0),
+        # job1's REAL measured duration was 12.0 (some slack), so job2's
+        # real output start is 12.0, not the nominal 10.0
+        SpanPlacement(job=job2, output_start_s=12.0,
+                     snapped_source_local_start=20.0),
+    ]
+    offsets = compute_output_offsets(m, placements)
+    assert offsets[kept[0]["id"]] == pytest.approx((0.0, 10.0))
+    assert offsets[kept[1]["id"]] == pytest.approx((12.0, 17.0))
+
+
+def test_compute_output_offsets_reencode_path_matches_nominal():
+    # re-encode path: no merge, no keyframe-snap slack (every frame is
+    # actually decoded) -> real measured duration equals nominal, so this
+    # degenerates to the same answer the old nominal-cumulative-sum model
+    # gave, with no special-casing needed
+    m = build_manifest("a.mp4", 20.0, [(1.0, 4.0), (8.0, 10.0)])
+    kept = [s for s in m["segments"] if s["status"] == "kept"]
+    job1 = SpanJob(source_path="a.mp4", start_s=1.0, end_s=4.0,
+                   clip_name="span_0001.mp4", source_file_index=0)
+    job2 = SpanJob(source_path="a.mp4", start_s=8.0, end_s=10.0,
+                   clip_name="span_0002.mp4", source_file_index=0)
+    placements = [
+        SpanPlacement(job=job1, output_start_s=0.0,
+                     snapped_source_local_start=1.0),
+        SpanPlacement(job=job2, output_start_s=3.0,
+                     snapped_source_local_start=8.0),
+    ]
+    offsets = compute_output_offsets(m, placements)
+    assert offsets[kept[0]["id"]] == pytest.approx((0.0, 3.0))
+    assert offsets[kept[1]["id"]] == pytest.approx((3.0, 5.0))
+
+
+def test_compute_output_offsets_only_covers_kept_segments():
+    m = build_manifest("a.mp4", 20.0, [(2.0, 8.0)])
+    gap_ids = [s["id"] for s in m["segments"] if s["status"] == "cut"]
+    assert gap_ids  # sanity: this manifest does have a gap entry
+    job = SpanJob(source_path="a.mp4", start_s=2.0, end_s=8.0,
+                 clip_name="span_0001.mp4", source_file_index=0)
+    placements = [SpanPlacement(job=job, output_start_s=0.0,
+                                snapped_source_local_start=2.0)]
+    offsets = compute_output_offsets(m, placements)
+    assert not any(gid in offsets for gid in gap_ids)
+
+
+def test_compute_output_offsets_respects_source_file_index():
+    # two files, each contributing one kept segment at the SAME nominal
+    # start_s -- must not cross-match by start_s alone
+    m = build_multi_file_manifest([
+        {"source_file": "part1.mp4", "duration": 20.0,
+         "kept_segments": [(2.0, 8.0)]},
+        {"source_file": "part2.mp4", "duration": 20.0,
+         "kept_segments": [(2.0, 8.0)]},
+    ])
+    kept = [s for s in m["segments"] if s["status"] == "kept"]
+    job1 = SpanJob(source_path="part1.mp4", start_s=2.0, end_s=8.0,
+                   clip_name="span_0001.mp4", source_file_index=0)
+    job2 = SpanJob(source_path="part2.mp4", start_s=2.0, end_s=8.0,
+                   clip_name="span_0002.mp4", source_file_index=1)
+    placements = [
+        SpanPlacement(job=job1, output_start_s=0.0,
+                     snapped_source_local_start=2.0),
+        SpanPlacement(job=job2, output_start_s=6.0,
+                     snapped_source_local_start=2.0),
+    ]
+    offsets = compute_output_offsets(m, placements)
+    part1_seg = kept[0]
+    part2_seg = kept[1]
+    assert offsets[part1_seg["id"]] == pytest.approx((0.0, 6.0))
+    assert offsets[part2_seg["id"]] == pytest.approx((6.0, 12.0))
+
+
+# ---- apply_output_offsets (pipeline.manifest) ----
+
+def test_apply_output_offsets_writes_fields_onto_matching_kept_segments():
+    m = build_manifest("a.mp4", 20.0, [(2.0, 8.0)])
+    kept = [s for s in m["segments"] if s["status"] == "kept"]
+    seg_id = kept[0]["id"]
+    apply_output_offsets(m, {seg_id: (0.089, 6.089)})
+    updated = next(s for s in m["segments"] if s["id"] == seg_id)
+    assert updated["output_start_s"] == pytest.approx(0.089)
+    assert updated["output_end_s"] == pytest.approx(6.089)
+
+
+def test_apply_output_offsets_leaves_unmentioned_segments_untouched():
+    m = build_manifest("a.mp4", 20.0, [(2.0, 8.0)])
+    apply_output_offsets(m, {})
+    for seg in m["segments"]:
+        assert "output_start_s" not in seg
+        assert "output_end_s" not in seg
+
+
 # ---- run_stitch orchestration (fake runner, no real ffmpeg) ----
 
 def test_run_stitch_invokes_one_extract_per_span_plus_one_concat(tmp_path):
@@ -398,7 +556,10 @@ def test_run_stitch_invokes_one_extract_per_span_plus_one_concat(tmp_path):
     out = tmp_path / "out" / "final.mp4"
     result = run_stitch(m, tmp_path, out, work_dir=tmp_path / "work",
                         prober=lambda p: vp(path=str(p)),
-                        keyframe_prober=no_keyframes, runner=fake_runner)
+                        keyframe_prober=no_keyframes, runner=fake_runner,
+                        # fake_runner never writes real files, so real
+                        # ffprobe has nothing to measure -- fake this too
+                        duration_prober=lambda p: 1.0)
 
     # 3 kept spans across the two files -> 3 extract calls + 1 concat call
     assert len(calls) == 4
@@ -419,7 +580,8 @@ def test_run_stitch_reports_reencode_reason(tmp_path):
 
     result = run_stitch(m, tmp_path, tmp_path / "out.mp4",
                         work_dir=tmp_path / "work", prober=prober,
-                        runner=lambda cmd: None)
+                        runner=lambda cmd: None,
+                        duration_prober=lambda p: 1.0)
     assert result.reencoded is True
     assert "resolution" in result.reencode_reason
 
@@ -644,6 +806,47 @@ def frame_hashes(video_path, start_s=None, duration_s=None):
     proc = subprocess.run(cmd, capture_output=True, check=True, text=True)
     return [line.split(",")[-1].strip() for line in proc.stdout.splitlines()
            if not line.startswith("#")]
+
+
+def test_run_stitch_output_offsets_match_real_rendered_content(tmp_path):
+    """Regression test for the skip-ahead output-time mapping bug (see
+    README's retraction writeup): segment_output_offsets must describe
+    where a segment's content REALLY is in the rendered output, not a
+    nominal-cumulative-sum guess. Forces a real merge (a sub-GOP gap,
+    same mechanism as test_no_duplicate_frames_across_a_real_close_splice_boundary
+    below) so a naive nominal model and the real one would disagree, then
+    proves directly via frame hashing -- decoding from each file's true
+    start, no seeking, same no-seek-artifact discipline as the duplicate-
+    frame tests below -- that the computed output_start_s lands on the
+    exact same real content as the segment's own start_s in the source."""
+    fps = 10
+    video = tmp_path / "src.mp4"
+    write_tiny_video(video, seconds=5, fps=fps, gop=5)  # keyframe every 0.5s
+
+    # real sub-GOP gap (0.2s < the file's own 0.5s GOP) forces a real merge
+    kept_segments = [(0.6, 1.4), (1.6, 2.2)]
+    m = build_manifest("src.mp4", 5.0, kept_segments)
+
+    out = tmp_path / "out.mp4"
+    result = run_stitch(m, tmp_path, out, work_dir=tmp_path / "work")
+    assert result.reencoded is False
+    assert result.span_count == 1, "expected a real merge -- test setup didn't force one"
+
+    kept = [s for s in m["segments"] if s["status"] == "kept"]
+    second_seg = kept[1]
+    out_start, _ = result.segment_output_offsets[second_seg["id"]]
+
+    source_hashes = frame_hashes(video)  # decode from true start, no seek
+    output_hashes = frame_hashes(out)    # decode from true start, no seek
+
+    source_idx = round(second_seg["start_s"] * fps)
+    output_idx = round(out_start * fps)
+    assert output_hashes[output_idx] == source_hashes[source_idx], (
+        f"segment_output_offsets said this segment's content starts at "
+        f"output t={out_start:.3f}s, but the real decoded frame there "
+        f"doesn't match the source's real frame at its own start_s "
+        f"({second_seg['start_s']:.3f}s) -- exactly the class of bug "
+        f"this fix addresses")
 
 
 def test_no_duplicate_frames_across_a_real_close_splice_boundary(tmp_path):
