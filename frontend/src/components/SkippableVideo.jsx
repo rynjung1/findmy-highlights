@@ -63,8 +63,10 @@ export default function SkippableVideo({ src, segments, style, ...videoProps }) 
       />
       {activeSkip && (
         <button className="skip-ahead-button" onClick={handleSkipClick}>
-          Skip ahead <span className="skip-ahead-duration">
-            ({Math.max(1, Math.round(activeSkip.end - activeSkip.start))}s quiet)
+          <span className="skip-ahead-icon" aria-hidden="true">⏭</span>
+          Skip ahead
+          <span className="skip-ahead-duration">
+            {Math.max(1, Math.round(activeSkip.end - activeSkip.start))}s quiet
           </span>
         </button>
       )}
