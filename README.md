@@ -939,6 +939,35 @@ local timestamps happen to look adjacent.
   source characteristic stream-copy faithfully preserves, not something
   this pipeline introduced. Zero duplicate frames actually caused by
   stitching, confirmed everywhere checked. Full suite: 296 passed.
+- **Not shipped: converting skip-ahead's manual suggestion windows into
+  real hard cuts — investigated and closed as a structural dead end, the
+  same category as the ambient-discount finding above.** Skip-ahead (the
+  manual, non-destructive "skip a quiet stretch inside a kept segment"
+  player button) deliberately uses a looser quiet detection than anything
+  used for real cutting, since a wrong suggestion only costs a dismissable
+  button, not a missed play. Turning those same windows into actual cuts
+  — merging any two within 1-2s of each other first — was proposed as
+  consistent with tonight's loosened priority rule. Validated against the
+  full 9-clip regression before touching anything real, exactly as that
+  rule requires: the naive version (today's real skip-suggestion
+  parameters) broke `check_continuity` on 5 of 9 clips. Adding the same
+  rigor dynamic padding has (`quiet_thresh=0.002`, a 0.5s buffer) reduced
+  but did not eliminate the failures — still 2 of 9 (`clip_300`/e6,
+  `clip_60`/e5). Root-caused, not just re-tuned: dynamic padding protects
+  a segment's *edges*; skip-suggestion windows are, by their own detection
+  goal, "a quiet stretch inside otherwise-real action" — exactly what
+  `check_continuity` exists to protect (a batter frozen mid-stance
+  pre-pitch legitimately reads as near-zero motion). Confirmed directly:
+  the failing `clip_300` cut sits at `[95.59, 97.20]`, inside `e6`'s
+  protected window `[95,103]`. No floor/buffer on the cut mechanism
+  itself can fix this, because raw motion score alone can't distinguish
+  genuinely dead time from a real brief lull inside a real play — that
+  needs the same at-bat/zone context signal the rest of the pipeline
+  already has and this feature doesn't. Not pursued further against this
+  footage without a genuinely different, context-aware signal — the same
+  honest-dead-end category as the Tier 2 audio investigation and the
+  ambient-motion discount, not a tuning gap. Nothing from this was wired
+  into anything real; it stayed in a scratch simulation.
 - **Fixed: `ProcessingStep` could poll for a detect job before it
   existed, logging a real (if harmless) 404.** `App.jsx`'s
   `handleCalibrated` called `setStage('processing')` — which mounts
