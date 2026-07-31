@@ -886,6 +886,59 @@ local timestamps happen to look adjacent.
   sitting in `uploads/465a9590a016`, `f44f29520bcf`, `d954ef5103d7`, and
   `fdc70235adb5` are stale artifacts of the bug, not re-exported since;
   anyone actually relying on those specific files should re-export them.
+
+  **A SECOND real bug, introduced BY this fix, found the same night —
+  actual duplicated footage, not just a duration number.** Manually
+  reviewing a real edited output for an unrelated reason surfaced real
+  lag/repeated frames. Investigated directly: extracting the two spans
+  bordering the suspect point separately and diffing frame hashes showed
+  90 of 144 frames at the start of the second span byte-identical to
+  frames at the end of the first — about 1.9 real seconds of footage
+  playing twice. Checked directly against the pre-fix code on the same
+  real content: zero duplicates — new, not pre-existing. Root cause:
+  extending each span's real end (this fix's whole point) can push it
+  past the NEXT span's own keyframe-snapped start whenever the real gap
+  between two kept spans is smaller than the source's GOP; both spans
+  then independently decode the same real footage.
+
+  Fixed by predicting each span's real keyframe-snapped start
+  (`get_keyframe_times`/`predicted_seek_start`, from real per-file
+  keyframe probing) and merging any two adjacent same-file spans
+  (`merge_overlapping_spans`) whose real windows would overlap — keeping
+  the short real gap between them rather than re-cutting it, spending a
+  little more kept dead time (already-accepted-safe) to guarantee zero
+  duplicate frames instead.
+
+  **Two more things verification turned up, both worth recording
+  plainly.** First, the verification method itself was wrong before it
+  was right: an initial seek-into-the-output-then-PNG-then-hash approach
+  produced its own false positives, confirmed by comparing against a
+  genuine from-t=0 decode of the same real region — twice over, from two
+  different causes (ordinary ffmpeg seek-accuracy behavior, reproduced
+  even on the pristine untouched original clip_300.mkv; and something
+  specific to checking near a real concat join). Switched to ffmpeg's
+  own `framemd5` muxer (checksums the decoded picture directly) before
+  trusting any further result. Second, the merge decision's first version
+  — using only the mathematically-nearest keyframe — still MISSED a real
+  duplicate, on full_game.mkv specifically, because that file's own MKV
+  cue-index seeking sometimes lands one keyframe earlier than the nearest
+  one (already documented above: 7 of 120 real spans, up to ~1.03 GOPs).
+  Confirmed by reproducing the exact missed pair in isolation (80
+  duplicate frames) before fixing it. Fixed by having the merge decision
+  conservatively assume that documented worst case by default.
+
+  **Final validation, done properly this time: real frame-by-frame
+  comparison (via `framemd5`) across every real splice boundary in all 9
+  reference clips plus full_game.mkv.** All 9 reference clips: zero
+  duplicate frames anywhere. `full_game.mkv`: the conservative merge
+  collapsed 79 stream-copy jobs down to 35 (more real gaps recognized as
+  overlap-risk and merged), and exactly one duplicate PAIR remained —
+  checked directly and confirmed to already exist in the raw, untouched
+  original `full_game.mkv` source itself (frame 88 = frame 89, ~1.8s into
+  the file, before any of this project's code ever touches it) — a real
+  source characteristic stream-copy faithfully preserves, not something
+  this pipeline introduced. Zero duplicate frames actually caused by
+  stitching, confirmed everywhere checked. Full suite: 296 passed.
 - **Fixed: `ProcessingStep` could poll for a detect job before it
   existed, logging a real (if harmless) 404.** `App.jsx`'s
   `handleCalibrated` called `setStage('processing')` — which mounts

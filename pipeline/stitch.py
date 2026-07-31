@@ -72,8 +72,64 @@ file and shifting BOTH -ss and -to by it — confirmed directly: the same
 120.155s request that used to measure 115.690s now measures 120.195s
 (extra, as intended, never short). This is a real correctness fix to
 already-shipped stitching, not a change scoped to any one feature.
+
+**A second real bug, introduced BY the fix above, found the same night:**
+extending each span's own real end (the fix's whole point) can push it far
+enough forward to overlap the NEXT span's own keyframe-snapped start,
+whenever the real gap between two kept spans is smaller than the source's
+GOP — both spans then independently decode the same real footage, and
+after concatenation it plays twice. Confirmed with real frame-level
+evidence, not inferred: extracting two adjacent spans from a real
+clip_300.mkv batch separately and diffing frame hashes showed 90 of the
+first 144 frames of the second span byte-identical to frames at the end
+of the first — about 1.9 real seconds of footage duplicated. Checked
+directly against the pre-fix code on the same real historical output:
+zero duplicate frames there — this was new, not pre-existing, confirming
+it came from extending spans' real ends rather than from anything
+already shipped. Root cause: each span is extracted independently, and a
+stream-copy `-ss` seek always snaps back to the nearest keyframe at or
+before its target — when the real gap between two spans is smaller than
+that snap-back distance can reach, their independently-decoded content
+overlaps.
+
+Fixed by predicting each span's real keyframe-snapped start
+(`get_keyframe_times`/`predicted_seek_start`, from real per-file keyframe
+probing, not an assumed constant GOP) and merging any two adjacent
+same-file spans (`merge_overlapping_spans`) whose real extraction windows
+would overlap into one — keeping the short real gap between them rather
+than re-cutting it. This only ever adds a little more kept dead time
+(the same direction this module's priority rule already treats as safe),
+never a duplicate frame. Only applied on the stream-copy path; the
+re-encode path decodes every frame exactly and has no keyframe-snap
+behavior to guard against.
+
+**Verification found two more real things worth recording.** First, the
+verification method itself needed fixing before it could be trusted: an
+initial approach (seek with `-ss` into the rendered output, re-encode to
+PNG, hash each frame) produced its own false positives — confirmed by
+comparing against a genuine from-t=0 decode of the same real region —
+both from ordinary ffmpeg seek-accuracy behavior (any mid-file seek
+reliably emits a spurious duplicate right at the seek point, reproduced
+even on the pristine, untouched original clip_300.mkv) and, separately,
+from something specific to checking near a real concat-demuxer join.
+Switched to ffmpeg's own `framemd5` muxer (checksums the decoded picture
+directly, no seek behavior to work around when scanning from a file's
+true start) before trusting any result. Second, `predicted_seek_start`'s
+first version — using only the mathematically-nearest keyframe — MISSED
+a real duplicate on full_game.mkv specifically, because that file's own
+MKV cue-index seeking sometimes lands one keyframe earlier than the
+nearest one (already documented above, measured on 7 of 120 real spans).
+Fixed by having the merge decision conservatively assume that worst case
+by default (`predicted_seek_start(..., conservative=True)`) — confirmed
+by reproducing the exact missed pair in isolation (80 duplicate frames)
+and confirming the conservative prediction now merges it correctly.
+Verified with real frame-by-frame comparison across every splice
+boundary in all 9 reference clips plus full_game.mkv, using the corrected
+verification method — see README's Known Limitations for the exact
+numbers.
 """
 
+import bisect
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,6 +222,101 @@ def probe_video_params(path) -> VideoParams:
         fps=fps, rotation=rotation, start_offset=start_offset)
 
 
+def get_keyframe_times(path) -> list:
+    """Real keyframe (packet-level) presentation timestamps for the video
+    stream, via ffprobe packet flags -- the same real data source used to
+    measure this project's own documented GOP numbers (see this module's
+    docstring). Used to PREDICT exactly which keyframe a stream-copy `-ss`
+    seek will actually land on, so two adjacent spans whose real gap is
+    smaller than the source's GOP can be detected and merged instead of
+    independently decoding overlapping real content (see
+    merge_overlapping_spans)."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time,flags",
+         "-of", "csv=print_section=0", str(path)],
+        capture_output=True, text=True, check=True).stdout
+    keyframes = []
+    for line in out.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) == 2 and "K" in parts[1] and parts[0] not in ("", "N/A"):
+            keyframes.append(float(parts[0]))
+    return sorted(keyframes)
+
+
+def predicted_seek_start(requested_s: float, keyframes: list,
+                         conservative: bool = True) -> float:
+    """The real timestamp a stream-copy `-ss requested_s` will actually
+    start decoding from: the nearest keyframe at or before it (matching
+    ffmpeg's own input-seek behavior), or the first keyframe if
+    requested_s is before every keyframe (e.g. before the stream's own
+    real start). Returns requested_s unchanged if no keyframes are known
+    (e.g. an empty/unprobeable list) -- callers treat that as "can't
+    predict an overlap, don't merge on this basis alone."
+
+    conservative=True (the default, and what merge_overlapping_spans
+    always uses) additionally steps back ONE MORE keyframe beyond the
+    mathematically-nearest one. This is not theoretical caution: this
+    module's own docstring already documents, from real measurement on
+    full_game.mkv, that ffmpeg's real MKV cue-index seek sometimes lands
+    on the keyframe *before* the nearest preceding one (7 of 120 real
+    spans, up to ~1.03 GOPs of slack) -- a real characteristic of this
+    exact file, not a hypothetical. A first version of the overlap
+    prediction used only the mathematically-nearest keyframe and MISSED a
+    real duplicate-frame case on full_game.mkv as a direct result: it
+    predicted no overlap between two spans, but the real seek landed one
+    keyframe earlier than predicted, and the two spans' independently
+    decoded content genuinely overlapped anyway. Confirmed directly:
+    reproducing that exact pair in isolation showed 80 duplicate frames;
+    stepping back one extra keyframe here predicts the real (further-back)
+    start correctly and the merge now catches it."""
+    if not keyframes:
+        return requested_s
+    idx = bisect.bisect_right(keyframes, requested_s) - 1
+    if idx < 0:
+        return keyframes[0]
+    if conservative and idx > 0:
+        idx -= 1
+    return keyframes[idx]
+
+
+def merge_overlapping_spans(spans, start_offset: float, keyframes: list,
+                            safety_margin_s: float = 0.1) -> list:
+    """Merge consecutive (start_s, end_s) spans (already sorted, all from
+    the SAME source file) whenever independently stream-copy-extracting
+    them would decode overlapping real content.
+
+    Root cause this guards against (a real, confirmed bug, not a
+    theoretical one): each span's own `-ss` seeks to the nearest keyframe
+    AT OR BEFORE its requested start. If the real gap between two kept
+    spans is smaller than the source's own keyframe interval (GOP), the
+    LATER span's keyframe-snapped start can land BEFORE the EARLIER span's
+    own real end -- both spans then independently decode the same real
+    footage, and after concatenation that footage plays twice (confirmed
+    directly on a real file: 90 of 144 frames at the start of one span's
+    extracted clip were byte-identical duplicates of frames at the end of
+    the previous span's clip). Merging the two spans into one — keeping
+    the real (short) gap between them rather than re-cutting it — trades
+    a small amount of extra kept dead time for eliminating the duplicate
+    entirely; extra kept footage is exactly the direction this module's
+    priority rule already accepts as safe, a duplicated frame is not.
+
+    Only meaningful for the stream-copy path — the re-encode path decodes
+    every frame exactly and has no keyframe-snap behavior at all, so
+    callers should not apply this there (see plan_stitch)."""
+    if not spans:
+        return []
+    merged = [list(spans[0])]
+    for a, b in spans[1:]:
+        current_end_real = merged[-1][1] + start_offset
+        next_start_real = predicted_seek_start(a + start_offset, keyframes)
+        if next_start_real <= current_end_real + safety_margin_s:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [tuple(s) for s in merged]
+
+
 def needs_reencode(infos: list) -> tuple:
     """Whether the given VideoParams disagree enough to require a
     re-encode for a valid concat-demuxer join. Returns (bool, reason)."""
@@ -203,11 +354,19 @@ def choose_target_params(infos: list) -> tuple:
     return (w, h, fps)
 
 
-def plan_stitch(manifest: dict, source_dir, prober=probe_video_params) -> StitchPlan:
+def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
+               keyframe_prober=get_keyframe_times) -> StitchPlan:
     """Pure planning logic: resolve source paths, probe them, decide
     stream-copy vs. re-encode, and build the ordered list of span
-    extraction jobs. `prober` is injectable so this is testable without
-    real video files or ffmpeg."""
+    extraction jobs. `prober`/`keyframe_prober` are injectable so this is
+    testable without real video files or ffmpeg.
+
+    On the stream-copy path only, adjacent same-file spans are merged
+    first (merge_overlapping_spans) whenever independent extraction would
+    decode overlapping real content — see that function's docstring for
+    the real duplicate-frame bug this prevents. Never applied on the
+    re-encode path: every frame there is actually decoded, so there is no
+    keyframe-snap behavior to predict or guard against."""
     from pipeline.manifest import kept_spans_by_file
 
     by_file = kept_spans_by_file(manifest)
@@ -231,7 +390,11 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params) -> Stitch
             continue
         src_path = source_dir / f["source_file"]
         start_offset = offset_by_file.get(f["source_file"], 0.0)
-        for start_s, end_s in f["spans"]:
+        spans = f["spans"]
+        if not reencode:
+            keyframes = keyframe_prober(src_path)
+            spans = merge_overlapping_spans(spans, start_offset, keyframes)
+        for start_s, end_s in spans:
             seq += 1
             jobs.append(SpanJob(
                 source_path=str(src_path), start_s=start_s, end_s=end_s,
@@ -297,8 +460,8 @@ def build_concat_cmd(list_path, out_path) -> list:
 
 
 def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
-              prober=probe_video_params, runner=None,
-              on_stage=None) -> StitchResult:
+              prober=probe_video_params, keyframe_prober=get_keyframe_times,
+              runner=None, on_stage=None) -> StitchResult:
     """Execute a stitch plan: extract every kept span, then concat them
     into `output_path`. `work_dir` holds intermediate per-span clips
     (a temp dir is used and cleaned up if not given). `runner` defaults
@@ -313,7 +476,8 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
         def runner(cmd):
             subprocess.run(cmd, check=True, capture_output=True)
 
-    plan = plan_stitch(manifest, source_dir, prober=prober)
+    plan = plan_stitch(manifest, source_dir, prober=prober,
+                      keyframe_prober=keyframe_prober)
     if not plan.jobs:
         raise ValueError("manifest has no kept segments to stitch")
 

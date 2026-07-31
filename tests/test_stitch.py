@@ -19,14 +19,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.manifest import build_manifest, build_multi_file_manifest
 from pipeline.stitch import (VideoParams, build_concat_cmd, build_concat_list,
                              build_extract_cmd, choose_target_params,
-                             needs_reencode, plan_stitch, probe_video_params,
-                             run_stitch)
+                             get_keyframe_times, merge_overlapping_spans,
+                             needs_reencode, plan_stitch, predicted_seek_start,
+                             probe_video_params, run_stitch)
 
 
 def vp(path="a.mp4", codec="h264", w=1920, h=1080, fps=30.0, rotation=0,
       start_offset=0.0):
     return VideoParams(path=path, codec_name=codec, width=w, height=h,
                        fps=fps, rotation=rotation, start_offset=start_offset)
+
+
+def no_keyframes(path):
+    """Fake keyframe_prober for tests using fake (nonexistent) video
+    paths: an empty keyframe list makes merge_overlapping_spans a no-op
+    (predicted_seek_start falls back to the requested time unchanged),
+    without ever shelling out to real ffprobe."""
+    return []
 
 
 # ---- needs_reencode ----
@@ -105,7 +114,8 @@ def two_file_manifest():
 
 def test_plan_stitch_jobs_follow_file_and_span_order(tmp_path):
     m = two_file_manifest()
-    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p)))
+    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p)),
+                       keyframe_prober=no_keyframes)
     assert [(j.start_s, j.end_s) for j in plan.jobs] == [
         (2.0, 10.0), (15.0, 20.0), (0.0, 5.0)]
     assert plan.jobs[0].source_path.endswith("part1.mp4")
@@ -114,14 +124,16 @@ def test_plan_stitch_jobs_follow_file_and_span_order(tmp_path):
 
 def test_plan_stitch_clip_names_sequential_and_unique(tmp_path):
     m = two_file_manifest()
-    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p)))
+    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p)),
+                       keyframe_prober=no_keyframes)
     names = [j.clip_name for j in plan.jobs]
     assert len(names) == len(set(names))
 
 
 def test_plan_stitch_no_reencode_when_params_match(tmp_path):
     m = two_file_manifest()
-    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p)))
+    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p)),
+                       keyframe_prober=no_keyframes)
     assert plan.reencode is False
     assert plan.target is None
 
@@ -134,7 +146,7 @@ def test_plan_stitch_reencode_when_params_mismatch(tmp_path):
             return vp(path=str(path), w=1920, h=1080, fps=30.0)
         return vp(path=str(path), w=1280, h=720, fps=60.0)
 
-    plan = plan_stitch(m, tmp_path, prober=prober)
+    plan = plan_stitch(m, tmp_path, prober=prober, keyframe_prober=no_keyframes)
     assert plan.reencode is True
     assert plan.target == (1920, 1080, 60.0)
     assert "resolution" in plan.reencode_reason
@@ -155,7 +167,7 @@ def test_plan_stitch_probes_only_files_with_kept_spans(tmp_path):
         probed.append(str(path))
         return vp(path=str(path))
 
-    plan_stitch(m, tmp_path, prober=prober)
+    plan_stitch(m, tmp_path, prober=prober, keyframe_prober=no_keyframes)
     assert len(probed) == 1
     assert "part1.mp4" in probed[0]
 
@@ -172,7 +184,7 @@ def test_plan_stitch_propagates_per_file_start_offset(tmp_path):
             return vp(path=str(path), start_offset=4.506)
         return vp(path=str(path), start_offset=0.0)
 
-    plan = plan_stitch(m, tmp_path, prober=prober)
+    plan = plan_stitch(m, tmp_path, prober=prober, keyframe_prober=no_keyframes)
     part1_jobs = [j for j in plan.jobs if "part1" in j.source_path]
     part2_jobs = [j for j in plan.jobs if "part2" in j.source_path]
     assert all(j.start_offset == 4.506 for j in part1_jobs)
@@ -185,6 +197,120 @@ def test_plan_stitch_empty_manifest_yields_no_jobs(tmp_path):
     plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p)))
     assert plan.jobs == []
     assert plan.reencode is False
+
+
+# ---- predicted_seek_start / merge_overlapping_spans ----
+# Regression coverage for a real bug: extending each span's own real end
+# (the start_offset fix) can push it past the NEXT span's own
+# keyframe-snapped start when the real gap between them is smaller than
+# the source's GOP -- both spans then independently decode the same real
+# content, which plays twice after concat. Confirmed on a real clip_300.mkv
+# batch (90 of 144 frames at the start of one span byte-identical to
+# frames at the end of the previous span) before any of this was written.
+
+def test_predicted_seek_start_snaps_to_nearest_keyframe_at_or_before():
+    # conservative=False: the raw, mathematically-nearest keyframe, no
+    # extra safety step-back
+    keyframes = [0.0, 6.0, 12.0, 18.0]
+    assert predicted_seek_start(10.0, keyframes, conservative=False) == 6.0
+    assert predicted_seek_start(12.0, keyframes, conservative=False) == 12.0  # exact match
+    assert predicted_seek_start(17.999, keyframes, conservative=False) == 12.0
+
+
+def test_predicted_seek_start_conservative_steps_back_one_more_keyframe():
+    # conservative=True (the default) -- regression test for a real bug:
+    # the non-conservative version missed a real duplicate-frame case on
+    # full_game.mkv because ffmpeg's actual MKV cue-index seek landed one
+    # keyframe earlier than the mathematically-nearest one (a real,
+    # already-measured characteristic of this file, not hypothetical --
+    # see this module's own docstring). Reproduces the exact real
+    # keyframe spacing around the missed case (6.006s GOP).
+    keyframes = [1129.128, 1135.134, 1141.14, 1147.146, 1153.152, 1159.158]
+    assert predicted_seek_start(1147.246, keyframes) == 1141.14  # one step back
+    assert predicted_seek_start(1147.246, keyframes, conservative=False) == 1147.146
+
+
+def test_predicted_seek_start_conservative_never_goes_before_first_keyframe():
+    keyframes = [4.266, 10.272, 16.278]
+    assert predicted_seek_start(10.272, keyframes) == 4.266  # exact match, steps back
+    assert predicted_seek_start(4.266, keyframes) == 4.266  # already at the first one
+
+
+def test_predicted_seek_start_before_first_keyframe_clamps_to_it():
+    keyframes = [4.266, 10.272, 16.278]
+    assert predicted_seek_start(1.0, keyframes) == 4.266
+
+
+def test_predicted_seek_start_empty_keyframes_returns_unchanged():
+    assert predicted_seek_start(12.0, []) == 12.0
+
+
+def test_merge_overlapping_spans_merges_when_gap_smaller_than_gop():
+    # gap between spans is 3.36s; the second span's -ss (47.25+4.266=51.516)
+    # snaps back to keyframe 46.308 -- BEFORE the first span's own real end
+    # (43.892+4.266=48.158) -- a real overlap, must merge
+    keyframes = [4.266 + 6.006 * n for n in range(20)]  # matches clip_300's real GOP
+    spans = [(3.873, 43.892), (47.250, 80.010)]
+    merged = merge_overlapping_spans(spans, start_offset=4.266, keyframes=keyframes)
+    assert merged == [(3.873, 80.010)]
+
+
+def test_merge_overlapping_spans_does_not_merge_when_gap_larger_than_gop():
+    # gap of 10s, larger than the 6.006s GOP -- no overlap, stays separate
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    spans = [(3.873, 40.0), (50.0, 80.0)]
+    merged = merge_overlapping_spans(spans, start_offset=4.266, keyframes=keyframes)
+    assert merged == [(3.873, 40.0), (50.0, 80.0)]
+
+
+def test_merge_overlapping_spans_catches_gap_between_one_and_two_gops():
+    # regression test for a real bug: a gap BETWEEN one and two real GOPs
+    # (here 4.465s, GOP 6.006s) is exactly the case the non-conservative
+    # prediction gets wrong on a file with the documented MKV cue-index
+    # seek quirk (see predicted_seek_start's docstring) -- confirmed on
+    # real full_game.mkv footage: extracting this exact pair in isolation
+    # showed 80 duplicate frames before this fix.
+    keyframes = [1129.128, 1135.134, 1141.14, 1147.146, 1153.152, 1159.158]
+    spans = [(1136.776, 1142.781), (1147.246, 1159.152)]
+    merged = merge_overlapping_spans(spans, start_offset=0.0, keyframes=keyframes)
+    assert merged == [(1136.776, 1159.152)]
+
+
+def test_merge_overlapping_spans_cascades_across_three_spans():
+    keyframes = [6.0 * n for n in range(20)]
+    # each gap is 1s, well under the 6s GOP -- all three should merge into one
+    spans = [(1.0, 10.0), (11.0, 20.0), (21.0, 30.0)]
+    merged = merge_overlapping_spans(spans, start_offset=0.0, keyframes=keyframes)
+    assert merged == [(1.0, 30.0)]
+
+
+def test_merge_overlapping_spans_empty_keyframes_is_noop():
+    # no keyframe data available -> can't predict overlap, don't merge
+    # (predicted_seek_start falls back to the raw requested start, so
+    # merging only happens if spans already literally touch/overlap)
+    spans = [(3.873, 43.892), (47.250, 80.010)]
+    merged = merge_overlapping_spans(spans, start_offset=4.266, keyframes=[])
+    assert merged == [(3.873, 43.892), (47.250, 80.010)]
+
+
+def test_merge_overlapping_spans_single_span_unchanged():
+    assert merge_overlapping_spans([(1.0, 5.0)], 0.0, [0.0, 3.0, 6.0]) == [(1.0, 5.0)]
+
+
+def test_merge_overlapping_spans_empty_input():
+    assert merge_overlapping_spans([], 0.0, [0.0, 3.0]) == []
+
+
+def test_plan_stitch_merges_overlapping_spans_on_copy_path_not_reencode(tmp_path):
+    # the merge must only ever run on the stream-copy path -- the
+    # re-encode path decodes every frame exactly and has no keyframe-snap
+    # behavior for it to guard against
+    m = build_manifest("g.mp4", 100.0, [(3.873, 43.892), (47.250, 80.010)])
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+
+    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p), start_offset=4.266),
+                       keyframe_prober=lambda p: keyframes)
+    assert [(j.start_s, j.end_s) for j in plan.jobs] == [(3.873, 80.010)]
 
 
 # ---- build_extract_cmd ----
@@ -271,7 +397,8 @@ def test_run_stitch_invokes_one_extract_per_span_plus_one_concat(tmp_path):
 
     out = tmp_path / "out" / "final.mp4"
     result = run_stitch(m, tmp_path, out, work_dir=tmp_path / "work",
-                        prober=lambda p: vp(path=str(p)), runner=fake_runner)
+                        prober=lambda p: vp(path=str(p)),
+                        keyframe_prober=no_keyframes, runner=fake_runner)
 
     # 3 kept spans across the two files -> 3 extract calls + 1 concat call
     assert len(calls) == 4
@@ -488,3 +615,73 @@ def test_stream_copy_span_from_zero_not_shortened_by_real_stream_start_offset(tm
         f"rendered output ({actual:.2f}s) is SHORTER than the requested "
         f"{requested:.2f}s span starting at 0.0 -- real content was lost, "
         f"the video stream's own nonzero start_time was not corrected for")
+
+
+def frame_hashes(video_path, start_s=None, duration_s=None):
+    """Per-decoded-frame checksum, in order, via ffmpeg's own `framemd5`
+    muxer -- used to detect exact-duplicate frames directly, the same
+    method used to find and confirm the real duplicate-frame bug below.
+
+    NOT implemented via seeking + re-encoding to PNG through a pipe: that
+    approach was tried first and produces two DIFFERENT classes of false
+    positive, both confirmed directly against real files, not assumed:
+    (1) any mid-file `-ss` seek reliably produces a spurious duplicate at
+    the seek point, reproduced by seeking into arbitrary, uninteresting
+    points of the pristine, UNTOUCHED original clip_300.mkv -- an
+    ffmpeg accurate-seek artifact, not a real duplicate; (2) checking near
+    a real concat-demuxer join specifically produced spurious duplicates
+    under the PNG-pipe method that framemd5 -- and a genuine from-t=0,
+    no-seek decode -- both showed were not really there. `framemd5`
+    checksums the actual decoded picture directly, has no seek-accuracy
+    behavior to work around (this always decodes from the true start
+    when start_s is None), and is also far cheaper than PNG encoding."""
+    cmd = ["ffmpeg", "-v", "error"]
+    if start_s is not None:
+        cmd += ["-ss", str(start_s)]
+    if duration_s is not None:
+        cmd += ["-t", str(duration_s)]
+    cmd += ["-i", str(video_path), "-an", "-f", "framemd5", "-"]
+    proc = subprocess.run(cmd, capture_output=True, check=True, text=True)
+    return [line.split(",")[-1].strip() for line in proc.stdout.splitlines()
+           if not line.startswith("#")]
+
+
+def test_no_duplicate_frames_across_a_real_close_splice_boundary(tmp_path):
+    """Regression test for a real bug introduced BY the start_offset fix
+    above: two adjacent kept spans, from a real clip_300.mkv batch, whose
+    real gap (3.36s) is smaller than the file's own real GOP (6.006s).
+    Before merge_overlapping_spans, extracting them independently caused
+    ~90 of 144 frames at the start of the second span to be byte-identical
+    duplicates of frames at the end of the first -- confirmed by direct
+    frame-hash comparison against the real file before this fix existed.
+    This confirms it's fixed: zero duplicate frames anywhere across the
+    real splice boundary, checked directly on the real rendered output."""
+    clip = Path(__file__).parent.parent / "reference_clips" / "clip_300.mkv"
+    if not clip.exists():
+        pytest.skip("reference clip not available for real splice-duplication check")
+
+    # the exact two spans that reproduced the bug (see this module's and
+    # pipeline/stitch.py's docstrings for the full derivation)
+    m = build_manifest(clip.name, 190.0, [(3.873, 43.892), (47.250, 80.010)])
+    out = tmp_path / "out.mp4"
+    result = run_stitch(m, clip.parent, out, work_dir=tmp_path / "work")
+
+    assert result.reencoded is False
+    # the two spans must have been merged into one (real gap 3.36s <
+    # real GOP 6.006s) -- if this ever regresses to 2 separate jobs again,
+    # the duplicate-frame bug is back
+    assert result.span_count == 1
+
+    # scan every frame from the true start through past the join -- no
+    # seeking, so there's no seek-accuracy behavior to account for
+    hashes = frame_hashes(out, duration_s=48.0)
+    seen = {}
+    dups = []
+    for i, h in enumerate(hashes):
+        if h in seen:
+            dups.append((seen[h], i))
+        else:
+            seen[h] = i
+    assert dups == [], (
+        f"found {len(dups)} exact-duplicate frame pair(s) near the real "
+        f"splice boundary: {dups[:10]} -- real footage is playing twice")
