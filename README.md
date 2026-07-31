@@ -939,6 +939,60 @@ local timestamps happen to look adjacent.
   source characteristic stream-copy faithfully preserves, not something
   this pipeline introduced. Zero duplicate frames actually caused by
   stitching, confirmed everywhere checked. Full suite: 296 passed.
+- **RETRACTED: an earlier session's "skip-ahead detection works correctly"
+  claim was wrong. The button is disabled, not re-verified, pending a real
+  fix.** A prior session pointed to `output.mp4` in the `06aafca1c27a`
+  clip_300 batch at t=59-61s as proof: "essentially zero motion score
+  (0.00006-0.00065), no player action." Watching the real frames at that
+  exact timestamp shows a batter set in an active hitting stance at the
+  plate, mid-at-bat, fielders positioned — real action, not dead time.
+
+  The original claim was wrong two levels deep, both admitted plainly here
+  rather than smoothed over. First, methodology: it was trusted from a
+  motion-score number alone, never a single real frame — exactly the
+  failure mode this project's own standing rule (frame-verify before
+  trusting a score; see the audio-classification and play-extension
+  writeups above) exists to prevent. Second, and more fundamentally: the
+  timestamp itself was wrong. The claim was that output t=59-61s maps to
+  source-local t=55.159-58.913 in `clip_300.mkv` (the manifest's actual
+  flagged `skip_suggestion` window). Independently re-deriving that
+  mapping from the real stitch plan (`pipeline.stitch.plan_stitch()`, run
+  directly against the real manifest and `clip_300.mkv`, not assumed)
+  shows that source-local window actually renders at output
+  **55.159-58.913s**, not 59-61s — the check landed 3-4 real seconds past
+  the window it was meant to be checking, into content the pipeline never
+  claimed was quiet in the first place.
+
+  **Root cause: `SkippableVideo.jsx`'s `computeSkipWindows()` — the same
+  function responsible for both this mapping and the button's actual seek
+  target — is provably wrong in general, not just wrong in this one
+  instance.** It assumes a kept manifest segment's position in the
+  rendered output is the cumulative sum of every earlier kept segment's
+  own nominal (`end_s - start_s`) duration. That's false whenever
+  `pipeline.stitch.merge_overlapping_spans()` — the duplicate-frame-
+  avoidance fix from the previous session — merges two adjacent kept
+  segments because their real gap is shorter than the source file's own
+  GOP (~6s on `clip_300`, and the *common* case per that fix's own
+  writeup, not a rare one), or whenever a span's real rendered start
+  shifts because of ordinary keyframe-snap. Measured directly on this real
+  batch/manifest, comparing the frontend's computed positions against the
+  real rendered ones (via `plan_stitch` plus real keyframe probing) for
+  every one of its 11 skip suggestions: **all 11 are wrong**, with the
+  divergence growing monotonically from 3.9s at the first suggestion to
+  17.5s by the last. Confirmed the consequence is real, not just numeric:
+  extracting the actual frame at the real output position the button's
+  naive `activeSkip.end` would seek to on click shows the same still-live
+  at-bat the button was supposedly skipping past — clicking it does not
+  skip the quiet stretch it claims to.
+
+  **Disabled, not fixed.** `ResultStep.jsx` and `EditLogView.jsx` no
+  longer pass `segments` to `SkippableVideo`, so the button never renders;
+  the players themselves are unaffected. Shipped ahead of any real fix so
+  a known-wrong button isn't left live for anyone while one gets designed.
+  The real fix — the manifest carrying real per-span rendered offsets
+  computed once at stitch time, rather than `computeSkipWindows`
+  re-deriving them client-side from an assumption already proven false —
+  is scoped as its own piece of work, not yet implemented.
 - **Not shipped: converting skip-ahead's manual suggestion windows into
   real hard cuts — investigated and closed as a structural dead end, the
   same category as the ambient-discount finding above.** Skip-ahead (the
