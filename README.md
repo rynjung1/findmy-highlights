@@ -1021,6 +1021,26 @@ local timestamps happen to look adjacent.
   exactly on the window's real end (`58.913s`), not mid-action. Fixed
   and re-enabled as two separate commits, mirroring how disabling it was
   its own isolated commit.
+
+  **Built on top of it: an auto-skip playback mode, toggleable, default
+  on.** A different feature from the hard-cut idea below, not a
+  reopening of it: this is purely client-side playback behavior, never
+  touches the export. Reaching a skip-suggestion window's start (now
+  using the real `output_start_s`/`output_end_s` above) auto-jumps
+  `currentTime` to the window's real end, with a brief "Skipped Ns of
+  quiet time" toast so a jump never reads as a stutter or a glitch — a
+  checkbox lets a viewer fall back to the original manual button
+  instead, per video. Same non-destructive framing as the manual
+  button: nothing is removed either way, and scrubbing back plays
+  skipped footage again (while auto-skip stays on, landing back inside
+  a window skips it again too — turn the toggle off first to linger).
+  Lives entirely in `SkippableVideo.jsx`, so both the Home view and the
+  Edit Log's "Current output" player get it with no changes of their
+  own. Verified with a real headless-browser pass against the live app,
+  both players: toggle defaults on, a real quiet window auto-jumps to
+  its real end and shows the toast, the toast self-clears after ~2.3s,
+  and unchecking the toggle correctly falls back to the manual button
+  with no auto-jump.
 - **Not shipped: converting skip-ahead's manual suggestion windows into
   real hard cuts — investigated and closed as a structural dead end, the
   same category as the ambient-discount finding above.** Skip-ahead (the
