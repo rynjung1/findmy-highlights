@@ -1,4 +1,7 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+
+const TOAST_VISIBLE_MS = 2000
+const TOAST_FADE_MS = 300
 
 // Each kept segment's REAL position in the current output --
 // output_start_s/output_end_s -- is computed once at stitch time
@@ -37,21 +40,56 @@ function computeSkipWindows(segments) {
   return windows
 }
 
-// A <video> with an optional manual "Skip ahead" button, built from the
-// manifest's skip_suggestions (see pipeline/manifest.py). Purely a
-// non-destructive UI affordance: nothing is removed from the video, the
-// button only appears while the playhead is inside a suggested quiet
-// stretch WITHIN the currently-playing kept segment, and it's the
-// viewer's choice whether to use it -- this never jumps on its own.
+// A <video> with a skip-ahead affordance for the manifest's
+// skip_suggestions (see pipeline/manifest.py). Purely non-destructive
+// either way: nothing is ever removed from the video or the export --
+// export/download always contains the complete output regardless of
+// this component's state. Two modes, toggled by the viewer:
+//   - Auto-skip (default on): reaching a quiet window's start jumps
+//     currentTime to its end automatically, with a brief toast
+//     explaining what just happened, so an auto-jump never reads as a
+//     stutter or a glitch. Scrubbing back into a window plays it again
+//     (nothing was deleted) -- but note that while auto-skip stays on,
+//     landing back inside a window jumps forward again, same as the
+//     first time; turn auto-skip off first to linger inside one.
+//   - Manual (the original behavior, kept for anyone who'd rather
+//     decide per-window): a "Skip ahead" button appears while playback
+//     is inside a window and the viewer clicks it themselves.
 export default function SkippableVideo({ src, segments, style, ...videoProps }) {
   const videoRef = useRef(null)
   const skipWindows = useMemo(() => computeSkipWindows(segments), [segments])
+  const [autoSkip, setAutoSkip] = useState(true)
   const [activeSkip, setActiveSkip] = useState(null)
+  const [toast, setToast] = useState(null) // { key, message, leaving }
+  const toastTimers = useRef([])
+
+  useEffect(() => () => toastTimers.current.forEach(clearTimeout), [])
+
+  function showToast(message) {
+    toastTimers.current.forEach(clearTimeout)
+    const key = Date.now()
+    setToast({ key, message, leaving: false })
+    toastTimers.current = [
+      setTimeout(() => setToast((cur) => (cur?.key === key ? { ...cur, leaving: true } : cur)),
+        TOAST_VISIBLE_MS),
+      setTimeout(() => setToast((cur) => (cur?.key === key ? null : cur)),
+        TOAST_VISIBLE_MS + TOAST_FADE_MS),
+    ]
+  }
 
   function handleTimeUpdate(e) {
     const t = e.target.currentTime
     const hit = skipWindows.find((w) => t >= w.start && t < w.end)
-    setActiveSkip(hit || null)
+    if (autoSkip) {
+      if (hit && videoRef.current) {
+        const seconds = Math.max(1, Math.round(hit.end - hit.start))
+        videoRef.current.currentTime = hit.end
+        showToast(`Skipped ${seconds}s of quiet time`)
+      }
+      setActiveSkip(null)
+    } else {
+      setActiveSkip(hit || null)
+    }
     videoProps.onTimeUpdate?.(e)
   }
 
@@ -72,7 +110,7 @@ export default function SkippableVideo({ src, segments, style, ...videoProps }) 
         onTimeUpdate={handleTimeUpdate}
         style={{ maxWidth: '100%', width: '100%', background: '#000', ...style }}
       />
-      {activeSkip && (
+      {!autoSkip && activeSkip && (
         <button className="skip-ahead-button" onClick={handleSkipClick}>
           <span className="skip-ahead-icon" aria-hidden="true">⏭</span>
           Skip ahead
@@ -80,6 +118,24 @@ export default function SkippableVideo({ src, segments, style, ...videoProps }) 
             {Math.max(1, Math.round(activeSkip.end - activeSkip.start))}s quiet
           </span>
         </button>
+      )}
+      {toast && (
+        <div key={toast.key} className={`auto-skip-toast${toast.leaving ? ' leaving' : ''}`}>
+          <span className="skip-ahead-icon" aria-hidden="true">⏭</span> {toast.message}
+        </div>
+      )}
+      {skipWindows.length > 0 && (
+        <label className="auto-skip-toggle">
+          <input
+            type="checkbox"
+            checked={autoSkip}
+            onChange={(e) => {
+              setAutoSkip(e.target.checked)
+              setActiveSkip(null)
+            }}
+          />
+          Auto-skip quiet stretches
+        </label>
       )}
     </div>
   )

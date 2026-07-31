@@ -148,6 +148,55 @@ button.pill {
   }
 }
 
+/* Auto-skip toast: deliberately smaller/quieter than the skip-ahead
+   button above -- it's informational, not clickable, and only needs to
+   register as "that's why the video just jumped," not draw the eye. */
+.auto-skip-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 68px; /* clears the native <video> controls bar, same as the button */
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.85);
+  color: white;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  animation: skip-ahead-in 0.15s ease;
+}
+
+.auto-skip-toast .skip-ahead-icon {
+  font-size: 14px;
+}
+
+.auto-skip-toast.leaving {
+  opacity: 0;
+  transform: translateX(-50%) translateY(6px);
+}
+
+.auto-skip-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  width: fit-content;
+}
+
+.auto-skip-toggle input {
+  cursor: pointer;
+}
+
 /* ---------- layout / surfaces ---------- */
 
 .app-layout {
