@@ -9,8 +9,15 @@ regenerated from the current kept set — video files are never mutated.
 
 Timestamps are stored both as "HH:MM:SS.mmm" strings (the spec format,
 human-readable) and as float seconds (lossless for tooling). The `origin`
-field records how an entry came to be ("detected" / "gap"); a future
-manual-cut feature can add its own origin without schema changes.
+field records how an entry came to be: "detected" (kept), "gap" (cut,
+never flagged as action), or "hard_cut" (cut, real content that a
+kept segment's own quiet stretch was destructively trimmed from -- see
+pipeline.segments.HardCutConfig). A "hard_cut" entry is restorable
+through the Edit Log exactly like a "gap" one (same untouched source,
+same set_status()/re-export flow) but flagged more prominently there,
+since it's the higher-risk kind: unlike an ordinary "gap" (motion never
+crossed the enter threshold at all), a "hard_cut" span sat inside
+content the pipeline already confirmed was worth keeping.
 
 Every "kept" entry also carries `skip_suggestions`: a list of
 {"start_s", "end_s"} spans (source-file-local, same timeline as the
@@ -68,22 +75,29 @@ def parse_ts(ts: str) -> float:
     return int(h) * 3600 + int(m) * 60 + float(s)
 
 
-def _spans_with_gaps(kept_segments, duration):
+def _overlaps_any(a, b, windows) -> bool:
+    return any(a <= wb and b >= wa for wa, wb in windows)
+
+
+def _spans_with_gaps(kept_segments, duration, hard_cut_windows=None):
+    hard_cut_windows = hard_cut_windows or []
     spans = []
     cursor = 0.0
     for a, b in sorted(kept_segments):
         a, b = max(0.0, float(a)), min(float(duration), float(b))
         if a > cursor:
-            spans.append((cursor, a, "cut"))
-        spans.append((a, b, "kept"))
+            origin = "hard_cut" if _overlaps_any(cursor, a, hard_cut_windows) else "gap"
+            spans.append((cursor, a, "cut", origin))
+        spans.append((a, b, "kept", "detected"))
         cursor = b
     if cursor < duration:
-        spans.append((cursor, float(duration), "cut"))
+        origin = "hard_cut" if _overlaps_any(cursor, duration, hard_cut_windows) else "gap"
+        spans.append((cursor, float(duration), "cut", origin))
     return spans
 
 
 def build_manifest(source_file: str, duration: float, kept_segments,
-                   score_fn=None, skip_fn=None) -> dict:
+                   score_fn=None, skip_fn=None, hard_cut_windows=None) -> dict:
     """Build a single-file manifest from final kept segments. Gaps become
     cut entries. For multiple files, use build_multi_file_manifest.
 
@@ -97,9 +111,16 @@ def build_manifest(source_file: str, duration: float, kept_segments,
     called for gap/cut spans (nothing plays there to skip within).
     Defaults to [] if not given -- purely additive, existing callers and
     manifests are unaffected.
+
+    hard_cut_windows, optional: (start_s, end_s) spans (see
+    pipeline.segments.apply_hard_cuts' second return value) marking
+    which cut spans are real destructive trims rather than ordinary
+    never-flagged dead time -- purely a labeling input, origin="gap"
+    everywhere if omitted, existing callers unaffected.
     """
     segments = _segments_for_file(source_file, 0, duration, kept_segments,
-                                  score_fn, skip_fn, start_id=1)
+                                  score_fn, skip_fn, start_id=1,
+                                  hard_cut_windows=hard_cut_windows)
     return {
         "version": MANIFEST_VERSION,
         "source_files": [source_file],
@@ -109,10 +130,12 @@ def build_manifest(source_file: str, duration: float, kept_segments,
 
 
 def _segments_for_file(source_file, source_file_index, duration,
-                       kept_segments, score_fn, skip_fn, start_id):
+                       kept_segments, score_fn, skip_fn, start_id,
+                       hard_cut_windows=None):
     segments = []
-    for i, (a, b, status) in enumerate(
-            _spans_with_gaps(kept_segments, duration), start=start_id):
+    for i, (a, b, status, origin) in enumerate(
+            _spans_with_gaps(kept_segments, duration, hard_cut_windows),
+            start=start_id):
         if score_fn is not None:
             score = round(float(score_fn(a, b)), 3)
         else:
@@ -130,7 +153,7 @@ def _segments_for_file(source_file, source_file_index, duration,
             "start_s": round(a, 3), "end_s": round(b, 3),
             "detection_score": score,
             "status": status,
-            "origin": "detected" if status == "kept" else "gap",
+            "origin": origin,
             "skip_suggestions": skip_suggestions,
         })
     return segments
@@ -145,7 +168,8 @@ def build_multi_file_manifest(files) -> dict:
     resolved any ambiguity first):
         {"source_file": str, "duration": float, "kept_segments": [...],
          "score_fn": callable or None (optional),
-         "skip_fn": callable or None (optional)}
+         "skip_fn": callable or None (optional),
+         "hard_cut_windows": [...] or None (optional)}
 
     Each file's segments are local to that file (see module docstring);
     `source_file_index` is each file's position in this list, which also
@@ -157,7 +181,8 @@ def build_multi_file_manifest(files) -> dict:
     for idx, f in enumerate(files):
         file_segments = _segments_for_file(
             f["source_file"], idx, f["duration"], f["kept_segments"],
-            f.get("score_fn"), f.get("skip_fn"), start_id=next_id)
+            f.get("score_fn"), f.get("skip_fn"), start_id=next_id,
+            hard_cut_windows=f.get("hard_cut_windows"))
         segments.extend(file_segments)
         next_id += len(file_segments)
     return {

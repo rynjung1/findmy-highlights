@@ -1,5 +1,7 @@
 """The core single-file detection pipeline: motion -> veto -> play
-extension -> padding. Shared by scripts/detect.py (one file) and
+extension -> padding -> real hard cuts of quiet stretches (see
+pipeline/segments.py's HardCutConfig). Shared by scripts/detect.py
+(one file) and
 scripts/detect_multi.py (many files) so there is exactly one
 implementation of "process one video" — a multi-file run is this
 function called once per file, nothing more. That's also what makes the
@@ -19,7 +21,8 @@ from pipeline.fusion import (apply_veto, compute_occupancy, compute_zone_velocit
                              fuse, scale_boost_factor)
 from pipeline.motion import compute_motion
 from pipeline.refine import RefineConfig, refine_segments
-from pipeline.segments import SegmentConfig, scores_to_segments, smooth_scores
+from pipeline.segments import (SegmentConfig, apply_hard_cuts, scores_to_segments,
+                               smooth_scores)
 from pipeline.settle import SettleConfig
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +41,10 @@ def process_video(video: str, zone, motion_only: bool = False,
     reporting — the CLI scripts don't pass one, so their behavior is
     unchanged).
 
-    Returns (final_segments, vetoed, duration, motion_result).
+    Returns (final_segments, vetoed, duration, motion_result,
+    hard_cut_windows). hard_cut_windows is always [] for the
+    motion-only baseline (no real cutting happens there, it's a raw
+    diagnostic).
     """
     cache_dir = cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR
     if on_stage:
@@ -46,7 +52,7 @@ def process_video(video: str, zone, motion_only: bool = False,
     motion = compute_motion(video)
     if motion_only:
         segs = scores_to_segments(motion.times, motion.scores, SegmentConfig())
-        return segs, [], motion.duration, motion
+        return segs, [], motion.duration, motion, []
 
     if zone is None and warn is not None:
         warn(f"no calibration for {video}; plate-occupancy signals disabled")
@@ -125,4 +131,14 @@ def process_video(video: str, zone, motion_only: bool = False,
     final = refine_segments(kept, motion.times, sm, det.times, occ, fires,
                             motion.duration, RefineConfig(settle=settle_cfg),
                             zone_velocities, motion_scores=motion.scores)
-    return final, vetoed, motion.duration, motion
+    # Real, destructive hard cuts of quiet stretches inside otherwise-kept
+    # segments (see pipeline/segments.py's HardCutConfig). Deliberately
+    # the LAST step, consuming refine_segments' own final boundaries, so
+    # a hard cut can never fight extension/padding over where a segment
+    # really ends. No protected_windows here: real user uploads have no
+    # ground truth to protect anything with, so this is unconditional --
+    # accepted and recoverable via the Edit Log, not a gap to design
+    # around (see README's hard-cut writeup for the reasoning and the
+    # real numbers this shipped against).
+    final, hard_cut_windows = apply_hard_cuts(final, motion.times, motion.scores)
+    return final, vetoed, motion.duration, motion, hard_cut_windows

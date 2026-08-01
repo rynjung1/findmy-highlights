@@ -12,6 +12,9 @@
   --color-success-bg: #f0faf5;
   --color-danger: #c0263e;
   --color-danger-bg: #fdf2f4;
+  --color-warning: #9a5b00;
+  --color-warning-bg: #fef6e7;
+  --color-warning-border: #f0c675;
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -484,6 +487,12 @@ button.pill {
   border-color: rgba(22, 121, 79, 0.18);
 }
 
+.alert-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border-color: var(--color-warning-border);
+}
+
 .muted {
   color: var(--color-text-muted);
 }
@@ -600,6 +609,25 @@ button.pill {
 .entry-card.restored {
   border-color: rgba(22, 121, 79, 0.3);
   background: var(--color-success-bg);
+}
+
+/* A hard-cut entry is a real, destructive trim (see README's hard-cut
+   writeup) -- higher risk than an ordinary detected gap, so it needs to
+   actually stand out, not just be listed identically. Left border (not
+   just background) so it's still visually distinct once restored (the
+   .restored background above would otherwise fully mask it). */
+.entry-card.hard-cut {
+  border-color: var(--color-warning-border);
+  border-left: 4px solid var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.entry-card.hard-cut.restored {
+  background: var(--color-success-bg);
+}
+
+.badge-warning {
+  color: var(--color-warning);
 }
 
 /* ---------- media ---------- */

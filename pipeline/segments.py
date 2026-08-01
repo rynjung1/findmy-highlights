@@ -231,3 +231,125 @@ def find_skip_suggestions(seg_start, seg_end, motion_times, motion_scores,
     if dip_start is not None and len(t) and t[-1] - dip_start >= cfg.min_dip_s:
         suggestions.append((float(dip_start), float(t[-1])))
     return suggestions
+
+
+@dataclass
+class HardCutConfig:
+    """Converts quiet stretches inside a kept segment into REAL cuts --
+    footage is actually removed from the export. Unlike v1 of this
+    mechanism, a hard-cut segment is not treated as unrecoverable: it's
+    a manifest entry pointing at the untouched source, restorable
+    through the Edit Log exactly like any other cut, just flagged more
+    prominently there (origin="hard_cut", not "gap") since it's the
+    higher-risk kind. That recoverability is what makes shipping this
+    unconditionally in production (no ground truth exists there to
+    protect anything) an acceptable trade -- the safety net moved from
+    "never cut wrong" to "cut wrong loudly and reversibly."
+
+    Parameters, unchanged from the investigated-and-validated values:
+      - quiet_thresh (0.002) matches dynamic padding's own
+        pad_quiet_thresh, the strictest "quiet" bar this project uses
+        anywhere.
+      - merge_gap_s: dips separated by less than this merge into one
+        cut before buffering.
+      - buffer_s: each merged dip is shrunk by this much from BOTH
+        edges before being applied -- same stop-short-of-the-observed-
+        wake-point principle as dynamic padding.
+    """
+    quiet_thresh: float = 0.002
+    min_raw_dip_s: float = 0.5
+    merge_gap_s: float = 1.5
+    buffer_s: float = 0.5
+
+
+def find_cut_windows(seg_start, seg_end, motion_times, motion_scores,
+                     config: HardCutConfig | None = None):
+    """Real, destructive cut candidates within [seg_start, seg_end] --
+    NOT a suggestion; footage in the returned windows is actually
+    removed by apply_hard_cuts. Same source-file-local timeline as
+    seg_start/seg_end. Does not know about protected windows -- that
+    filtering happens in apply_hard_cuts, once, after all raw candidates
+    are found, so the merge/buffer logic here stays simple."""
+    cfg = config or HardCutConfig()
+    dips = find_skip_suggestions(
+        seg_start, seg_end, motion_times, motion_scores,
+        SkipSuggestionConfig(quiet_thresh=cfg.quiet_thresh, min_dip_s=cfg.min_raw_dip_s))
+
+    merged = []
+    for a, b in dips:
+        if merged and a - merged[-1][1] <= cfg.merge_gap_s:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b])
+
+    windows = []
+    for a, b in merged:
+        a2, b2 = a + cfg.buffer_s, b - cfg.buffer_s
+        if b2 > a2:
+            windows.append((a2, b2))
+    return windows
+
+
+def _overlaps(a_start, a_end, b_start, b_end) -> bool:
+    return a_start <= b_end and a_end >= b_start
+
+
+def apply_hard_cuts(kept_segments, motion_times, motion_scores,
+                    config: HardCutConfig | None = None,
+                    protected_windows=None):
+    """Real, destructive application of find_cut_windows: returns
+    (new_kept_segments, cut_windows_applied).
+
+    protected_windows, if given, is a list of (start, end) spans in the
+    SAME timeline as kept_segments -- any candidate cut window that
+    overlaps ANY of them AT ALL is dropped entirely (not shrunk to the
+    non-overlapping remainder; a conservative all-or-nothing exclusion,
+    same as pipeline.fusion.vetoed_overlapping_required's own overlap
+    check). This is the actual exclusion mechanism: earlier versions of
+    this function took no such parameter, so nothing was ever filtered
+    anywhere -- including in scripts/regression.py, which is why the
+    "required-window exclusion" failed to protect anything in the first
+    real implementation: the filtering step this docstring describes
+    simply didn't exist yet. Real user uploads have no ground truth to
+    pass here, so production calls this with protected_windows=None
+    (unconditional) -- see HardCutConfig's docstring for why that's now
+    an accepted, recoverable risk rather than something to design
+    around."""
+    protected = protected_windows or []
+    result = []
+    all_cuts = []
+    for seg_a, seg_b in kept_segments:
+        cuts = find_cut_windows(seg_a, seg_b, motion_times, motion_scores, config)
+        cuts = [(a, b) for a, b in cuts
+               if not any(_overlaps(a, b, pa, pb) for pa, pb in protected)]
+        all_cuts.extend(cuts)
+        pieces = [(seg_a, seg_b)]
+        for ca, cb in cuts:
+            next_pieces = []
+            for pa, pb in pieces:
+                lo, hi = max(pa, ca), min(pb, cb)
+                if lo >= hi:
+                    next_pieces.append((pa, pb))
+                    continue
+                if pa < lo:
+                    next_pieces.append((pa, lo))
+                if hi < pb:
+                    next_pieces.append((hi, pb))
+            pieces = next_pieces
+        result.extend(pieces)
+    return sorted(result), sorted(all_cuts)
+
+
+def hard_cut_overlaps_required(cut_windows, required_events):
+    """Diagnostic for scripts/regression.py: return every cut window
+    that overlaps a required ground-truth event window. With a real
+    protected_windows argument passed to apply_hard_cuts (see above),
+    this should always come back empty -- if it doesn't, the exclusion
+    itself has a real bug, not just an unshipped-in-production gap."""
+    bad = []
+    for a, b in cut_windows:
+        for e in required_events:
+            ws, we = e["window"]
+            if a <= we and b >= ws:
+                bad.append(((a, b), e["id"]))
+    return bad

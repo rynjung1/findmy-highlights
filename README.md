@@ -1041,9 +1041,12 @@ local timestamps happen to look adjacent.
   its real end and shows the toast, the toast self-clears after ~2.3s,
   and unchecking the toggle correctly falls back to the manual button
   with no auto-jump.
-- **Not shipped: converting skip-ahead's manual suggestion windows into
-  real hard cuts — investigated and closed as a structural dead end, the
-  same category as the ambient-discount finding above.** Skip-ahead (the
+- **Converting skip-ahead's manual suggestion windows into real hard
+  cuts: closed twice as a structural dead end under a "must never touch
+  a required window" bar, then reopened and shipped under a changed one
+  ("cut aggressively, make mistakes fast and obvious to fix") — see the
+  full arc below, including a real root-cause bug found in the second
+  closure's own exclusion mechanism before it shipped.** Skip-ahead (the
   manual, non-destructive "skip a quiet stretch inside a kept segment"
   player button) deliberately uses a looser quiet detection than anything
   used for real cutting, since a wrong suggestion only costs a dismissable
@@ -1124,11 +1127,75 @@ local timestamps happen to look adjacent.
   `clip_base3` during the same investigation (a different, non-shipped
   parameter variant): a candidate cut window sat squarely on a real
   swing/contact at ~12.0s, frame-verified (bat mid-swing, runner
-  starting to sprint), not a coarse-window false alarm. This closes the
-  hard-cut idea a second time, on firmer evidence than the first pass —
-  not worth a third attempt without the same genuinely different,
-  context-aware signal the ambient-discount and Tier 2 audio dead ends
-  already concluded is what's actually needed here.
+  starting to sprint), not a coarse-window false alarm.
+
+  **REOPENED AND SHIPPED, later the same night, on a changed premise:
+  hard-cut segments are just manifest entries pointing at the untouched
+  source, restorable through the Edit Log exactly like any other cut.**
+  Everything above stayed true right up until this point — the mechanism
+  really did touch required-event windows on 4 of 9 clips — but "must
+  never touch a required window" was the wrong bar once recoverability
+  is on the table; "cut aggressively, make a wrong cut fast and obvious
+  to catch and fix" is a different, achievable one.
+
+  **The real root cause of the earlier failure, found before shipping
+  anything.** It wasn't a logic bug in `hard_cut_overlaps_required` — it
+  never had a logic bug, because it never filtered anything: it only
+  checked already-applied cuts against required windows *after the
+  fact*, purely to fail the regression build. The exclusion that made
+  the original scratch simulation clean (9/9, dropping any candidate
+  overlapping a required window *before* cutting) was never ported into
+  `apply_hard_cuts` at all — production code never took a
+  protected-windows argument, and neither did `scripts/regression.py`'s
+  own mirror of it, so both ran the unconditional version and correctly
+  reproduced its real failures. The fix: `apply_hard_cuts` now takes a
+  real `protected_windows` parameter that drops any candidate window
+  overlapping a protected one (conservative, all-or-nothing, same
+  overlap check `vetoed_overlapping_required` already uses) *before*
+  cutting, not after. `scripts/regression.py` passes this script's own
+  real required-event windows — ground truth exists there — and
+  re-running confirmed the exclusion is now genuinely correct: **9/9
+  clean, zero exclusion bugs**, with the identical real numbers the
+  scratch simulation predicted (19.67 of 600.90s excluded-benefit,
+  29.08 of 600.90s unconditional-benefit, across all 9 clips) — this
+  round wasn't a re-derivation, it was confirmation that real code now
+  matches what was already validated.
+
+  **What actually ships:** production calls `apply_hard_cuts` with no
+  protected windows at all (real user uploads have no ground truth to
+  protect anything with) — the unconditional version, same four
+  parameters (`quiet_thresh=0.002`, `merge_gap_s=1.5`, `buffer_s=0.5`),
+  applied as the new default in `pipeline.run.process_video`'s final
+  step. `scripts/regression.py`'s ship gate changed to match: failures
+  1-4 (recall, veto overlap, motion-only-vs-fused, `check_continuity`,
+  all measured *before* hard-cutting) stay exactly as strict as before —
+  hard-cut isn't given a pass on breaking anything upstream of it. The
+  one new hard failure is that the *exclusion mechanism itself* must be
+  bug-free when given real protected windows; a required-event touch
+  from the *unconditional* (production) version is no longer a failure,
+  just reported per clip ("accepted risk, restorable via Edit Log").
+
+  **The other real half of this: hard-cut entries are now visually
+  distinct in the Edit Log, not listed identically to an ordinary
+  never-flagged gap.** A new manifest `origin` value, `"hard_cut"`
+  (alongside the existing `"detected"`/`"gap"`), set once at build time
+  from `apply_hard_cuts`' second return value (which cut windows were
+  actually applied) threaded through `pipeline.manifest.build_manifest`/
+  `build_multi_file_manifest` and every caller
+  (`scripts/detect.py`/`detect_multi.py`, `backend/pipeline_runner.py`).
+  In the Edit Log, `hard_cut` entries sort first, get a left-bordered
+  amber card and a "⚠ Auto-cut mid-play — review recommended" badge that
+  survives restoration (shown alongside the green "Restored" badge, so
+  a reviewer can still see what kind of entry they just fixed), and a
+  summary banner counts how many still need review. Verified against a
+  real batch through the actual running app, not just unit tests: a
+  fresh `clip_300` upload processed end to end produced 5 real
+  `hard_cut` entries (including the exact `[95.595,97.202]` window
+  overlapping `e6` found throughout this investigation), rendered
+  correctly in a real headless-browser pass — banner count accurate,
+  cards sorted and styled correctly, and clicking Restore on one
+  correctly re-exported and flipped it to the restored-but-still-flagged
+  state, zero console errors.
 - **Fixed: `ProcessingStep` could poll for a detect job before it
   existed, logging a real (if harmless) 404.** `App.jsx`'s
   `handleCalibrated` called `setStage('processing')` — which mounts

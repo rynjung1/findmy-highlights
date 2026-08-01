@@ -57,7 +57,7 @@ def post_process(client, batch_id, **body_overrides):
 
 
 def fake_process_video_factory(segments_by_file=None, default_segments=((1.0, 3.0),),
-                               calls=None):
+                               calls=None, hard_cut_windows_by_file=None):
     """Builds a fake replacing pipeline_runner.process_video: instant, no
     real video I/O or model inference, but it still calls on_stage (so
     job stage transitions are exercised) and still does the real
@@ -65,7 +65,10 @@ def fake_process_video_factory(segments_by_file=None, default_segments=((1.0, 3.
     that care whether calibration actually reached this call can tell —
     a fake that silently drops the zone argument would make a broken
     calibration wiring pass its test by accident. `calls`, if given, is
-    a list this appends (filename, zone) to for direct inspection."""
+    a list this appends (filename, zone) to for direct inspection.
+    `hard_cut_windows_by_file`, if given, lets a test simulate a real
+    hard cut having happened inside a kept segment (default: none, same
+    as a clip with nothing to hard-cut)."""
     class FakeMotion:
         times = __import__("numpy").array([0.0, 1.0, 2.0, 3.0, 4.0])
         scores = __import__("numpy").array([0.0, 1.0, 1.0, 1.0, 0.0])
@@ -81,7 +84,8 @@ def fake_process_video_factory(segments_by_file=None, default_segments=((1.0, 3.
         if zone is None and warn is not None:
             warn(f"no calibration for {path}; plate-occupancy signals disabled")
         segs = (segments_by_file or {}).get(Path(path).name, default_segments)
-        return list(segs), [], 5.0, FakeMotion()
+        hard_cuts = (hard_cut_windows_by_file or {}).get(Path(path).name, [])
+        return list(segs), [], 5.0, FakeMotion(), list(hard_cuts)
     return fake
 
 
@@ -620,6 +624,40 @@ def test_process_single_file_completes_with_manifest(tmp_path):
         m = client.get(f"/batches/{batch_id}/manifest")
         assert m.status_code == 200
         assert any(s["status"] == "kept" for s in m.json()["segments"])
+
+
+def test_hard_cut_windows_from_process_video_reach_the_manifest_as_origin(
+        tmp_path, monkeypatch):
+    """Wiring test: process_video's new 5th return value (hard_cut_windows)
+    must actually reach build_manifest, so a real hard-cut shows up as
+    origin="hard_cut" in the manifest the Edit Log reads -- not silently
+    dropped anywhere along backend/pipeline_runner.py's path."""
+    # default_segments=(2.0, 8.0) with a hard cut at (4.0, 5.0) inside it --
+    # after real hard-cutting this would be two kept pieces around a
+    # hard_cut gap, but the fake here supplies the ALREADY-cut segments
+    # (matching what real process_video would return: hard-cutting is
+    # pipeline/run.py's own last step, already applied before this
+    # function's caller ever sees the segment list) plus the window that
+    # was cut, exactly like the real return contract.
+    monkeypatch.setattr(pipeline_runner, "process_video",
+                        fake_process_video_factory(
+                            default_segments=((2.0, 4.0), (5.0, 8.0)),
+                            hard_cut_windows_by_file={"clip.mkv": [(4.0, 5.0)]}))
+
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = post_process(client, batch_id)
+        assert r.status_code == 200
+
+        m = client.get(f"/batches/{batch_id}/manifest").json()
+        hard_cut_seg = next(
+            (s for s in m["segments"] if s["origin"] == "hard_cut"), None)
+        assert hard_cut_seg is not None, (
+            f"no hard_cut-origin segment in manifest: {m['segments']}")
+        assert hard_cut_seg["start_s"] == pytest.approx(4.0)
+        assert hard_cut_seg["end_s"] == pytest.approx(5.0)
+        assert hard_cut_seg["status"] == "cut"
 
 
 def test_process_triggered_twice_on_same_batch_409(tmp_path):

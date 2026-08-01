@@ -7,6 +7,17 @@ pipeline (motion -> veto -> play extension via at-bat boundaries -> padding):
   - capture of borderline (non-required) events — informational.
   - over-inclusion (flagged seconds / clip seconds).
 
+It also reports, but does NOT gate on, the impact of real hard cuts (see
+pipeline/segments.py's HardCutConfig) applied UNCONDITIONALLY on top of
+the refined pipeline -- this is what production actually ships, since
+real user uploads have no ground truth to protect anything with. A hard
+cut touching a required event is now an accepted, recoverable risk (the
+Edit Log restores it exactly like any other cut, just flagged more
+prominently there), not a reason to fail the build. What the build DOES
+gate on is failure 5 below: that the exclusion mechanism itself is
+correctly implemented, checked directly using this script's own real
+ground truth as protected_windows.
+
 Hard FAILURE conditions (exit 1):
   1. Fused pipeline misses any required event.
   2. Fused recall is lower than motion-only recall on any clip (the fused
@@ -16,13 +27,23 @@ Hard FAILURE conditions (exit 1):
      the no-person-near-motion veto; a distant/occluded fielder must never
      silently erase a real play).
   4. An event marked "check_continuity" is not FULLY covered by a single
-     contiguous span of kept segments (these are the defensive-play windows
-     Stage 3's play-extension depends on: any internal coverage gap means
-     the play would be visibly chopped). The raw fused score is allowed to
-     dip below the exit threshold inside the window — a batter frozen
-     mid-stance pre-pitch legitimately produces near-zero motion, and
-     hysteresis + merging is the mechanism that bridges it — but the dip
-     depth/duration is printed for review.
+     contiguous span of kept (PRE-hard-cut) segments (these are the
+     defensive-play windows Stage 3's play-extension depends on: any
+     internal coverage gap means the play would be visibly chopped). The
+     raw fused score is allowed to dip below the exit threshold inside
+     the window — a batter frozen mid-stance pre-pitch legitimately
+     produces near-zero motion, and hysteresis + merging is the
+     mechanism that bridges it — but the dip depth/duration is printed
+     for review. Deliberately measured BEFORE hard-cutting: this checks
+     the extension/padding machinery itself, a different concern from
+     hard-cut's own accepted risk below.
+  5. The hard-cut EXCLUSION mechanism is broken: given this script's own
+     real required-event windows as protected_windows, any resulting cut
+     window still overlaps a required event. Since set-subtraction
+     against a real, correct list of windows to protect is what
+     "exclusion" means, this failing indicates an actual bug in
+     apply_hard_cuts' filtering, not an accepted risk -- unlike the
+     unconditional/production numbers reported (not gated) below.
 
 Usage:
     python scripts/regression.py [--clips-dir reference_clips] [--motion-only]
@@ -38,8 +59,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.motion import compute_motion
-from pipeline.segments import (SegmentConfig, scores_to_segments, smooth_scores,
-                               segment_covers, total_duration)
+from pipeline.segments import (SegmentConfig, apply_hard_cuts,
+                               hard_cut_overlaps_required, scores_to_segments,
+                               smooth_scores, segment_covers, total_duration)
 from pipeline.fusion import (FusionConfig, apply_veto, fuse, scale_boost_factor,
                              vetoed_overlapping_required, PlateZone)
 
@@ -80,6 +102,7 @@ def main() -> None:
 
     seg_cfg = SegmentConfig()
     failures = []
+    grand_kept_before = grand_kept_unconditional = grand_kept_excluded = 0.0
 
     for tf in sorted(GROUND_TRUTH_DIR.glob("*.json")):
         truth = json.loads(tf.read_text())
@@ -209,7 +232,67 @@ def main() -> None:
                     f"{truth['clip']}: {e['id']} window not contiguously "
                     f"covered by kept segments")
 
+        # Real hard cuts -- mirrors pipeline.run.process_video's own final
+        # step (kept in sync deliberately). Two runs against the SAME
+        # pre-hard-cut `kept`: unconditional (what production actually
+        # ships -- no ground truth there to protect anything with) and
+        # excluded (this script's real required-event windows passed as
+        # protected_windows -- validates the exclusion MECHANISM itself,
+        # see failure 5 below).
+        kept_before_hardcut = kept
+        kept_unconditional, cuts_unconditional = apply_hard_cuts(
+            kept_before_hardcut, motion.times, motion.scores)
+        required_windows = [e["window"] for e in required]
+        kept_excluded, cuts_excluded = apply_hard_cuts(
+            kept_before_hardcut, motion.times, motion.scores,
+            protected_windows=required_windows)
+
+        before_total = total_duration(kept_before_hardcut)
+        uncond_total = total_duration(kept_unconditional)
+        excl_total = total_duration(kept_excluded)
+        grand_kept_before += before_total
+        grand_kept_unconditional += uncond_total
+        grand_kept_excluded += excl_total
+
+        print(f"    hard-cut (unconditional, SHIPS to production): "
+             f"{len(cuts_unconditional)} window(s), "
+             f"-{before_total - uncond_total:.2f}s from refined kept time")
+        touched_uncond = hard_cut_overlaps_required(cuts_unconditional, required)
+        for (a, b), eid in touched_uncond:
+            print(f"      touches required {eid}: hard-cut window "
+                 f"({a:.2f},{b:.2f}) -- accepted risk, restorable via Edit Log")
+        missed_uncond = [e for e in required
+                        if not segment_covers(kept_unconditional, e["window"])]
+        for e in missed_uncond:
+            print(f"      RECALL DROP under unconditional hard-cut: "
+                 f"{e['id']} {e['type']} window={e['window']} -- "
+                 f"accepted risk, restorable via Edit Log")
+
+        print(f"    hard-cut (excluded, validates the mechanism): "
+             f"{len(cuts_excluded)} window(s), "
+             f"-{before_total - excl_total:.2f}s from refined kept time")
+        # failure 5: the exclusion mechanism itself must be correct --
+        # see module docstring for why this is the real ship gate now,
+        # not "the unconditional version never touches a required window"
+        bad_excluded = hard_cut_overlaps_required(cuts_excluded, required)
+        for (a, b), eid in bad_excluded:
+            failures.append(f"{truth['clip']}: EXCLUSION BUG -- hard-cut "
+                            f"window ({a:.2f},{b:.2f}) overlaps required "
+                            f"{eid} even with protected_windows set")
+
     print()
+    if not args.motion_only and grand_kept_before > 0:
+        print(f"hard-cut totals across all clips:")
+        print(f"  kept before hard-cut:         {grand_kept_before:.2f}s")
+        print(f"  kept after (unconditional):   {grand_kept_unconditional:.2f}s "
+             f"(-{grand_kept_before - grand_kept_unconditional:.2f}s, "
+             f"{100 * (grand_kept_before - grand_kept_unconditional) / grand_kept_before:.1f}% "
+             f"of kept time -- what production ships)")
+        print(f"  kept after (excluded):        {grand_kept_excluded:.2f}s "
+             f"(-{grand_kept_before - grand_kept_excluded:.2f}s, "
+             f"{100 * (grand_kept_before - grand_kept_excluded) / grand_kept_before:.1f}% "
+             f"of kept time -- validates the exclusion mechanism)")
+        print()
     if failures:
         for f in failures:
             print(f"FAIL: {f}")

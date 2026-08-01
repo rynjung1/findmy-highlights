@@ -4,14 +4,19 @@ import SkippableVideo from './SkippableVideo'
 
 const EXPORT_POLL_MS = 1000
 
-// Only segments with origin "gap" were ever cut by detection (see
-// pipeline/manifest.py: origin is set once at build time and never
+// Segments with origin "gap" or "hard_cut" were ever cut by detection
+// (see pipeline/manifest.py: origin is set once at build time and never
 // changes, independent of status, which restore/un-restore does flip)
 // -- so this is the exact, permanent "was this ever a cut candidate"
 // marker the spec's "every segment that was cut" listing needs,
-// regardless of whether it's since been restored.
+// regardless of whether it's since been restored. "hard_cut" specifically
+// means real content was destructively trimmed from inside an
+// otherwise-kept segment (see README's hard-cut writeup) -- higher risk
+// than an ordinary "gap" (motion that never crossed the enter threshold
+// at all), which is why it gets its own origin value and its own
+// prominent treatment below rather than being listed identically.
 function isEditLogEntry(seg) {
-  return seg.origin === 'gap'
+  return seg.origin === 'gap' || seg.origin === 'hard_cut'
 }
 
 export default function EditLogView({ batchId }) {
@@ -164,7 +169,16 @@ export default function EditLogView({ batchId }) {
     )
   }
 
-  const cutEntries = manifest.segments.filter(isEditLogEntry)
+  // Hard-cut entries surface first -- they're the higher-risk kind (real
+  // content trimmed from inside an otherwise-kept segment, not just
+  // ordinary never-flagged dead time) and are the actual safety net for
+  // the hard-cut mechanism now: fast, visible, easy to review and
+  // restore, not "must never happen" (see README's hard-cut writeup).
+  const cutEntries = manifest.segments
+    .filter(isEditLogEntry)
+    .sort((a, b) => (a.origin === 'hard_cut' ? 0 : 1) - (b.origin === 'hard_cut' ? 0 : 1))
+  const unreviewedHardCuts = cutEntries.filter(
+    (s) => s.origin === 'hard_cut' && s.status === 'cut')
 
   return (
     <div className="card">
@@ -197,6 +211,14 @@ export default function EditLogView({ batchId }) {
       </div>
 
       {error && <p className="alert alert-danger">{error}</p>}
+      {unreviewedHardCuts.length > 0 && (
+        <p className="alert alert-warning">
+          ⚠ {unreviewedHardCuts.length} segment{unreviewedHardCuts.length === 1 ? '' : 's'}{' '}
+          {unreviewedHardCuts.length === 1 ? 'was' : 'were'} automatically cut out of the
+          middle of live action, not just detected as dead time -- listed first below.
+          Preview and restore any that removed something real.
+        </p>
+      )}
       {cutEntries.length === 0 ? (
         <p className="muted">Detection didn't cut anything from this video -- nothing to review here.</p>
       ) : (
@@ -204,14 +226,23 @@ export default function EditLogView({ batchId }) {
           {cutEntries.map((seg) => {
             const restored = seg.status === 'kept'
             const isPending = pendingId === seg.id
+            const isHardCut = seg.origin === 'hard_cut'
             return (
-              <li key={seg.id} className={`entry-card${restored ? ' restored' : ''}`}>
+              <li
+                key={seg.id}
+                className={`entry-card${isHardCut ? ' hard-cut' : ''}${restored ? ' restored' : ''}`}
+              >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                   <div>
                     <strong>
                       {seg.start} - {seg.end}
                     </strong>
                     <span className="muted" style={{ marginLeft: 10 }}>{seg.source_file}</span>
+                    {isHardCut && (
+                      <span className="badge badge-warning" style={{ marginLeft: 10 }}>
+                        ⚠ Auto-cut mid-play — review recommended
+                      </span>
+                    )}
                     {restored && (
                       <span className="badge badge-success" style={{ marginLeft: 10 }}>
                         Restored
