@@ -193,6 +193,116 @@ font and consistent design tokens in place of generic gradients and pill
 buttons, a custom-styled file picker, and an intro panel next to the
 upload dropzone so the initial screen isn't just an empty card.
 
+**Review/training queue, Tier 1 (data collection + UI only — Tiers 2/3
+deliberately not built).** Surfaces the pipeline's own most-borderline
+real decisions for a human to label Downtime vs. Real action after the
+fact, so future threshold-tuning and (eventually, if the label count
+ever justifies it) a learned classifier have real ground truth to check
+against instead of just the 9 hand-annotated reference clips.
+
+Two candidate types, generated at the end of a real `process_video()`
+run: **hard-cut dips** (a real window `apply_hard_cuts` shipped — margin
+combines how far its peak motion score sits below `quiet_thresh` and how
+far its own duration sits above the minimum raw dip length, the smaller
+of the two governing, same "weakest margin wins" pattern dynamic padding
+already uses) and **segment boundary crossings** (a raw ENTER/EXIT
+hysteresis crossing from the pre-extension segmentation — margin =
+`|score - threshold|` at that exact sample, via a new
+`pipeline.segments.find_boundary_crossings`, kept as a separate function
+rather than changing `scores_to_segments`' own return shape, which every
+existing caller already relies on). Selection keeps the
+`max_candidates_per_video` (default 5) lowest-margin candidates across
+both types, plus — with probability `control_sample_rate` (default 0.1)
+per video, not per candidate, since a control sample's job is occasional
+calibration, not scaling with how borderline a given video happened to
+be — one random window well inside a clearly-kept segment or a clearly-
+cut ordinary gap (never inside a hard-cut window), so the label store
+isn't composed entirely of edge cases.
+
+**Opt-in by design, off unless explicitly turned on twice over.**
+`pipeline.run.process_video`'s `training_data_dir` param defaults to
+`None`; `scripts/regression.py` never passes it, so its many repeated
+runs against the same 9 reference clips can't flood the label store.
+The real product path (`backend/app.py`) reads it from an environment
+variable, `FMH_TRAINING_DATA_DIR` — not a hardcoded real path — for a
+reason specific to this project: `scripts/smoke_api.py` drives the real
+backend over HTTP, indistinguishable at the API layer from a genuine
+user upload, so a hardcoded default would have meant every dev running
+the smoke test against their own local server silently contributed
+synthetic clip_60.mkv records to the label store. An env-var opt-in
+means nobody, including a developer poking at their own dev server,
+collects training data by accident — a real deployment that wants this
+has to choose it explicitly.
+
+**Storage matches this project's own established per-file convention**
+(same pattern as `.cache/detections/<hash>.json`): one self-contained
+`training_data/reviews/<id>.mp4` clip (full-frame, never cropped, window
+padded ~1.5s each side, decoded and re-encoded rather than stream-copied
+so a short arbitrary window is frame-accurate regardless of the source's
+own keyframe placement) plus a `training_data/reviews/<id>.json` record
+(id, created_at, source, window, candidate_type, pipeline_decision,
+`features_at_label_time`, a `config_hash` of the exact threshold values
+these candidates were generated under — so labels from before and after
+a future threshold-tuning pass can be told apart honestly instead of
+silently pooled — and `label`/`labeled_at`/`note`, all null until
+answered). `*.mp4` was already globally gitignored (bulky, personal
+footage); `*.json` metadata stays tracked, no `.gitignore` change
+needed.
+
+**Backend** adds three endpoints guarded by an id allowlist regex
+(`^[a-z0-9_]+$`, matching every id this project ever actually generates)
+rather than a blocklist, the same reasoning the source-file endpoint's
+own filename check already documents: `GET /review/next` (lowest-margin
+unlabeled record first, control samples — `margin: null` — sorting
+last), `GET /review/{id}/clip` (serves the self-contained clip), and
+`POST /review/{id}/label` (writes the answer, returns the next pending
+item so the frontend can label one after another without an extra round
+trip). An empty queue is a normal `200 {"done": true}` on both read
+endpoints, not an error — the review queue being empty isn't a failure
+state. `backend/pipeline_runner.py` threads `training_data_dir` through
+to every real detect job and tags each record's `source` with the real
+`batch_id`, so a labeled record can always be traced back to the batch
+it came from.
+
+**Frontend**: `ReviewQueueView.jsx`, a new top-level nav entry alongside
+Home/Edit Log (global, not scoped to any batch). Plays the clip, shows
+candidate type / pipeline decision / margin as badges, two buttons
+(Downtime / Real action) that post the label and load whatever the
+server returns next. Verified with a real, driven browser session (not
+just unit tests): seeded a scratch `training_data/reviews/` with three
+real ffmpeg-generated clips + matching JSON records (one of each
+candidate type), ran the real backend with `FMH_TRAINING_DATA_DIR` set
+and the real Vite dev server, and drove it with Playwright — confirmed
+correct lowest-margin-first ordering, the control sample correctly
+sorting last, each label click advancing to the next item, the final
+click correctly reaching the empty state, and zero browser console
+errors. **This caught a real bug before it shipped**: `frontend/vite.config.js`'s
+dev-server proxy only forwarded `/batches/*` to the backend — `/review/*`
+requests were silently served the SPA's own `index.html` instead (visible
+in the browser as `"Unexpected token '<'... is not valid JSON"`), exactly
+the kind of failure `npm run dev` plus a real click-through catches and
+a unit test suite structurally cannot, since every backend test talks to
+the FastAPI app directly, never through Vite's proxy. Fixed by adding
+`/review` to the proxy map alongside `/batches`.
+
+**Usage (Tier 1 only): `scripts/review_stats.py`** reports disagreement
+rate — how often a human's label disagreed with the pipeline's own
+claim at that instant (`cut`/`exit` claim "downtime", `kept`/`enter`
+claim "real action") — per candidate type and per decision within each
+type, with an explicit low-sample-size warning under 20 labels. Verified
+against the real records the Playwright session above produced and
+labeled: correctly reported 2 of 3 disagreements (the `enter` and `cut`
+labels were deliberately mislabeled during that click-through to prove
+the arithmetic, the `kept` one deliberately agreed), matching hand
+verification exactly. **Tiers 2 (threshold calibration via a
+precision/recall sweep) and 3 (a learned classifier) are deliberately
+not built** — per this project's own honest-threshold standard, Tier 3
+specifically needs 300-500 labeled events across 6-10 distinct recording
+sessions, evaluated against the 9 reference clips as a fixed held-out
+check, before a learned classifier is a better bet than the current
+hand-tuned thresholds; nowhere close to what a first review session
+produces.
+
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
   validated against real footage the user supplied directly (not
@@ -206,6 +316,11 @@ Open items:
   to test against yet — see Zone-velocity tightening above.
 - The walk-up gap's larger raw-segment-level piece is deliberately not
   started — see Zone-velocity tightening above.
+- Review/training queue Tiers 2 (threshold calibration) and 3 (a learned
+  classifier) are deliberately not started — see Review/training queue
+  above for the label-count bar Tier 3 needs before it's even worth
+  attempting. Veto-boundary candidates (a third candidate type named in
+  the original design) are also deferred, not built in Tier 1.
 
 Notes for whoever picks this up next:
 - **The priority rule governs every threshold in this codebase**: never
@@ -374,6 +489,15 @@ Built so far:
   would reveal any leaked "still extending" or "already fired" flag) and
   confirms neither call's result depends on having seen the other, or on
   which one ran first.
+- **Review/training queue** (`pipeline/review.py`) — Tier 1 candidate
+  generation, called from `process_video()`'s last step only when the
+  caller opts in with a real `training_data_dir` (default `None`/off —
+  see Current Status above for why, and for the full margin/selection/
+  storage design). Pure logic plus one ffmpeg clip-extraction call per
+  selected candidate, injectable (`clip_runner`) the same way
+  `pipeline.stitch` injects its own `runner`, so it's fully testable
+  without real video I/O; `scripts/review_stats.py` is the Tier 1
+  disagreement-rate report over whatever's been labeled so far.
 - **CLI** (`scripts/detect.py` for one file, `scripts/detect_multi.py` for
   several) — print candidate segments as timestamps (or JSON with
   `--json` for the single-file CLI), and `--manifest PATH` to write a
@@ -681,6 +805,19 @@ Then open `http://localhost:5173` in a browser (not `127.0.0.1` — see the
 note in Known limitations about Vite's dev-server binding). Upload a
 video, click home plate on the preview frame, and it'll walk through
 processing to a finished, downloadable highlight video.
+
+To also collect Review Queue candidates from real detect jobs, set
+`FMH_TRAINING_DATA_DIR` before starting the backend (off by default —
+see Current Status's Review/training queue writeup for why this is an
+explicit opt-in, not a default):
+
+```sh
+FMH_TRAINING_DATA_DIR=training_data ./venv/bin/uvicorn backend.app:app --reload --port 8420
+```
+
+Then the sidebar's "Review Queue" tab has borderline clips to label, and
+`./venv/bin/python scripts/review_stats.py` reports disagreement rates
+over whatever's been labeled so far.
 
 **Backend alone**, for poking at the API directly or before the frontend
 existed:
@@ -1196,6 +1333,85 @@ local timestamps happen to look adjacent.
   cards sorted and styled correctly, and clicking Restore on one
   correctly re-exported and flipped it to the restored-but-still-flagged
   state, zero console errors.
+- **CORRECTNESS BUG, FIXED: hard-cut had never actually cut anything from
+  the real output — `pipeline/stitch.py`'s duplicate-frame-avoidance merge
+  silently re-bridged every hard-cut gap it produced.** Found while
+  re-investigating the shipped hard-cut feature above: full frame-exact
+  `framemd5` comparison showed that despite the manifest correctly marking
+  every hard-cut window `status="cut", origin="hard_cut"`, the real
+  `output.mp4` still contained that footage, frame-for-frame, at exactly
+  the predicted position — on every hard cut checked.
+
+  **Root cause.** `pipeline/manifest.py`'s `kept_spans_by_file()` — the
+  function `plan_stitch()` reads to build the stitch plan — only ever
+  filtered on `status == "kept"`, discarding `origin` entirely. Every gap
+  between kept spans, ordinary or hard-cut, then flowed into
+  `merge_overlapping_spans()` (the earlier duplicate-frame fix, see above)
+  as a bare `(start_s, end_s)` tuple with no memory of *why* the gap
+  existed. That function's whole job is to bridge any gap shorter than the
+  source's own GOP, since independently stream-copying two spans that
+  close together would otherwise decode overlapping content and duplicate
+  frames on concat. Hard-cut windows are deliberately shorter than a GOP
+  by design (`HardCutConfig`: `buffer_s=0.5`, `min_raw_dip_s=0.5`) — the
+  exact gap size this merge already treated as "safe to re-join." So it
+  reliably did, on every hard cut, regardless of ground truth: the
+  manifest said `cut`, the real stitched output said otherwise.
+
+  **Fix.** `pipeline.manifest.hard_cut_boundary_starts_by_file()` (new)
+  identifies, per file, every kept span whose immediately preceding
+  manifest entry is a real hard-cut gap. `merge_overlapping_spans()` now
+  takes an optional `protected_starts` set: a protected boundary is never
+  bridged, full stop, regardless of gap length or predicted overlap risk
+  — unlike an ordinary gap, there's no safe amount of "extra kept dead
+  time" to trade for merging one away, because there's no dead time
+  there; it was already confirmed real content. When a protected boundary
+  *does* carry real keyframe-snap overlap risk (the same
+  `predicted_seek_start` check the original merge used), the span on the
+  far side of it is individually flagged `force_reencode` and extracted
+  with a real per-file decode (`SpanJob.force_reencode`/`own_target`,
+  `pipeline.stitch.run_stitch`) instead of stream copy — frame-accurate
+  `-ss`, no keyframe-snap slack — so the cut is preserved without
+  reintroducing the duplicate-frame risk the original merge existed to
+  prevent. Every other span in the same plan is untouched; this is not a
+  global re-encode. Fully backward compatible: every existing caller of
+  `merge_overlapping_spans`/`kept_spans_by_file` that never mentions hard
+  cuts sees byte-identical behavior (`protected_starts` defaults to empty).
+
+  **Verified two ways.** `scripts/regression.py`, full suite (346 tests:
+  341 unit + 5 e2e): ALL PASS, identical hard-cut numbers to before this
+  fix (600.90s kept before, 571.81s after unconditional hard-cut,
+  29.08s/4.8% excised — this fix is purely in the stitching layer, it
+  changes nothing about which windows get selected for cutting, only
+  whether they survive into the real file). Then, the same frame-exact
+  method that found the bug, run against a real clip end to end
+  (`clip_300.mkv`, real detection → real manifest → real `run_stitch`,
+  not a simulation): the pre-fix merge decision, replayed against this
+  exact real span list and real keyframes, silently erased all 5 real
+  hard-cut boundaries the run produced (collapsed 12 real kept spans down
+  to 2); the post-fix decision preserved all 5. `framemd5`-hashing the
+  real rendered output against each hard-cut window's own real source
+  content (shifted by the file's own `start_offset`, the same correction
+  `build_extract_cmd` already needed once before) found the removed
+  content genuinely absent in 4 of 5 windows — 0 of 27/72/47/13 source
+  frame hashes present in the output. The 5th showed 1 of 12: traced to
+  the *exact last frame* of a stream-copied span whose own trailing edge
+  isn't the one flagged `force_reencode` (nothing follows it that could
+  overlap) — the same already-documented, pre-existing "a stream-copied
+  span's trailing frame near its `-to` cutoff can be reordered by B-frame
+  remuxing... inflates measured duration by about one frame" artifact
+  this module's own docstring already describes, from the earlier
+  duplicate-frame investigation, not something this fix introduces or
+  that hard-cut is special-cased against elsewhere in this codebase. A
+  single ~20ms frame out of 6615 checked, categorically different from
+  the bug fixed here (silent, wholesale, every-hard-cut erasure of
+  hundreds of ms to seconds of content) — noted plainly rather than
+  smoothed over, not treated as clearing the bar for "genuinely absent."
+  New tests: `tests/test_manifest.py` (`hard_cut_boundary_starts_by_file`,
+  6 cases) and `tests/test_stitch.py` (protected-boundary merge behavior,
+  forced-reencode triggering only under real overlap risk, and an
+  end-to-end `plan_stitch`/`run_stitch` check with a fake runner
+  confirming the actual `ffmpeg` command issued for the forced span uses
+  `libx264`, not `copy`).
 - **Fixed: `ProcessingStep` could poll for a detect job before it
   existed, logging a real (if harmless) 404.** `App.jsx`'s
   `handleCalibrated` called `setStage('processing')` — which mounts

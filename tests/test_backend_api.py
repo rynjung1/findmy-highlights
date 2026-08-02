@@ -32,9 +32,10 @@ from backend.app import create_app
 from pipeline.manifest import build_manifest, save_manifest
 
 
-def make_app(tmp_path):
+def make_app(tmp_path, training_data_dir=None):
     app = create_app(uploads_root=tmp_path / "uploads",
-                     run_in_background=lambda fn, *args: fn(*args))
+                     run_in_background=lambda fn, *args: fn(*args),
+                     training_data_dir=training_data_dir)
     return app
 
 
@@ -74,7 +75,8 @@ def fake_process_video_factory(segments_by_file=None, default_segments=((1.0, 3.
         scores = __import__("numpy").array([0.0, 1.0, 1.0, 1.0, 0.0])
 
     def fake(path, zone, motion_only=False, cache_dir=None, warn=None,
-            on_stage=None):
+            on_stage=None, training_data_dir=None,
+            training_data_source_info=None):
         if calls is not None:
             calls.append((Path(path).name, zone))
         if on_stage:
@@ -1102,3 +1104,183 @@ def test_startup_sweep_marks_stale_in_progress_job_interrupted(tmp_path):
     reloaded = jobs.load_job(bdir, "detect")
     assert reloaded["status"] == "interrupted"
     assert reloaded["error"]
+
+
+# ---- Tier 1 review queue endpoints ----
+
+def write_review_record(training_data_dir, record_id, margin, label=None,
+                        candidate_type="hard_cut_dip", pipeline_decision="cut",
+                        write_clip=True):
+    reviews_dir = Path(training_data_dir) / "reviews"
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "id": record_id, "created_at": "2026-01-01T00:00:00+00:00",
+        "source": {"video_path": "v.mp4", "source_file": "v.mp4"},
+        "window": {"start_s": 1.0, "end_s": 2.0},
+        "candidate_type": candidate_type, "pipeline_decision": pipeline_decision,
+        "margin": margin, "features_at_label_time": {},
+        "config_hash": "abc123", "label": label, "labeled_at": None, "note": None,
+    }
+    (reviews_dir / f"{record_id}.json").write_text(json.dumps(record))
+    if write_clip:
+        (reviews_dir / f"{record_id}.mp4").write_bytes(b"fake clip bytes")
+    return record
+
+
+def test_review_next_disabled_when_no_training_data_dir(tmp_path):
+    app = make_app(tmp_path)  # no training_data_dir
+    with TestClient(app) as client:
+        r = client.get("/review/next")
+    assert r.status_code == 404
+
+
+def test_review_next_done_when_queue_empty(tmp_path):
+    app = make_app(tmp_path, training_data_dir=tmp_path / "training_data")
+    with TestClient(app) as client:
+        r = client.get("/review/next")
+    assert r.status_code == 200
+    assert r.json() == {"done": True}
+
+
+def test_review_next_returns_lowest_margin_first(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=5.0)
+    write_review_record(td, "hc_bbb", margin=1.0)
+    write_review_record(td, "hc_ccc", margin=3.0)
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.get("/review/next")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == "hc_bbb"
+    assert body["clip_url"] == "/review/hc_bbb/clip"
+
+
+def test_review_next_skips_already_labeled_records(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=1.0, label="downtime")
+    write_review_record(td, "hc_bbb", margin=5.0)
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.get("/review/next")
+    assert r.json()["id"] == "hc_bbb"
+
+
+def test_review_next_control_samples_sort_last(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "ctl_aaa", margin=None, candidate_type="control",
+                        pipeline_decision="kept")
+    write_review_record(td, "hc_bbb", margin=100.0)  # a large but real margin
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.get("/review/next")
+    assert r.json()["id"] == "hc_bbb"
+
+
+def test_review_clip_serves_the_real_file(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=1.0)
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.get("/review/hc_aaa/clip")
+    assert r.status_code == 200
+    assert r.content == b"fake clip bytes"
+
+
+def test_review_clip_404_for_unknown_id(tmp_path):
+    app = make_app(tmp_path, training_data_dir=tmp_path / "training_data")
+    with TestClient(app) as client:
+        r = client.get("/review/hc_nope/clip")
+    assert r.status_code == 404
+
+
+def test_review_clip_404_for_path_traversal_id(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_secret", margin=1.0)
+    # a real secret file OUTSIDE reviews_dir that traversal would target
+    (tmp_path / "outside.mp4").write_bytes(b"should never be served")
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.get("/review/..%2f..%2foutside/clip")
+    assert r.status_code == 404
+
+
+def test_review_label_writes_and_returns_next(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=1.0)
+    write_review_record(td, "hc_bbb", margin=5.0)
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.post("/review/hc_aaa/label", json={"label": "real_action"})
+    assert r.status_code == 200
+    assert r.json()["id"] == "hc_bbb"
+
+    record = json.loads((td / "reviews" / "hc_aaa.json").read_text())
+    assert record["label"] == "real_action"
+    assert record["labeled_at"] is not None
+
+
+def test_review_label_with_note(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=1.0)
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        client.post("/review/hc_aaa/label",
+                    json={"label": "downtime", "note": "clearly a lull"})
+    record = json.loads((td / "reviews" / "hc_aaa.json").read_text())
+    assert record["note"] == "clearly a lull"
+
+
+def test_review_label_done_when_that_was_the_last_one(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=1.0)
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.post("/review/hc_aaa/label", json={"label": "downtime"})
+    assert r.json() == {"done": True}
+
+
+def test_review_label_rejects_invalid_label_value(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=1.0)
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.post("/review/hc_aaa/label", json={"label": "maybe"})
+    assert r.status_code == 400
+    record = json.loads((td / "reviews" / "hc_aaa.json").read_text())
+    assert record["label"] is None  # rejected before writing anything
+
+
+def test_review_label_404_for_unknown_id(tmp_path):
+    app = make_app(tmp_path, training_data_dir=tmp_path / "training_data")
+    with TestClient(app) as client:
+        r = client.post("/review/hc_nope/label", json={"label": "downtime"})
+    assert r.status_code == 404
+
+
+def test_process_threads_training_data_dir_into_process_video(tmp_path, monkeypatch):
+    seen = []
+
+    def fake(path, zone, motion_only=False, cache_dir=None, warn=None,
+            on_stage=None, training_data_dir=None, training_data_source_info=None):
+        seen.append((training_data_dir, training_data_source_info))
+        import numpy as np
+
+        class FakeMotion:
+            times = np.array([0.0])
+            scores = np.array([0.0])
+        return [(1.0, 3.0)], [], 5.0, FakeMotion(), []
+
+    monkeypatch.setattr(pipeline_runner, "process_video", fake)
+    monkeypatch.setattr(pipeline_runner, "run_stitch", fake_run_stitch)
+
+    td = tmp_path / "training_data"
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        post_process(client, batch_id)
+
+    assert len(seen) == 1
+    training_data_dir, source_info = seen[0]
+    assert Path(training_data_dir) == td
+    assert source_info == {"batch_id": batch_id}

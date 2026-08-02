@@ -20,11 +20,19 @@ from pipeline.stitch import run_stitch
 from backend.jobs import create_job, save_job
 
 
-def run_detect_job(batch_dir, job: dict, ordered_paths: list) -> None:
+def run_detect_job(batch_dir, job: dict, ordered_paths: list,
+                   training_data_dir=None) -> None:
     """Runs detection across ordered_paths (already order-resolved by
     the caller — this function does no ordering itself, same division of
     responsibility as scripts/detect_multi.py) and writes the manifest.
-    Mutates and persists `job` at each stage transition."""
+    Mutates and persists `job` at each stage transition.
+
+    `training_data_dir`, if given, opts every file in this real batch
+    into the Tier 1 review queue (pipeline.review, via
+    pipeline.run.process_video) -- see backend/app.py for where this
+    comes from (an explicit opt-in, off by default, specifically so a
+    real deployment has to choose to collect this rather than it
+    happening silently)."""
     def on_stage(stage, path=None):
         job["stage"] = f"{stage} ({Path(path).name})" if path else stage
         save_job(batch_dir, job)
@@ -39,7 +47,9 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list) -> None:
             segments, vetoed, duration, motion, hard_cut_windows = process_video(
                 path, zone, motion_only=False, cache_dir=DEFAULT_CACHE_DIR,
                 warn=lambda msg: job["warnings"].append(msg),
-                on_stage=lambda s, p=path: on_stage(s, p))
+                on_stage=lambda s, p=path: on_stage(s, p),
+                training_data_dir=training_data_dir,
+                training_data_source_info={"batch_id": job["batch_id"]})
 
             sm = smooth_scores(motion.times, motion.scores,
                                SegmentConfig().smooth_window_s)
@@ -90,7 +100,8 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list) -> None:
 
 
 def run_detect_then_export_job(batch_dir, detect_job: dict,
-                               ordered_paths: list) -> None:
+                               ordered_paths: list,
+                               training_data_dir=None) -> None:
     """Auto-chains detect -> export so one trigger-processing call ends
     with a playable output, matching the Home view's "one Process
     action, one wait, then a video" flow (Stage 7) — the manual
@@ -101,7 +112,7 @@ def run_detect_then_export_job(batch_dir, detect_job: dict,
     just stops the chain there rather than starting an export against a
     manifest that was never written."""
     try:
-        run_detect_job(batch_dir, detect_job, ordered_paths)
+        run_detect_job(batch_dir, detect_job, ordered_paths, training_data_dir)
     except Exception:
         return
     export_job = create_job(batch_dir, detect_job["batch_id"], "export",

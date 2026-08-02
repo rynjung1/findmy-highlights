@@ -304,6 +304,102 @@ def test_merge_overlapping_spans_empty_input():
     assert merge_overlapping_spans([], 0.0, [0.0, 3.0]) == []
 
 
+# ---- origin-aware merge: hard-cut boundaries must never be bridged ----
+# Regression coverage for a real, confirmed bug: merge_overlapping_spans
+# had no concept of WHY a gap existed, so a hard-cut window (deliberately
+# shorter than a GOP by design, see pipeline.segments.HardCutConfig) got
+# silently bridged back together the same as any ordinary short gap --
+# despite the manifest correctly marking it status="cut", origin="hard_cut".
+# Confirmed via frame-exact framemd5 comparison: every hard-cut window was
+# still fully present in the real output, frame-for-frame, before this fix.
+
+def test_merge_overlapping_spans_never_bridges_a_protected_boundary():
+    # same real GOP/gap shape as
+    # test_merge_overlapping_spans_merges_when_gap_smaller_than_gop (which
+    # correctly merges an ORDINARY gap this size) -- the only difference
+    # is the second span's start is marked protected
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    spans = [(3.873, 43.892), (47.250, 80.010)]
+    merged = merge_overlapping_spans(spans, start_offset=4.266, keyframes=keyframes,
+                                     protected_starts={47.250})
+    assert merged == [(3.873, 43.892), (47.250, 80.010)]
+
+
+def test_merge_overlapping_spans_flags_forced_reencode_when_protected_boundary_has_real_overlap():
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    spans = [(3.873, 43.892), (47.250, 80.010)]
+    forced = set()
+    merge_overlapping_spans(spans, start_offset=4.266, keyframes=keyframes,
+                            protected_starts={47.250}, forced_reencode_out=forced)
+    assert forced == {47.250}
+
+
+def test_merge_overlapping_spans_protected_boundary_with_no_real_overlap_is_not_flagged():
+    # gap of 10s (larger than the 6.006s GOP) -- no real overlap risk, so
+    # even though the boundary is protected, nothing needs forcing
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    spans = [(3.873, 40.0), (50.0, 80.0)]
+    forced = set()
+    merged = merge_overlapping_spans(spans, start_offset=4.266, keyframes=keyframes,
+                                     protected_starts={50.0}, forced_reencode_out=forced)
+    assert merged == [(3.873, 40.0), (50.0, 80.0)]
+    assert forced == set()
+
+
+def test_merge_overlapping_spans_unprotected_boundaries_still_merge_as_before():
+    # protected_starts only shields the boundaries actually named in it --
+    # an ordinary boundary elsewhere in the same call still merges exactly
+    # as it always has (no regression on the existing duplicate-frame fix)
+    keyframes = [6.0 * n for n in range(20)]
+    spans = [(1.0, 10.0), (11.0, 20.0), (21.0, 30.0)]
+    merged = merge_overlapping_spans(spans, start_offset=0.0, keyframes=keyframes,
+                                     protected_starts={11.0})
+    # (1.0,10.0)/(11.0,20.0) boundary is protected -> stays split;
+    # (11.0,20.0)/(21.0,30.0) boundary is ordinary -> still merges
+    assert merged == [(1.0, 10.0), (11.0, 30.0)]
+
+
+def test_plan_stitch_hard_cut_boundary_survives_the_plan(tmp_path):
+    # end-to-end through plan_stitch: a hard-cut gap shorter than the real
+    # GOP must produce TWO jobs, not one merged job -- this is the actual
+    # bug (a hard cut being silently un-cut by the stitch plan)
+    m = build_manifest("g.mp4", 90.0, [(3.873, 43.892), (47.250, 80.010)],
+                       hard_cut_windows=[(43.892, 47.250)])
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p), start_offset=4.266),
+                       keyframe_prober=lambda p: keyframes)
+    assert [(j.start_s, j.end_s) for j in plan.jobs] == [
+        (3.873, 43.892), (47.250, 80.010)]
+
+
+def test_plan_stitch_forces_reencode_on_the_job_after_a_risky_hard_cut_boundary(tmp_path):
+    m = build_manifest("g.mp4", 90.0, [(3.873, 43.892), (47.250, 80.010)],
+                       hard_cut_windows=[(43.892, 47.250)])
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p), start_offset=4.266,
+                                                        w=1920, h=1080, fps=30.0),
+                       keyframe_prober=lambda p: keyframes)
+    first, second = plan.jobs
+    assert first.force_reencode is False
+    assert second.force_reencode is True
+    assert second.own_target == (1920, 1080, 30.0)
+    # the overall plan still stream-copies -- only this one job is forced
+    assert plan.reencode is False
+
+
+def test_plan_stitch_does_not_force_reencode_when_hard_cut_gap_has_no_real_overlap_risk(tmp_path):
+    # gap of 20s between the two kept spans, far larger than the 6.006s
+    # GOP -- the boundary is still protected (never bridged), but there's
+    # no real duplicate-frame risk, so no job should be forced to re-encode
+    m = build_manifest("g.mp4", 100.0, [(3.873, 40.0), (60.0, 80.0)],
+                       hard_cut_windows=[(40.0, 60.0)])
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p), start_offset=4.266),
+                       keyframe_prober=lambda p: keyframes)
+    assert [(j.start_s, j.end_s) for j in plan.jobs] == [(3.873, 40.0), (60.0, 80.0)]
+    assert all(j.force_reencode is False for j in plan.jobs)
+
+
 def test_plan_stitch_merges_overlapping_spans_on_copy_path_not_reencode(tmp_path):
     # the merge must only ever run on the stream-copy path -- the
     # re-encode path decodes every frame exactly and has no keyframe-snap
@@ -584,6 +680,35 @@ def test_run_stitch_reports_reencode_reason(tmp_path):
                         duration_prober=lambda p: 1.0)
     assert result.reencoded is True
     assert "resolution" in result.reencode_reason
+
+
+def test_run_stitch_reencodes_only_the_forced_job_at_a_risky_hard_cut_boundary(tmp_path):
+    # end-to-end through run_stitch with a fake runner: the plan overall
+    # stream-copies (single file, no mismatch), but the job right after a
+    # risky hard-cut boundary must be individually re-encoded -- checked
+    # by inspecting the actual ffmpeg commands issued, the same way every
+    # other build_extract_cmd behavior in this file is verified
+    m = build_manifest("g.mp4", 90.0, [(3.873, 43.892), (47.250, 80.010)],
+                       hard_cut_windows=[(43.892, 47.250)])
+    keyframes = [4.266 + 6.006 * n for n in range(20)]
+    calls = []
+
+    def fake_runner(cmd):
+        calls.append(cmd)
+
+    result = run_stitch(m, tmp_path, tmp_path / "out.mp4",
+                        work_dir=tmp_path / "work",
+                        prober=lambda p: vp(path=str(p), start_offset=4.266,
+                                            w=1920, h=1080, fps=30.0),
+                        keyframe_prober=lambda p: keyframes,
+                        runner=fake_runner, duration_prober=lambda p: 36.286)
+
+    assert result.reencoded is False  # the overall plan is still stream-copy
+    extract_cmds = calls[:2]
+    first_cmd, second_cmd = extract_cmds
+    assert "copy" in first_cmd
+    assert "libx264" in second_cmd  # the forced job, individually re-encoded
+    assert "-vf" in second_cmd
 
 
 def test_run_stitch_raises_on_no_kept_segments(tmp_path):

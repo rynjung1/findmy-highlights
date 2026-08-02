@@ -30,7 +30,8 @@ DEFAULT_CACHE_DIR = ROOT / ".cache" / "detections"
 
 
 def process_video(video: str, zone, motion_only: bool = False,
-                  cache_dir=None, warn=None, on_stage=None):
+                  cache_dir=None, warn=None, on_stage=None,
+                  training_data_dir=None, training_data_source_info=None):
     """Run the full pipeline on one video. `zone` is a PlateZone or None
     (already resolved by the caller — this function does no calibration
     lookup of its own, keeping single- and multi-file callers consistent).
@@ -40,6 +41,18 @@ def process_video(video: str, zone, motion_only: bool = False,
     that stage of work starts (added for the backend's progress
     reporting — the CLI scripts don't pass one, so their behavior is
     unchanged).
+
+    `training_data_dir`, if given, opts this run into the Tier 1 review
+    queue (pipeline.review.generate_review_candidates): a handful of the
+    run's own most-borderline hard-cut and segment-boundary decisions get
+    a self-contained clip + JSON record written under
+    training_data_dir/reviews/ for later human labeling. Defaults to
+    None (off) deliberately — scripts/regression.py and any test-shaped
+    run must never pass this, since running the same 9 reference clips
+    repeatedly would flood the label store with redundant records; see
+    backend/app.py for how a real deployment opts in. `training_data_source_info`,
+    if given, is merged into each written record's `source` field
+    (e.g. a real batch id) -- ignored unless `training_data_dir` is also set.
 
     Returns (final_segments, vetoed, duration, motion_result,
     hard_cut_windows). hard_cut_windows is always [] for the
@@ -141,4 +154,15 @@ def process_video(video: str, zone, motion_only: bool = False,
     # around (see README's hard-cut writeup for the reasoning and the
     # real numbers this shipped against).
     final, hard_cut_windows = apply_hard_cuts(final, motion.times, motion.scores)
+
+    if training_data_dir is not None:
+        from pipeline.review import generate_review_candidates
+        generate_review_candidates(
+            final_segments=final, hard_cut_windows=hard_cut_windows,
+            motion_times=motion.times, motion_scores=motion.scores,
+            enter_scores=enter_scores, video_path=video,
+            source_file=Path(video).name, training_data_dir=training_data_dir,
+            duration=motion.duration, seg_cfg=seg_cfg, warn=warn,
+            extra_source_info=training_data_source_info)
+
     return final, vetoed, motion.duration, motion, hard_cut_windows

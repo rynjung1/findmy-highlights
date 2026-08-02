@@ -150,6 +150,54 @@ def scores_to_segments(times, scores, config: SegmentConfig | None = None,
     return [(a, b) for a, b in segments if (b - a) >= cfg.min_len_s]
 
 
+def find_boundary_crossings(times, scores, config: SegmentConfig | None = None,
+                            sustain_scores=None):
+    """The same hysteresis walk as scores_to_segments, but returns the raw
+    ENTER/EXIT crossing events themselves instead of the resulting
+    segments -- used by pipeline.review to surface the pipeline's own
+    borderline open/close decisions for manual labeling (Tier 1 review
+    queue). A separate function rather than changing scores_to_segments'
+    return shape, which every existing caller/test already relies on;
+    the loop body is intentionally the same as scores_to_segments' (kept
+    in sync by hand -- both are short and independently well-tested).
+
+    Each returned dict is {"time", "kind" ("enter"/"exit"), "score",
+    "threshold", "margin"}. margin = |score - threshold|: smaller means
+    the smoothed score was closer to the threshold at the instant the
+    pipeline made that open/close decision, i.e. a more borderline call
+    worth a human look."""
+    cfg = config or SegmentConfig()
+    times = np.asarray(times, dtype=float)
+    scores = np.asarray(scores, dtype=float)
+    if len(times) == 0:
+        return []
+    sm_open = smooth_scores(times, scores, cfg.smooth_window_s)
+    if sustain_scores is None:
+        sm_sustain = sm_open
+    else:
+        sustain_scores = np.asarray(sustain_scores, dtype=float)
+        sm_sustain = smooth_scores(times, sustain_scores, cfg.smooth_window_s)
+
+    crossings = []
+    open_start = None
+    for t, so, ss in zip(times, sm_open, sm_sustain):
+        if open_start is None:
+            if so >= cfg.enter_thresh:
+                crossings.append({
+                    "time": float(t), "kind": "enter", "score": float(so),
+                    "threshold": cfg.enter_thresh,
+                    "margin": float(abs(so - cfg.enter_thresh))})
+                open_start = t
+        else:
+            if ss < cfg.exit_thresh:
+                crossings.append({
+                    "time": float(t), "kind": "exit", "score": float(ss),
+                    "threshold": cfg.exit_thresh,
+                    "margin": float(abs(ss - cfg.exit_thresh))})
+                open_start = None
+    return crossings
+
+
 def merge_segments(segments, max_gap_s: float):
     """Merge overlapping or near-adjacent (start, end) pairs. Input need not
     be sorted; output is sorted and non-overlapping."""

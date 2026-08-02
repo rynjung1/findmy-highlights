@@ -105,3 +105,29 @@ export async function triggerExport(batchId) {
   const res = await request(`/batches/${batchId}/export`, { method: 'POST' })
   return res.json()
 }
+
+// Tier 1 review queue (see backend/app.py, pipeline/review.py) -- a
+// global queue, not scoped to any one batch, so these don't take a
+// batchId. A 404 from getNextReview means the server has no
+// training_data_dir configured at all (FMH_TRAINING_DATA_DIR unset),
+// which ReviewQueueView treats as a distinct "not enabled" state from
+// an empty-but-enabled queue ({done: true}, a normal 200).
+export async function getNextReview() {
+  const res = await fetch('/review/next')
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function labelReview(reviewId, label, note) {
+  const res = await request(`/review/${reviewId}/label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, note: note || null }),
+  })
+  return res.json()
+}
+
+export function reviewClipUrl(reviewId) {
+  return `/review/${reviewId}/clip`
+}

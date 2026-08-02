@@ -172,6 +172,22 @@ class SpanJob:
     # source_path. Defaults to 0 so every existing caller/test that
     # constructs a SpanJob directly (single-file, index 0) is unaffected.
     source_file_index: int = 0
+    # True when this job sits on the far side of a hard-cut boundary
+    # (see pipeline.manifest.hard_cut_boundary_starts_by_file) that
+    # merge_overlapping_spans found real overlap risk at -- rather than
+    # bridge the cut away (the original bug), this job gets extracted via
+    # a real per-file re-encode (frame-exact -ss, no keyframe-snap-back)
+    # even though the overall plan otherwise stream-copies. Every other
+    # span in the same plan is unaffected. Defaults to False so every
+    # existing caller/test is unaffected.
+    force_reencode: bool = False
+    # (width, height, fps) of THIS job's own source file, used only when
+    # force_reencode=True on an otherwise stream-copy plan -- a single-
+    # file passthrough re-encode needs a valid target for
+    # build_extract_cmd, but there's no cross-file normalization to do
+    # (see choose_target_params, which is for the whole-plan re-encode
+    # case). None unless force_reencode is True.
+    own_target: tuple | None = None
 
 
 @dataclass
@@ -338,7 +354,9 @@ def predicted_seek_start(requested_s: float, keyframes: list,
 
 
 def merge_overlapping_spans(spans, start_offset: float, keyframes: list,
-                            safety_margin_s: float = 0.1) -> list:
+                            safety_margin_s: float = 0.1,
+                            protected_starts=None,
+                            forced_reencode_out=None) -> list:
     """Merge consecutive (start_s, end_s) spans (already sorted, all from
     the SAME source file) whenever independently stream-copy-extracting
     them would decode overlapping real content.
@@ -360,14 +378,38 @@ def merge_overlapping_spans(spans, start_offset: float, keyframes: list,
 
     Only meaningful for the stream-copy path — the re-encode path decodes
     every frame exactly and has no keyframe-snap behavior at all, so
-    callers should not apply this there (see plan_stitch)."""
+    callers should not apply this there (see plan_stitch).
+
+    protected_starts, if given, is a set of span start_s values (see
+    pipeline.manifest.hard_cut_boundary_starts_by_file) that must NEVER
+    be bridged into the previous span, no matter how short the gap or how
+    much overlap risk predicted_seek_start finds. This is the origin-aware
+    fix for a real, confirmed bug: a hard-cut window is deliberately
+    shorter than a GOP by design, which is exactly the gap size this
+    merge otherwise treats as "safe to re-join" -- silently un-cutting
+    real destructive cuts despite the manifest correctly marking them
+    status="cut", origin="hard_cut" (confirmed via frame-exact framemd5
+    comparison: every hard-cut window was still fully present in the real
+    output). When a protected boundary DOES have real overlap risk
+    (predicted_seek_start would land inside the previous span), the gap
+    still isn't bridged -- instead, if forced_reencode_out is given, that
+    span's own start_s is added to it, signaling the caller (plan_stitch)
+    to extract that one span via a real per-file re-encode (frame-exact
+    start, no keyframe-snap-back) rather than stream-copy, which removes
+    the overlap without giving up the cut."""
+    protected_starts = protected_starts or set()
     if not spans:
         return []
     merged = [list(spans[0])]
     for a, b in spans[1:]:
         current_end_real = merged[-1][1] + start_offset
         next_start_real = predicted_seek_start(a + start_offset, keyframes)
-        if next_start_real <= current_end_real + safety_margin_s:
+        would_overlap = next_start_real <= current_end_real + safety_margin_s
+        if a in protected_starts:
+            if would_overlap and forced_reencode_out is not None:
+                forced_reencode_out.add(a)
+            merged.append([a, b])
+        elif would_overlap:
             merged[-1][1] = max(merged[-1][1], b)
         else:
             merged.append([a, b])
@@ -423,10 +465,24 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
     decode overlapping real content — see that function's docstring for
     the real duplicate-frame bug this prevents. Never applied on the
     re-encode path: every frame there is actually decoded, so there is no
-    keyframe-snap behavior to predict or guard against."""
-    from pipeline.manifest import kept_spans_by_file
+    keyframe-snap behavior to predict or guard against.
+
+    That merge is origin-aware: real hard-cut boundaries (see
+    pipeline.manifest.hard_cut_boundary_starts_by_file) are never bridged
+    back together, even when the gap is shorter than the source's GOP --
+    the same short gap merge_overlapping_spans otherwise treats as safe
+    to re-join. When a protected boundary does carry real overlap risk,
+    the span on the far side of it is extracted via a real per-file
+    re-encode instead of stream-copy (frame-exact start, no keyframe-snap
+    slack) rather than giving up the cut -- see merge_overlapping_spans'
+    docstring for the full reasoning, and README's origin-aware merge fix
+    writeup for the bug this closes (every hard-cut window was, until
+    this fix, still fully present in the real output)."""
+    from pipeline.manifest import (hard_cut_boundary_starts_by_file,
+                                   kept_spans_by_file)
 
     by_file = kept_spans_by_file(manifest)
+    hard_cut_boundaries = hard_cut_boundary_starts_by_file(manifest)
     contributing = [f for f in by_file if f["spans"]]
     if not contributing:
         return StitchPlan(jobs=[], reencode=False, reencode_reason=None, target=None)
@@ -439,6 +495,8 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
     # from that file gets the SAME offset -- see build_extract_cmd
     offset_by_file = {f["source_file"]: info.start_offset
                       for f, info in zip(contributing, infos)}
+    info_by_file = {f["source_file"]: info
+                    for f, info in zip(contributing, infos)}
 
     jobs = []
     seq = 0
@@ -448,15 +506,25 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
         src_path = source_dir / f["source_file"]
         start_offset = offset_by_file.get(f["source_file"], 0.0)
         spans = f["spans"]
+        forced_reencode_starts = set()
         if not reencode:
             keyframes = keyframe_prober(src_path)
-            spans = merge_overlapping_spans(spans, start_offset, keyframes)
+            protected = hard_cut_boundaries.get(f["source_file_index"], set())
+            spans = merge_overlapping_spans(
+                spans, start_offset, keyframes, protected_starts=protected,
+                forced_reencode_out=forced_reencode_starts)
+        own_info = info_by_file.get(f["source_file"])
+        own_target = ((own_info.width, own_info.height, own_info.fps)
+                      if own_info is not None else None)
         for start_s, end_s in spans:
             seq += 1
+            forced = start_s in forced_reencode_starts
             jobs.append(SpanJob(
                 source_path=str(src_path), start_s=start_s, end_s=end_s,
                 clip_name=f"span_{seq:04d}.mp4", start_offset=start_offset,
-                source_file_index=f["source_file_index"]))
+                source_file_index=f["source_file_index"],
+                force_reencode=forced,
+                own_target=own_target if forced else None))
 
     return StitchPlan(jobs=jobs, reencode=reencode, reencode_reason=reason,
                       target=target)
@@ -611,11 +679,18 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
         keyframes_by_path = {}
         for job in plan.jobs:
             out = work_dir / job.clip_name
-            cmd = build_extract_cmd(job, out, plan.reencode, plan.target)
+            # a job can be individually forced to re-encode (a hard-cut
+            # boundary with real overlap risk, see plan_stitch) even when
+            # the overall plan otherwise stream-copies -- own_target is
+            # this job's own file's native params, since there's no
+            # cross-file normalization to do for a single-file passthrough
+            job_reencode = plan.reencode or job.force_reencode
+            job_target = plan.target if plan.reencode else job.own_target
+            cmd = build_extract_cmd(job, out, job_reencode, job_target)
             runner(cmd)
             clip_paths.append(out)
 
-            if plan.reencode:
+            if job_reencode:
                 # every frame is actually decoded and re-encoded starting
                 # at the requested time -- no keyframe-snap slack
                 snapped_source_local_start = job.start_s

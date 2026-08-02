@@ -20,8 +20,10 @@ limitations) — that's a deliberate scope cut, not an oversight.
 import json
 import mimetypes
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -37,6 +39,26 @@ from pipeline.multifile import order_infos, probe_file, resolve_order
 
 from backend import jobs, storage
 from backend.pipeline_runner import run_detect_then_export_job, run_export_job
+
+# Tier 1 review queue (see pipeline/review.py): off by default, and only
+# ever turned on via this explicit environment variable, deliberately not
+# a hardcoded real path -- process_video's own training_data_dir param
+# already defaults to None/off so scripts/regression.py's many repeated
+# runs never pollute the label store, but scripts/smoke_api.py drives
+# THIS real app over HTTP, indistinguishable at the API layer from a real
+# user upload. An env-var opt-in means nobody -- including a developer
+# running smoke_api.py against their own dev server -- collects training
+# data by accident; a real deployment that wants this has to set it
+# explicitly.
+DEFAULT_TRAINING_DATA_DIR = os.environ.get("FMH_TRAINING_DATA_DIR")
+VALID_REVIEW_LABELS = ("downtime", "real_action")
+# Every real review id this app ever writes is "<prefix>_<uuid4 hex>" (see
+# pipeline.review.CANDIDATE_KIND_TO_ID_PREFIX) -- an allowlist match
+# against that exact shape, not a blocklist against '..'/'/', for the
+# same reason get_source's own filename check below is an allowlist: a
+# blocklist can be bypassed (e.g. percent-encoding) in a way a strict
+# allowlist can't.
+_REVIEW_ID_RE = re.compile(r"^[a-z0-9_]+$")
 
 # Videos this app can plausibly work with. Rejected at upload time so an
 # obviously-wrong file type never gets written to disk in the first
@@ -79,6 +101,11 @@ class SegmentStatusBody(BaseModel):
     status: str
 
 
+class ReviewLabelBody(BaseModel):
+    label: str
+    note: str | None = None
+
+
 def _default_run_in_background(fn, *args):
     """Real dispatch: a daemon thread, so a 30-60+ minute job doesn't
     block the event loop that serves progress-polling requests. Tests
@@ -89,11 +116,17 @@ def _default_run_in_background(fn, *args):
     return t
 
 
-def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
+def create_app(uploads_root=None, run_in_background=None,
+              training_data_dir=None) -> FastAPI:
     """App factory, not a module-level singleton — tests point each app
     instance at its own tmp_path uploads root with a synchronous
     run_in_background, fully isolated from other tests and from a real
-    uploads/ directory."""
+    uploads/ directory.
+
+    `training_data_dir`, if given (or if unset, from DEFAULT_TRAINING_DATA_DIR
+    -- see that constant's docstring for why this is env-var-gated),
+    opts every real detect job this app runs into the Tier 1 review
+    queue."""
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
         jobs.sweep_interrupted_jobs(app.state.uploads_root)
@@ -103,6 +136,9 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
     app.state.uploads_root = (Path(uploads_root) if uploads_root is not None
                               else storage.DEFAULT_UPLOADS_ROOT)
     app.state.run_in_background = run_in_background or _default_run_in_background
+    app.state.training_data_dir = (
+        training_data_dir if training_data_dir is not None
+        else DEFAULT_TRAINING_DATA_DIR)
 
     def _batch_dir(batch_id: str) -> Path:
         bdir = storage.batch_dir(app.state.uploads_root, batch_id)
@@ -298,12 +334,14 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             job = jobs.create_job(bdir, batch_id, "detect", status="pending")
-            app.state.run_in_background(run_detect_then_export_job, bdir, job, ordered)
+            app.state.run_in_background(run_detect_then_export_job, bdir, job, ordered,
+                                        app.state.training_data_dir)
             return job
 
         if len(paths) == 1:
             job = jobs.create_job(bdir, batch_id, "detect", status="pending")
-            app.state.run_in_background(run_detect_then_export_job, bdir, job, paths)
+            app.state.run_in_background(run_detect_then_export_job, bdir, job, paths,
+                                        app.state.training_data_dir)
             return job
 
         infos = [probe_file(p) for p in paths]
@@ -321,7 +359,7 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
 
         job = jobs.create_job(bdir, batch_id, "detect", status="pending")
         app.state.run_in_background(run_detect_then_export_job, bdir, job,
-                                    result.ordered_paths)
+                                    result.ordered_paths, app.state.training_data_dir)
         return job
 
     @app.post("/batches/{batch_id}/order")
@@ -345,7 +383,8 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         existing["suggested_order"] = None
         existing["order_reason"] = None
         jobs.save_job(bdir, existing)
-        app.state.run_in_background(run_detect_then_export_job, bdir, existing, ordered)
+        app.state.run_in_background(run_detect_then_export_job, bdir, existing, ordered,
+                                    app.state.training_data_dir)
         return existing
 
     @app.get("/batches/{batch_id}/jobs/{job_type}")
@@ -429,6 +468,95 @@ def create_app(uploads_root=None, run_in_background=None) -> FastAPI:
         media_type, _ = mimetypes.guess_type(filename)
         return FileResponse(p, media_type=media_type or "application/octet-stream",
                             filename=filename)
+
+    def _reviews_dir() -> Path:
+        if not app.state.training_data_dir:
+            raise HTTPException(
+                404, "the review queue is not enabled on this server "
+                     "(set FMH_TRAINING_DATA_DIR)")
+        return Path(app.state.training_data_dir) / "reviews"
+
+    def _safe_review_path(reviews_dir: Path, review_id: str, suffix: str) -> Path:
+        if not _REVIEW_ID_RE.match(review_id):
+            raise HTTPException(404, f"no such review record: {review_id}")
+        p = (reviews_dir / f"{review_id}{suffix}").resolve()
+        if p.parent != reviews_dir.resolve():
+            raise HTTPException(404, f"no such review record: {review_id}")
+        return p
+
+    def _pending_reviews(reviews_dir: Path) -> list:
+        """Every unlabeled record, lowest margin first -- a record with
+        margin=None (a control sample, see pipeline.review) sorts last,
+        since it's not meant to compete with genuinely borderline
+        candidates for review priority."""
+        records = []
+        if not reviews_dir.exists():
+            return records
+        for p in sorted(reviews_dir.glob("*.json")):
+            try:
+                record = json.loads(p.read_text())
+            except json.JSONDecodeError:
+                continue
+            if record.get("label") is None:
+                records.append(record)
+        records.sort(key=lambda r: (r["margin"] is None, r["margin"] or 0.0))
+        return records
+
+    def _review_response(record: dict) -> dict:
+        return {
+            "id": record["id"],
+            "candidate_type": record["candidate_type"],
+            "pipeline_decision": record["pipeline_decision"],
+            "window": record["window"],
+            "margin": record["margin"],
+            "features_at_label_time": record["features_at_label_time"],
+            "source": record["source"],
+            "created_at": record["created_at"],
+            "clip_url": f"/review/{record['id']}/clip",
+        }
+
+    @app.get("/review/next")
+    def get_next_review():
+        """Returns the lowest-margin unlabeled record (control samples
+        last), or {"done": true} once the queue is empty -- a normal 200
+        either way, since an empty queue isn't an error condition."""
+        pending = _pending_reviews(_reviews_dir())
+        if not pending:
+            return {"done": True}
+        return _review_response(pending[0])
+
+    @app.get("/review/{review_id}/clip")
+    def get_review_clip(review_id: str):
+        reviews_dir = _reviews_dir()
+        p = _safe_review_path(reviews_dir, review_id, ".mp4")
+        if not p.exists():
+            raise HTTPException(404, f"no such review record: {review_id}")
+        return FileResponse(p, media_type="video/mp4", filename=f"{review_id}.mp4")
+
+    @app.post("/review/{review_id}/label")
+    def label_review(review_id: str, body: ReviewLabelBody):
+        """Writes the label and returns the next pending item (same
+        shape as GET /review/next), so the frontend can label one after
+        another without a round trip back to /next each time."""
+        if body.label not in VALID_REVIEW_LABELS:
+            raise HTTPException(
+                400, f"invalid label {body.label!r}, expected one of "
+                     f"{VALID_REVIEW_LABELS}")
+        reviews_dir = _reviews_dir()
+        p = _safe_review_path(reviews_dir, review_id, ".json")
+        if not p.exists():
+            raise HTTPException(404, f"no such review record: {review_id}")
+
+        record = json.loads(p.read_text())
+        record["label"] = body.label
+        record["labeled_at"] = datetime.now(timezone.utc).isoformat()
+        record["note"] = body.note
+        p.write_text(json.dumps(record, indent=2))
+
+        pending = _pending_reviews(reviews_dir)
+        if not pending:
+            return {"done": True}
+        return _review_response(pending[0])
 
     return app
 

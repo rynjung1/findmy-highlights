@@ -5,6 +5,7 @@ import OrderConfirmStep from './components/OrderConfirmStep'
 import ProcessingStep from './components/ProcessingStep'
 import ResultStep from './components/ResultStep'
 import EditLogView from './components/EditLogView'
+import ReviewQueueView from './components/ReviewQueueView'
 import { getJob, triggerProcess } from './api'
 
 const STORAGE_KEY = 'fmh_batch_id'
@@ -173,6 +174,12 @@ export default function App() {
           >
             Edit Log
           </button>
+          <button
+            className={view === 'review' ? 'active' : 'secondary'}
+            onClick={() => setView('review')}
+          >
+            Review Queue
+          </button>
         </nav>
 
         {view === 'home' && stage !== 'loading' && stage !== 'error' && (
@@ -183,6 +190,7 @@ export default function App() {
       <main className="main-content">
       <div className="app-shell">
         {view === 'editlog' && <EditLogView batchId={batchId} />}
+        {view === 'review' && <ReviewQueueView />}
 
         {view === 'home' && (
         <>

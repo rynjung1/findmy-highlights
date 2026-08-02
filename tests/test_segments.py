@@ -8,9 +8,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.segments import (HardCutConfig, SegmentConfig, SkipSuggestionConfig,
-                               apply_hard_cuts, find_cut_windows,
-                               find_skip_suggestions, hard_cut_overlaps_required,
-                               merge_segments, scores_to_segments, segment_covers,
+                               apply_hard_cuts, find_boundary_crossings,
+                               find_cut_windows, find_skip_suggestions,
+                               hard_cut_overlaps_required, merge_segments,
+                               scores_to_segments, segment_covers,
                                smooth_scores, total_duration)
 
 
@@ -393,3 +394,66 @@ def test_hard_cut_overlaps_required_is_empty_when_protection_was_real():
     _, cuts = apply_hard_cuts([(5.0, 25.0)], t, s, CUT_CFG,
                               protected_windows=protected)
     assert hard_cut_overlaps_required(cuts, required) == []
+
+
+# ---- find_boundary_crossings ----
+# Regression/behavior coverage for the Tier 1 review-queue candidate
+# source: this must report the SAME open/close instants scores_to_segments
+# itself acts on, since it's meant to expose exactly the pipeline's own
+# raw hysteresis decisions for review, not a re-derivation.
+
+def test_boundary_crossings_empty_input():
+    assert find_boundary_crossings([], [], cfg()) == []
+
+
+def test_boundary_crossings_single_burst_has_one_enter_and_one_exit():
+    t = np.arange(0, 10, 0.1)
+    s = np.where((t >= 3) & (t <= 5), 1.0, 0.0)
+    crossings = find_boundary_crossings(t, s, cfg())
+    kinds = [c["kind"] for c in crossings]
+    assert kinds == ["enter", "exit"]
+    assert abs(crossings[0]["time"] - 3.0) < 0.2
+    assert abs(crossings[1]["time"] - 5.1) < 0.2
+
+
+def test_boundary_crossings_no_action_yields_nothing():
+    t = np.arange(0, 10, 0.1)
+    s = np.full_like(t, 0.01)
+    assert find_boundary_crossings(t, s, cfg()) == []
+
+
+def test_boundary_crossings_margin_is_distance_from_threshold():
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, smooth_window_s=0.0)
+    t = np.array([0.0, 1.0, 2.0])
+    s = np.array([0.0, 0.5, 0.0])  # exactly at enter_thresh, then drops
+    crossings = find_boundary_crossings(t, s, c)
+    enter = next(x for x in crossings if x["kind"] == "enter")
+    assert enter["score"] == 0.5
+    assert enter["threshold"] == 0.5
+    assert enter["margin"] == 0.0
+
+
+def test_boundary_crossings_dual_sustain_uses_sustain_for_exit():
+    # matches scores_to_segments' own dual-sustain behavior: the ENTER
+    # side reads `scores`, the EXIT side reads `sustain_scores` -- an
+    # exit crossing's score/margin must reflect the sustain signal, not
+    # the enter one
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, smooth_window_s=0.0)
+    t = np.array([0.0, 1.0, 2.0])
+    enter_scores = np.array([0.0, 0.6, 0.0])   # drops on enter side at t=2
+    sustain_scores = np.array([0.0, 0.6, 0.6])  # stays high on sustain side
+    crossings = find_boundary_crossings(t, enter_scores, c,
+                                        sustain_scores=sustain_scores)
+    # sustain never drops below exit_thresh within this window -> no exit
+    assert [x["kind"] for x in crossings] == ["enter"]
+
+
+def test_boundary_crossings_never_closes_a_segment_left_open_at_end():
+    # scores_to_segments closes a trailing open segment at the last
+    # sample without an explicit exit crossing -- find_boundary_crossings
+    # must NOT invent a synthetic exit event for that, since no real
+    # exit-threshold crossing happened
+    t = np.arange(0, 5, 0.1)
+    s = np.full_like(t, 1.0)
+    crossings = find_boundary_crossings(t, s, cfg())
+    assert [x["kind"] for x in crossings] == ["enter"]

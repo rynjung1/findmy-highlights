@@ -274,6 +274,39 @@ def kept_spans_by_file(manifest: dict):
     return out
 
 
+def hard_cut_boundary_starts_by_file(manifest: dict):
+    """For each file (by source_file_index), the start_s of every kept
+    segment whose immediately preceding manifest entry is a cut segment
+    with origin=="hard_cut". These mark real destructive-cut boundaries:
+    pipeline.stitch.merge_overlapping_spans must never silently bridge
+    one back together, even when the gap is shorter than the source's
+    own GOP -- hard-cut windows are deliberately short by design (see
+    pipeline.segments.HardCutConfig), which is exactly the gap size that
+    module's duplicate-frame-avoidance merge otherwise treats as safe to
+    re-join. A restored hard_cut entry (status flipped to "kept") no
+    longer matches "prev status == cut", so it stops being flagged here
+    automatically -- correct, since there's no cut left at that boundary
+    to protect.
+
+    Segments are assumed to already be in per-file cursor order (true for
+    every manifest this module builds, since _spans_with_gaps constructs
+    them that way and filtering by source_file_index below preserves
+    relative order)."""
+    out = {}
+    for idx in range(len(manifest["source_files"])):
+        protected = set()
+        prev = None
+        for seg in manifest["segments"]:
+            if seg["source_file_index"] != idx:
+                continue
+            if (seg["status"] == "kept" and prev is not None
+                    and prev["status"] == "cut" and prev["origin"] == "hard_cut"):
+                protected.add(seg["start_s"])
+            prev = seg
+        out[idx] = protected
+    return out
+
+
 def merge_adjacent(spans, eps: float = 1e-6):
     merged = []
     for a, b in spans:

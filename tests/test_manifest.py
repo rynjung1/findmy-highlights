@@ -8,7 +8,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.manifest import (build_manifest, build_multi_file_manifest,
-                               fmt_ts, kept_spans, load_manifest, parse_ts,
+                               fmt_ts, hard_cut_boundary_starts_by_file,
+                               kept_spans, load_manifest, parse_ts,
                                save_manifest, set_status)
 
 
@@ -160,3 +161,66 @@ def test_multi_file_manifest_hard_cut_windows_are_per_file():
                      and s["start_s"] == 10.0)
     assert part1_gap["origin"] == "hard_cut"
     assert part2_gap["origin"] == "gap"   # part2 got no hard_cut_windows at all
+
+
+# ---- hard_cut_boundary_starts_by_file ----
+# Regression coverage for the origin-aware merge fix: pipeline.stitch's
+# merge_overlapping_spans used to bridge a hard-cut gap back together
+# whenever it was shorter than the source's GOP -- exactly the gap size
+# a hard cut is by design -- silently un-cutting real destructive cuts
+# despite the manifest correctly marking them origin="hard_cut". This is
+# the function that identifies which kept-span boundaries are real cuts
+# that must never be bridged.
+
+def test_hard_cut_boundary_flags_the_kept_span_right_after_a_hard_cut():
+    m = build_manifest("g.mp4", 40.0, [(0.0, 10.0), (15.0, 25.0), (30.0, 40.0)],
+                       hard_cut_windows=[(11.0, 14.0)])
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert boundaries[0] == {15.0}
+
+
+def test_no_hard_cut_boundaries_when_no_hard_cut_windows():
+    m = build_manifest("g.mp4", 30.0, [(0.0, 10.0), (15.0, 20.0)])
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert boundaries[0] == set()
+
+
+def test_ordinary_gap_after_hard_cut_gap_is_not_flagged():
+    # only the kept segment DIRECTLY after a hard_cut gap is a protected
+    # boundary -- a later, ordinary gap must not be swept in too
+    m = build_manifest("g.mp4", 40.0, [(0.0, 10.0), (15.0, 25.0), (30.0, 40.0)],
+                       hard_cut_windows=[(11.0, 14.0)])
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert 30.0 not in boundaries[0]
+
+
+def test_hard_cut_boundary_cleared_once_restored():
+    # restoring a hard_cut entry flips its status to "kept" -- it's no
+    # longer a cut at all, so the following kept span's boundary is no
+    # longer flagged as protected (nothing left there to protect)
+    m = build_manifest("g.mp4", 40.0, [(0.0, 10.0), (15.0, 25.0), (30.0, 40.0)],
+                       hard_cut_windows=[(11.0, 14.0)])
+    gap = next(s for s in m["segments"] if s["start_s"] == 10.0)
+    set_status(m, gap["id"], "kept")
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert boundaries[0] == set()
+
+
+def test_multi_file_hard_cut_boundaries_are_per_file():
+    m = build_multi_file_manifest([
+        {"source_file": "part1.mp4", "duration": 30.0,
+         "kept_segments": [(0.0, 10.0), (15.0, 25.0)],
+         "hard_cut_windows": [(11.0, 14.0)]},
+        {"source_file": "part2.mp4", "duration": 30.0,
+         "kept_segments": [(0.0, 10.0), (15.0, 25.0)],
+         "hard_cut_windows": [(11.0, 14.0)]},
+    ])
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert boundaries[0] == {15.0}
+    assert boundaries[1] == {15.0}
+
+
+def test_hard_cut_boundary_never_flags_the_very_first_segment():
+    m = build_manifest("g.mp4", 10.0, [(0.0, 5.0)], hard_cut_windows=[(0.0, 0.0)])
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert boundaries[0] == set()
