@@ -625,6 +625,78 @@ enough for the permutation test to actually mean something, before
 spending any time on a classifier that — same as every learned-model
 discussion in this project — has nothing to learn from at n=0.
 
+**Optical flow direction/coherence and proper onset detection (HFC,
+spectral flux): both investigated for real, both closed — real numbers,
+no model, testable immediately, and still not enough.** Two classical
+signal-processing angles, deliberately not requiring any pretrained
+model or label volume, tested against the identical real event/ambient
+set as every validation above (11 real swing-type ground-truth events,
+170 real ambient samples).
+
+*Optical flow (Farneback, `cv2`, already a dependency) — testing
+DIRECTION, not magnitude, since magnitude alone is the axis every
+motion-based signal tonight already found near chance.* Four candidate
+features per window: mean flow magnitude of the top-10%-moving pixels
+(a sanity baseline), mean directional coherence (circular mean
+resultant length among moving pixels), mean frame-to-frame rotation of
+the dominant flow direction, and the single sharpest directional
+reversal in the window (the specific "bat arc reverses direction fast"
+hypothesis). Real result: magnitude (AUC 0.363) and coherence (AUC
+0.320) both came in **below chance**, and coherence went the *opposite*
+direction from the hypothesis — a single person walking steadily
+produces a MORE directionally-coherent flow field than a real play's
+multi-person, bat-and-ball scramble, not less; a real, useful negative,
+not just noise. The two angle-change features looked more promising
+(mean 0.647, max 0.662) with permutation p-values (0.048, 0.035)
+nominally under the conventional 0.05 bar — the closest any signal
+tonight came, including the pretrained-embedding check above.
+
+*Onset detection (HFC and spectral flux, `scipy.signal.stft`) in place
+of the earlier ad-hoc RMS-envelope rise-time heuristic (AUC 0.523 on
+this exact set).* Same real event/ambient set, same ±1.0s peak-search
+window as the rise-time work, for a fair swap-in comparison. HFC: AUC
+0.605 (p=0.128). Spectral flux: AUC 0.646 (p=0.056) — both nominally
+above the rise-time baseline, neither clearing 0.05 on its own.
+
+**Neither survives the scrutiny this project applies to every other
+signal, for two independent reasons.** First, multiple comparisons:
+six candidate features were tested across the two investigations (four
+flow, two onset), and reporting only the best-looking ones without
+correcting for that is the exact statistical trap this project's own
+permutation-testing discipline exists to catch. Bonferroni-corrected for
+six tests (α = 0.05/6 ≈ 0.0083), **none of the six p-values survive** —
+not even the flow angle-change features' nominal 0.035/0.048. Second,
+and more concretely: this session's own recall-risk check (against
+`clip_base1`-`4`, `clip_foul1`, `clip_whiff1` — the six clips whose real
+contact instants are exactly the swing-type ground-truth events in this
+validation set) surfaced a real red flag regardless of the aggregate
+numbers. `clip_base3`'s `e1` — a required, already-verified
+`hit_and_putout_first_base` play — scores at the **4th percentile**
+of ambient for `max_angle_change`, the **5th percentile** for
+`mean_angle_change`, and the **13th percentile** for HFC: a real,
+confirmed play reading as more "ambient" than 87-96% of genuine ambient
+samples on exactly the signals that nominally looked best. For audio
+specifically, this is the same root cause already named and closed for
+amplitude and spectral-ratio earlier tonight — HFC and spectral flux are
+still frequency-weighted *energy* measures, so they inherit the same
+camera/mic noise-floor drift across at-bats that sank those two
+approaches, just measured a different way.
+
+**Both closed as investigated-and-not-shipped, same category and same
+rigor as every other signal tonight.** Neither needed a label-volume
+gate or a pretrained model to test, and neither needed one to fail —
+real, immediately-testable classical methods, run against the same real
+ground truth as everything else, honestly measured, and honestly not
+enough: one axis (flow coherence) disproved its own hypothesis outright,
+and the other three (flow angle-change, HFC, spectral flux) look
+marginally better in aggregate than what's already on record but don't
+survive either a fair multiple-comparisons correction or a check against
+the specific real plays this project has always used to catch exactly
+this kind of small-sample overclaim. Not pursued further against this
+footage without either a genuinely different signal or enough real
+scale (more clips, more real events) to let a marginal aggregate number
+actually mean something.
+
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
   validated against real footage the user supplied directly (not
