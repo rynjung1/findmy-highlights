@@ -430,6 +430,79 @@ this shouldn't be revisited without either a fundamentally different
 angle on the same signals or a real, scaled label set the review queue
 itself will need real usage over time to accumulate.
 
+**Three follow-on angles, investigated and closed the same night, none
+implemented.** Explicitly investigation-only (no wiring into anything
+real), sequenced cheapest-and-most-foundational first since a real
+temporal-position signal would have become a candidate input to the
+joint model in angle 3.
+
+1. **Cross-clip temporal position** (`scripts/temporal_investigation.py`,
+   free — existing ground truth only). Does dead time sit at a
+   consistent position relative to play structure (a repeatable window
+   after a play resolves, before the next at-bat genuinely begins)?
+   Two real sources: the one precise data point available (clip_300's
+   own `atbat_expectations.fire_within`, a real 1-9s gap after `e6`
+   resolves) and a coarser proxy (every consecutive-event gap across the
+   3 reference clips with more than one annotated event — the other 6
+   have exactly one event each, nothing to measure). 12 real gaps,
+   ranging -1s (an `at_bat_activity` window overlapping straight into
+   the swing it leads into) to 86s, coefficient of variation 0.90 — the
+   spread exceeds the mean itself. **No consistent temporal position at
+   this reference set's granularity.** Directly relevant to the
+   already-documented "walk-up gap" (see Zone-velocity tightening
+   above): this doesn't contradict that finding, it just confirms the
+   raw gap-before-a-play isn't uniform enough on its own to exploit as a
+   standalone timing signal without the context (occupancy, settle
+   state) the existing at-bat detector already uses.
+2. **Per-clip (proxy for per-game) rhythm consistency**
+   (same script). Only 3 of 9 clips have more than one real play to
+   compare at all. What little data exists argues against the premise
+   rather than for it: `clip_540`'s own two real inter-play intervals
+   are 35s and 98s — 2.8x apart, within the same continuous recording.
+   **Not enough data to support a per-game-tightened threshold, and what
+   exists doesn't suggest within-game variance is meaningfully smaller
+   than across-game variance anyway.** This reference set (short
+   highlight-length excerpts) was never built to answer this question;
+   a real answer needs real full-game footage with many plays per game,
+   not reference clips.
+3. **A small joint classifier** (`scripts/joint_classifier_investigation.py`)
+   combining motion peak score, pose peak wrist displacement, and audio
+   onset rise-time (temporal position excluded — angle 1 didn't prove
+   real) via L2-regularized logistic regression, nothing deep, matching
+   the original Tier 3 scoping. Evaluated with leave-one-out
+   cross-validation on the same real reference-clip dataset (10 real
+   events with all three features present, 117 ambient) — a real
+   train/test split would leave almost nothing on either side with this
+   few positives. Single-feature AUCs on this exact paired subset
+   (0.509 motion, 0.529 pose, 0.469 audio) matched the standalone
+   pose+audio validation above. The combined model's cross-validated
+   AUC: **0.191 — below chance**, not just at it. Reported plainly
+   rather than smoothed into "also ≈0.5": a sub-0.5 leave-one-out AUC
+   with only 10 real positives is the textbook signature of severe
+   overfitting instability (each fold trains on 9 idiosyncratic real
+   examples against 116-117 ambient ones, and the fitted boundary swings
+   enough between folds that it doesn't generalize to the one held out)
+   — not evidence that combining these three specific signals is
+   actively harmful in some stable, reproducible sense. The honest
+   takeaway is the same as the single-feature result: **no real,
+   trustworthy separation**, and this result is itself a concrete,
+   observed illustration of exactly why the Tier 3 bar above (300-500
+   labeled events across 6-10 sessions) exists — this run used 10 real
+   events from one session's worth of reference footage, roughly 2% of
+   that bar's low end, and a 3-feature linear model already overfit
+   completely at that scale.
+
+**None of the three angles show real, actionable promise.** Ranked
+by how informative (not "how promising") each result actually is:
+angle 1 gave the clearest real answer (an honest, interpretable
+negative — the raw gap doesn't carry a usable timing signal by itself);
+angle 2's answer is real but too data-starved to trust either direction
+confidently; angle 3's number is the most dramatic but is better read as
+a demonstration of a known small-sample failure mode than as a
+substantive finding about the three signals themselves. All three stay
+as investigation scripts, not production code — nothing here changes
+what the pipeline actually cuts.
+
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
   validated against real footage the user supplied directly (not
