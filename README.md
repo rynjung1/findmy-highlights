@@ -54,8 +54,8 @@ the detection pipeline, multi-file handling and stitching, the backend API,
 the full Home/Upload and Edit Log frontend, multi-base calibration, and the
 zone-velocity signal built on top of it — is done, tested, and has been
 exercised end to end against real footage and a real running server, not
-just in-process test clients. `pytest tests/` covers 306 unit tests,
-`pytest tests/ -m e2e` covers 5 tests that run real model inference, and a
+just in-process test clients. `pytest tests/` covers 411 unit tests,
+`pytest tests/ -m e2e` covers 6 tests that run real model inference, and a
 full ten-item pre-demo checklist (upload, calibrate, process, watch, Edit
 Log restore/cut-again, multi-file, re-export) has been walked end to end in
 an actual browser.
@@ -78,6 +78,29 @@ checklist and reconfirmed clean (2237.02s = 37m17s, no regression) after an
 earlier re-run had clocked 67.6 minutes — traced to a leftover
 `uvicorn --reload` process eating background CPU during that specific run,
 not a real slowdown.
+
+**Timing drift observed during a later full verification sweep, real and
+currently unexplained — flagged plainly rather than assumed away.** A
+fresh, cache-cleared `full_game.mkv` run (with every currently-shipped
+mechanism active: dynamic padding, the tuned `exit_thresh`, the enter-side
+scale boost, hard-cut-with-exclusion) clocked **62.20 minutes wall-clock**
+— real, measured, about 66% slower than the 37.4/37.6/37.3-minute figures
+above. Memory and the actual cut/kept behavior were both confirmed
+consistent with history in the same run (956 MiB peak RSS vs. the ~969 MiB
+documented here; 50.65 min kept vs. an expected 50.65 min derived from the
+padding-only 53.19 min baseline minus hard-cut's own previously-documented
++2.54 min estimate, an exact match) — so this is isolated to wall-clock
+time, not a correctness or cutting-behavior regression. X-CLIP was not a
+factor (not invoked in this call at all — no `training_data_dir` was
+passed). The likely explanation is machine load/thermal state after hours
+of this session's own sustained heavy compute, not a code change, but
+that is a plausible guess, not a confirmed cause — no thermal profiling
+was actually captured during the run itself. **Before trusting this
+number either way, the next real `full_game.mkv` run should have Activity
+Monitor's thermal/CPU state checked WHILE it runs**, not just before or
+after, so this either gets confirmed as environmental or ruled out and
+investigated as a real regression — don't let this guess quietly become
+accepted fact.
 
 **Multi-file handling & stitching.** Files are ordered by capture-time
 metadata when it's unambiguous and trustworthy, and refuse to guess
@@ -787,12 +810,10 @@ first result all night that clears real statistical significance with a
 named, understood exception, and per this project's own standard
 ("worth pursuing toward something shippable" if a signal clears this
 bar), it's a real candidate for a next step — but nothing is
-implemented yet. Still open: whether P(swinging) alone is a safe enough
-signal for anything more than review-queue instrumentation given the
-`clip_base3` exception, what a real operating threshold would cost in
-false positives at n=11, and whether a larger, real-usage-accumulated
-label set changes the picture. Reporting the finding, not shipping
-against it — same discipline as every other investigation tonight.
+implemented yet. Reporting the finding here, not shipping against it —
+the follow-up entry immediately below resolves the open questions this
+raised (whether `clip_base3` is a one-off, and what a real operating
+threshold actually costs) before any implementation decision gets made.
 
 **Follow-up on the zero-shot result: the real mechanism behind
 `clip_base3`, a real 9-clip threshold gate, and the resulting decision
@@ -904,8 +925,7 @@ Open items:
 - Review/training queue Tiers 2 (threshold calibration) and 3 (a learned
   classifier) are deliberately not started — see Review/training queue
   above for the label-count bar Tier 3 needs before it's even worth
-  attempting. Veto-boundary candidates (a third candidate type named in
-  the original design) are also deferred, not built in Tier 1.
+  attempting.
 
 Notes for whoever picks this up next:
 - **The priority rule governs every threshold in this codebase**: never
