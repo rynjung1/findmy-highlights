@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
@@ -50,6 +51,17 @@ from backend.pipeline_runner import run_detect_then_export_job, run_export_job
 # running smoke_api.py against their own dev server -- collects training
 # data by accident; a real deployment that wants this has to set it
 # explicitly.
+#
+# load_dotenv() reads .env (gitignored, project-root, one real local
+# setting: FMH_TRAINING_DATA_DIR=training_data) if present, and never
+# overrides an already-exported shell value (load_dotenv's own default).
+# Added because the explicit-opt-in design above worked exactly as
+# intended and nobody ever actually re-typed the env-var prefix on a real
+# run: training_data/reviews/ sat at zero real labels through the entire
+# Tier 1 buildout. The opt-in is still real and still explicit -- it's
+# just made once, in a file, instead of re-decided (or forgotten) every
+# time a terminal is opened.
+load_dotenv()
 DEFAULT_TRAINING_DATA_DIR = os.environ.get("FMH_TRAINING_DATA_DIR")
 VALID_REVIEW_LABELS = ("downtime", "real_action")
 # Every real review id this app ever writes is "<prefix>_<uuid4 hex>" (see

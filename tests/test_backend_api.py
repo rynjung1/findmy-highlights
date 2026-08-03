@@ -1128,7 +1128,12 @@ def write_review_record(training_data_dir, record_id, margin, label=None,
 
 
 def test_review_next_disabled_when_no_training_data_dir(tmp_path):
-    app = make_app(tmp_path)  # no training_data_dir
+    # Explicit "" (not the default None) to force-disable regardless of a
+    # real local .env's FMH_TRAINING_DATA_DIR -- None means "fall back to
+    # DEFAULT_TRAINING_DATA_DIR", which is no longer reliably unset now
+    # that a real .env exists at the project root (see README's
+    # transfer-learning writeup for why that default was added).
+    app = make_app(tmp_path, training_data_dir="")
     with TestClient(app) as client:
         r = client.get("/review/next")
     assert r.status_code == 404

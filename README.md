@@ -503,6 +503,128 @@ substantive finding about the three signals themselves. All three stay
 as investigation scripts, not production code — nothing here changes
 what the pipeline actually cuts.
 
+**Transfer learning from a pretrained action-recognition backbone:
+investigated, real numbers measured on this hardware, closed for now
+behind a real gate — not a model-quality problem, a label-volume one.**
+Every hand-crafted signal above (motion shape, pose, audio, temporal
+position, and their joint combination) is a human guess at one summary
+statistic that should separate a swing from ambient motion — and every
+one landed at or near chance. Real published work says this is the
+expected ceiling for that class of approach, not a sign of poor
+execution here: Driveline Baseball independently reports the same
+velocity-based swing-detection failure found in this project's own pose
+work; real bat-ball contact systems use multi-camera triangulation
+specifically because a single fixed camera can't resolve contact timing
+into one clean number; and SoccerNet-scale action-spotting research
+(764 hours, 110,458 events) tops out around 53% AP with a 2026 paper on
+precise event spotting stating plainly that keypoint-based methods fail
+under the blur/occlusion of fast sports motion — the same failure this
+project's own pose confidence (0.07-0.13 at the critical frame) already
+showed directly. A pretrained video backbone's learned, high-dimensional
+features are the genuinely different angle these findings point toward,
+not another hand-designed scalar.
+
+*License landscape, checked from primary sources, same bar this
+project already held MediaPipe/RF-DETR to.* Sport-specific action-
+spotting models were checked first and ruled out fast: SoccerNet's own
+baseline repo ships no downloadable pretrained checkpoint at all (train-
+from-scratch only) and is soccer-specific end to end — even its own
+"baseline" features are generic ImageNet ResNet-152, not a sports-aware
+backbone. That leaves general Kinetics-400 action-recognition backbones.
+Three checked directly: `torchvision.models.video.r3d_18` — torchvision's
+own docs explicitly decline to state a weights license ("may have their
+own licenses... derived from the dataset used for training"), not clean
+enough to trust the way the Apache-2.0 statements already on record for
+RF-DETR/MediaPipe were; `MCG-NJU/videomae-base-finetuned-kinetics` —
+confirmed **CC-BY-NC-4.0** directly from its Hugging Face model card,
+disqualified outright, non-commercial only; `microsoft/xclip-base-patch32`
+(196.6M params, Kinetics-400 trained) — confirmed **MIT** directly from
+its model card, the one clean candidate found, and the one taken forward
+for real testing.
+
+*Real compute cost, measured on this machine (Apple M4, 16GB, MPS), not
+assumed.* `torch`/`torchvision`/`transformers` are already pinned in
+`requirements.txt` (transitive deps of RF-DETR) — no new dependency
+needed to load it. First download+load: ~5.25 min one-time (~786MB,
+cached under `~/.cache/huggingface/` afterward, same pattern as
+`~/.roboflow/` for RF-DETR); warm load ~5-8s. Real per-window feature
+extraction (8 sampled frames, a 2s window) on real footage: 0.65-1.8s per
+window on MPS. The full real+ambient sample set below (181 windows)
+extracted in **2.76 min wall time** — cheap enough to run at review-
+queue candidate-generation time without becoming a real bottleneck next
+to the existing detection pipeline.
+
+*Real feature-space check, the same 11 real bat-swing-type ground-truth
+events / 170 real ambient samples the pose+audio validation above
+already established, so the result is directly comparable, not a new
+methodology invented for a friendlier number.* Leave-one-out nearest-
+centroid cosine similarity on the 512-dim pooled video embedding: **AUC
+0.587** — nominally the best single-signal number measured all night
+(pose 0.532, audio 0.523, the joint classifier's own single-feature
+subset scores all below 0.53). But run through a 2000-shuffle permutation
+test at this exact sample size (11 vs. 170) before trusting the number at
+all: the null AUC distribution this sample size alone produces has mean
+0.454 and std 0.137, and the observed 0.587 sits at only **p≈0.17** — its
+90th percentile alone (0.625) already exceeds the observed value. **Not
+statistically distinguishable from chance-level noise at n=11**, the
+identical trap this project's own standing rule already names for the
+Tier 2 audio work and the joint classifier above: a clean-looking small-
+sample number that doesn't survive real scrutiny. Reported honestly
+rather than rounded up to "the embedding approach works" — it might, but
+this measurement doesn't establish that either way.
+
+**The real blocker, found by checking the task's own premise rather than
+assuming it: `training_data/reviews/` held zero real labels.** The
+Tier 1 review queue has existed since the hard-cut/Edit Log work earlier
+tonight, gated behind `FMH_TRAINING_DATA_DIR` by explicit design (see
+Review/training queue above) — and the opt-in worked exactly as
+designed, which is also exactly the problem: nobody ever actually
+re-typed the env-var prefix on a real run, so real usage never
+accumulated anything to train on. This is more binding than the
+embedding-quality question above — even a well-separated feature space
+is worthless to a classifier with zero training examples, and the
+project's own Tier 3 bar (300-500 labels across 6-10 sessions) was never
+close to being met; it was at 0 of 300.
+
+**Fixed, for real, going forward — not just documented as a known
+gap.** `backend/app.py` now calls `python-dotenv`'s `load_dotenv()`
+before reading `FMH_TRAINING_DATA_DIR` (new pinned dependency,
+`python-dotenv==1.2.2`), and a real `.env` (project root, gitignored
+alongside `training_data/*.mp4`) sets `FMH_TRAINING_DATA_DIR=training_data`
+— the exact value the opt-in command already documented, just made
+persistent instead of re-decided every terminal session.
+`load_dotenv()` never overrides an already-exported shell value, so the
+explicit-opt-in property this design always cared about is unchanged:
+the decision to collect is still made once, deliberately, in a file
+anyone can read or delete, not silently defaulted in code.
+
+Verified for real, not just wired and assumed: started the backend
+fresh with `FMH_TRAINING_DATA_DIR` unset in the shell, confirmed
+`GET /review/next` returned the queue's real empty-state response
+(`200 {"done": true}`) rather than the "not enabled" 404 — proving the
+`.env` value was actually picked up with no manual export — then ran
+`scripts/smoke_api.py` against a real reference clip through this exact
+server and confirmed real `.mp4`+`.json` review records landed on disk
+with real pose/audio features attached, matching the schema documented
+above. **Then deleted those specific records and the batch that produced
+them** — `scripts/smoke_api.py` against a reference clip is precisely
+the synthetic-record risk `pipeline/review.py`'s own docstring already
+warns about, so proving the wiring works and letting a dev-tool run
+quietly become "the first accumulated labels" are kept separate on
+purpose. `training_data/reviews/` is back to genuinely zero real
+records after verification, same as before this investigation — ready
+for the first real game to actually start filling it.
+
+**Closed as investigated for now, gated on real usage, not on more
+research.** Nothing implemented against the pretrained features
+themselves — no classifier, no wiring into any real decision. The
+concrete condition for revisiting: let real games flow through the now-
+persistent review queue and accumulate a real batch of labels, then
+re-run the same embedding-separation check above on a sample size large
+enough for the permutation test to actually mean something, before
+spending any time on a classifier that — same as every learned-model
+discussion in this project — has nothing to learn from at n=0.
+
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
   validated against real footage the user supplied directly (not
@@ -1012,6 +1134,18 @@ install packages into system/global Python.
    Kept in its own `package.json`/lockfile, separate from the Python venv
    — see Version control workflow.
 
+8. **Create `.env`** (project root, gitignored — not part of a fresh
+   checkout, so this step is real, not optional busywork):
+
+   ```sh
+   echo 'FMH_TRAINING_DATA_DIR=training_data' > .env
+   ```
+
+   Without this, the backend still runs fine, but the Review Queue
+   silently collects nothing — see How to run it and Current Status's
+   transfer-learning writeup for why this matters and why it defaults on
+   this way instead of a per-session env-var prefix.
+
 ## How to run it
 
 **Full app (backend + frontend), two terminals:**
@@ -1030,18 +1164,24 @@ note in Known limitations about Vite's dev-server binding). Upload a
 video, click home plate on the preview frame, and it'll walk through
 processing to a finished, downloadable highlight video.
 
-To also collect Review Queue candidates from real detect jobs, set
-`FMH_TRAINING_DATA_DIR` before starting the backend (off by default —
-see Current Status's Review/training queue writeup for why this is an
-explicit opt-in, not a default):
-
-```sh
-FMH_TRAINING_DATA_DIR=training_data ./venv/bin/uvicorn backend.app:app --reload --port 8420
-```
-
-Then the sidebar's "Review Queue" tab has borderline clips to label, and
+Review Queue candidates from real detect jobs are now collected by
+default: a local `.env` (project root, gitignored) sets
+`FMH_TRAINING_DATA_DIR=training_data`, loaded automatically by
+`backend/app.py` via `python-dotenv` on startup — see Current Status's
+transfer-learning writeup for why this was flipped from "opt-in every
+session" to "opt-in once, in a file" (the queue existed for a while
+collecting nothing, because nobody kept re-typing the env-var prefix).
+The sidebar's "Review Queue" tab has borderline clips to label, and
 `./venv/bin/python scripts/review_stats.py` reports disagreement rates
 over whatever's been labeled so far.
+
+To run a one-off without collecting (e.g. a throwaway smoke test against
+a reference clip — see the transfer-learning writeup for why that
+matters, `.env`'s value doesn't get overridden by an unset shell var):
+
+```sh
+FMH_TRAINING_DATA_DIR= ./venv/bin/uvicorn backend.app:app --reload --port 8420
+```
 
 **Backend alone**, for poking at the API directly or before the frontend
 existed:
