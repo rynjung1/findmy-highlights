@@ -239,7 +239,7 @@ def test_generate_review_candidates_writes_json_and_calls_extractor(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(start_offset=2.0),
-        clip_runner=fake_runner)
+        clip_runner=fake_runner, xclip_feature_fn=lambda *a, **k: None)
 
     assert len(written) == 1
     assert len(calls) == 1
@@ -273,7 +273,7 @@ def test_generate_review_candidates_shifts_ss_to_by_start_offset(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(start_offset=4.266),
-        clip_runner=fake_runner)
+        clip_runner=fake_runner, xclip_feature_fn=lambda *a, **k: None)
 
     cmd = calls[0]
     ss = float(cmd[cmd.index("-ss") + 1])
@@ -299,7 +299,7 @@ def test_generate_review_candidates_pad_never_goes_negative(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(start_offset=0.0),
-        clip_runner=fake_runner)
+        clip_runner=fake_runner, xclip_feature_fn=lambda *a, **k: None)
 
     ss = float(calls[0][calls[0].index("-ss") + 1])
     assert ss == pytest.approx(0.0)  # 0.5 - 1.5 would be negative -> clamped
@@ -319,7 +319,8 @@ def test_generate_review_candidates_extraction_failure_is_non_fatal(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(),
-        clip_runner=failing_runner, warn=warnings.append)
+        clip_runner=failing_runner, warn=warnings.append,
+        xclip_feature_fn=lambda *a, **k: None)
 
     assert written == []
     assert len(warnings) == 1
@@ -352,7 +353,8 @@ def test_generate_review_candidates_extra_source_info_merged(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
-        extra_source_info={"batch_id": "abc123"})
+        extra_source_info={"batch_id": "abc123"},
+        xclip_feature_fn=lambda *a, **k: None)
 
     assert written[0]["source"]["batch_id"] == "abc123"
     assert written[0]["source"]["source_file"] == "v.mp4"
@@ -371,14 +373,16 @@ def test_config_hash_changes_when_thresholds_change(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path / "a", duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
-        seg_cfg=SegmentConfig(enter_thresh=0.006))
+        seg_cfg=SegmentConfig(enter_thresh=0.006),
+        xclip_feature_fn=lambda *a, **k: None)
     w2 = generate_review_candidates(
         final_segments=[(0.0, 30.0)], hard_cut_windows=[(10.0, 11.0)],
         motion_times=t, motion_scores=s, enter_scores=s, video_path="v.mp4",
         source_file="v.mp4", training_data_dir=tmp_path / "b", duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
-        seg_cfg=SegmentConfig(enter_thresh=0.009))
+        seg_cfg=SegmentConfig(enter_thresh=0.009),
+        xclip_feature_fn=lambda *a, **k: None)
     assert w1[0]["config_hash"] != w2[0]["config_hash"]
 
 
@@ -398,7 +402,8 @@ def test_generate_review_candidates_includes_veto_boundary(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         vetoed_segments=[(19.0, 21.0)],
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
-        rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner)
+        rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
+        xclip_feature_fn=lambda *a, **k: None)
 
     # the real motion spike used to make this vetoed window "risky"
     # legitimately also crosses enter_thresh, producing real
@@ -411,14 +416,14 @@ def test_generate_review_candidates_includes_veto_boundary(tmp_path):
     assert veto_written[0]["window"] == {"start_s": 19.0, "end_s": 21.0}
 
 
-def test_generate_review_candidates_attaches_pose_and_audio_features(tmp_path):
+def test_generate_review_candidates_attaches_pose_audio_and_xclip_features(tmp_path):
     t = np.arange(0, 30, 0.1)
     s = np.full_like(t, 0.001)
 
     def fake_runner(cmd):
         Path(cmd[-1]).write_bytes(b"fake")
 
-    calls = {"pose": [], "audio": []}
+    calls = {"pose": [], "audio": [], "xclip": []}
 
     def fake_pose(video_path, center_s):
         calls["pose"].append(center_s)
@@ -429,22 +434,30 @@ def test_generate_review_candidates_attaches_pose_and_audio_features(tmp_path):
         calls["audio"].append(center_s)
         return {"peak_amplitude": 0.5, "peak_t": center_s, "rise_time_s": 0.01}
 
+    def fake_xclip(video_path, center_s):
+        calls["xclip"].append(center_s)
+        return {"p_swinging": 0.83, "pos_prompt": "a baseball player swinging a bat",
+               "neg_prompt": "baseball players standing idle"}
+
     written = generate_review_candidates(
         final_segments=[(0.0, 30.0)], hard_cut_windows=[(10.0, 11.0)],
         motion_times=t, motion_scores=s, enter_scores=s, video_path="v.mp4",
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
-        pose_feature_fn=fake_pose, audio_feature_fn=fake_audio)
+        pose_feature_fn=fake_pose, audio_feature_fn=fake_audio,
+        xclip_feature_fn=fake_xclip)
 
     assert len(written) == 1
     assert written[0]["features_at_label_time"]["pose"]["peak_displacement_px"] == 42.0
     assert written[0]["features_at_label_time"]["audio"]["rise_time_s"] == 0.01
+    assert written[0]["features_at_label_time"]["xclip"]["p_swinging"] == 0.83
     # called at the candidate window's midpoint (10.0, 11.0) -> 10.5
     assert calls["pose"] == [10.5]
     assert calls["audio"] == [10.5]
+    assert calls["xclip"] == [10.5]
     # the candidate's own pre-existing features (e.g. peak_score for a
-    # hard-cut dip) must still be present alongside pose/audio, not
+    # hard-cut dip) must still be present alongside pose/audio/xclip, not
     # overwritten by them
     assert "peak_score" in written[0]["features_at_label_time"]
 
@@ -467,13 +480,13 @@ def test_generate_review_candidates_pose_skipped_without_zone(tmp_path):
         source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
-        audio_feature_fn=fake_audio)
+        audio_feature_fn=fake_audio, xclip_feature_fn=lambda *a, **k: None)
 
     assert "pose" not in written[0]["features_at_label_time"]
     assert "audio" in written[0]["features_at_label_time"]
 
 
-def test_generate_review_candidates_pose_and_audio_failures_are_non_fatal(tmp_path):
+def test_generate_review_candidates_pose_audio_xclip_failures_are_non_fatal(tmp_path):
     t = np.arange(0, 30, 0.1)
     s = np.full_like(t, 0.001)
 
@@ -486,6 +499,9 @@ def test_generate_review_candidates_pose_and_audio_failures_are_non_fatal(tmp_pa
     def failing_audio(video_path, center_s):
         raise RuntimeError("ffmpeg exploded")
 
+    def failing_xclip(video_path, center_s):
+        raise RuntimeError("xclip exploded")
+
     warnings = []
     written = generate_review_candidates(
         final_segments=[(0.0, 30.0)], hard_cut_windows=[(10.0, 11.0)],
@@ -494,15 +510,50 @@ def test_generate_review_candidates_pose_and_audio_failures_are_non_fatal(tmp_pa
         review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
         rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
         pose_feature_fn=failing_pose, audio_feature_fn=failing_audio,
-        warn=warnings.append)
+        xclip_feature_fn=failing_xclip, warn=warnings.append)
 
-    # the record itself is still written -- a pose/audio failure doesn't
-    # cost the whole candidate, same non-fatal philosophy as clip extraction
+    # the record itself is still written -- a pose/audio/xclip failure
+    # doesn't cost the whole candidate, same non-fatal philosophy as clip
+    # extraction
     assert len(written) == 1
     assert "pose" not in written[0]["features_at_label_time"]
     assert "audio" not in written[0]["features_at_label_time"]
+    assert "xclip" not in written[0]["features_at_label_time"]
     assert any("mediapipe exploded" in w for w in warnings)
     assert any("ffmpeg exploded" in w for w in warnings)
+    assert any("xclip exploded" in w for w in warnings)
+
+
+def test_generate_review_candidates_xclip_model_load_failure_is_non_fatal(tmp_path, monkeypatch):
+    # xclip_feature_fn NOT given -> generate_review_candidates tries to
+    # build a real pipeline.xclip.XClipModel itself; a real-world model
+    # load failure (no network on first download, etc.) must cost only
+    # the xclip feature, never the rest of the run.
+    import pipeline.review as review_module
+
+    def failing_build_xclip(*a, **k):
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr("pipeline.xclip.build_xclip", failing_build_xclip)
+
+    t = np.arange(0, 30, 0.1)
+    s = np.full_like(t, 0.001)
+
+    def fake_runner(cmd):
+        Path(cmd[-1]).write_bytes(b"fake")
+
+    warnings = []
+    written = review_module.generate_review_candidates(
+        final_segments=[(0.0, 30.0)], hard_cut_windows=[(10.0, 11.0)],
+        motion_times=t, motion_scores=s, enter_scores=s, video_path="v.mp4",
+        source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
+        review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
+        rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
+        warn=warnings.append)
+
+    assert len(written) == 1
+    assert "xclip" not in written[0]["features_at_label_time"]
+    assert any("no network" in w for w in warnings)
 
 
 # ---- real ffmpeg smoke test ----

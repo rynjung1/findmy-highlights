@@ -39,13 +39,18 @@ here, see README):
     anyway -- so it gets a very negative margin and sorts first).
 
 Every candidate, regardless of type, also gets real pose (wrist
-displacement, pipeline.pose) and audio (onset rise-time,
-pipeline.audio) features attached to features_at_label_time when the
-inputs needed for them are available (a real zone for pose; audio
-always attempted). This is instrumentation, not a cutting signal --
-see the README's Task 2 pose+audio validation writeup for whether
-either one earned real trust before anything downstream ever reads
-these fields for a real decision.
+displacement, pipeline.pose), audio (onset rise-time, pipeline.audio),
+and xclip (zero-shot "swinging" probability, pipeline.xclip) features
+attached to features_at_label_time when the inputs needed for them are
+available (a real zone for pose; audio and xclip always attempted).
+This is instrumentation, not a cutting signal -- see the README's Task 2
+pose+audio validation writeup and the later transfer-learning/zero-shot
+investigation writeups for whether any of the three earned real trust
+before anything downstream ever reads these fields for a real decision.
+xclip specifically cleared real statistical significance (AUC 0.690,
+p=0.012) but was held back from cutting decisions over a real,
+measured prompt-sensitivity risk on contact/hit-type events -- see
+pipeline/xclip.py's own docstring for the full reasoning.
 
 Selection: lowest margin first (most borderline, most useful to label),
 capped at ReviewConfig.max_candidates_per_video, plus (with probability
@@ -280,6 +285,14 @@ def _default_audio_feature_fn():
     return fn
 
 
+def _default_xclip_feature_fn(xclip):
+    from pipeline.xclip import swing_probability
+
+    def fn(video_path, center_s):
+        return swing_probability(video_path, center_s, xclip)
+    return fn
+
+
 def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
                                motion_scores, enter_scores, video_path,
                                source_file, training_data_dir, duration,
@@ -291,6 +304,7 @@ def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
                                extra_source_info=None, rng=None,
                                prober=probe_video_params, clip_runner=None,
                                pose_feature_fn=None, audio_feature_fn=None,
+                               xclip_feature_fn=None,
                                warn=None) -> list:
     """Entry point called from pipeline.run.process_video when the caller
     opts in with a real training_data_dir. Selects candidates, extracts a
@@ -304,14 +318,20 @@ def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
 
     `vetoed_segments`/`det_times`/`det_boxes`/`zone` are all optional
     (default None/[]) so every existing caller that predates
-    veto-boundary candidates and pose/audio features is unaffected --
-    veto candidates need `vetoed_segments`, pose features need real
+    veto-boundary candidates and pose/audio/xclip features is unaffected
+    -- veto candidates need `vetoed_segments`, pose features need real
     `det_times`/`det_boxes`/`zone` (skipped, not a crash, when zone is
     None -- an uncalibrated batch has no plate zone to crop a batter
-    from), audio features only need `video_path`. `pose_feature_fn`/
-    `audio_feature_fn`, if given, override the real
-    pipeline.pose/pipeline.audio calls -- tests inject cheap fakes here
-    the same way `clip_runner` lets them fake ffmpeg."""
+    from), audio and xclip features only need `video_path`.
+    `pose_feature_fn`/`audio_feature_fn`/`xclip_feature_fn`, if given,
+    override the real pipeline.pose/pipeline.audio/pipeline.xclip calls
+    -- tests inject cheap fakes here the same way `clip_runner` lets them
+    fake ffmpeg. Building the real X-CLIP model (xclip_feature_fn not
+    given) is itself wrapped and non-fatal, same as a single candidate's
+    own feature-extraction failure -- a missing network connection on
+    first download, or any other real-world model-load failure, costs
+    only this one instrumentation feature, never the rest of a real
+    detect job."""
     seg_cfg = seg_cfg or SegmentConfig()
     hard_cut_cfg = hard_cut_cfg or HardCutConfig()
     review_cfg = review_cfg or ReviewConfig()
@@ -352,6 +372,22 @@ def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
         pose_fn = None
     audio_fn = audio_feature_fn or _default_audio_feature_fn()
 
+    # Real X-CLIP model load (~786MB, network-dependent on first download)
+    # is wrapped and non-fatal, unlike pose's -- a review-queue run should
+    # never fail outright because this one instrumentation feature's model
+    # couldn't load. Built once, reused across every candidate (same
+    # reasoning as own_landmarker above).
+    if xclip_feature_fn is not None:
+        xclip_fn = xclip_feature_fn
+    else:
+        try:
+            from pipeline.xclip import build_xclip
+            xclip_fn = _default_xclip_feature_fn(build_xclip())
+        except Exception as e:
+            if warn:
+                warn(f"xclip model load failed, xclip feature disabled for this run: {e}")
+            xclip_fn = None
+
     try:
         written = []
         for c in chosen:
@@ -391,6 +427,15 @@ def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
                 audio_result = None
             if audio_result is not None:
                 features["audio"] = audio_result
+            if xclip_fn is not None:
+                try:
+                    xclip_result = xclip_fn(video_path, center_s)
+                except Exception as e:
+                    if warn:
+                        warn(f"xclip feature extraction failed for {record_id}: {e}")
+                    xclip_result = None
+                if xclip_result is not None:
+                    features["xclip"] = xclip_result
 
             record = {
                 "id": record_id,

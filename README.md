@@ -697,6 +697,197 @@ footage without either a genuinely different signal or enough real
 scale (more clips, more real events) to let a marginal aggregate number
 actually mean something.
 
+**Zero-shot VLM text-prompt querying and semantic crowd-reaction audio:
+the two angles that hadn't actually been tested yet. One clears the bar
+this project has held all night; the other is a clean, well-explained
+negative.** Both genuinely different from everything above: no
+classifier trained, no hand-crafted feature engineered — the pretrained
+model's own video-text or audio-event understanding *is* the
+classification signal.
+
+*Zero-shot X-CLIP (`microsoft/xclip-base-patch32`, MIT, already verified
+and cached from the transfer-learning investigation above) — its actual
+designed use case, not the raw-embedding probe already run and closed
+(nearest-centroid AUC 0.587, not significant).* Two prompts, decided in
+advance, not selected after seeing results: `"a baseball player swinging
+a bat"` vs. `"baseball players standing idle"`. Score = softmax
+P(swinging) over the pair. Same real event/ambient set, same frame
+extraction as every X-CLIP run tonight. Real result: **AUC 0.690**,
+permutation-test p=0.012 — cross-checked with an independent analytic
+method (Mann-Whitney U normal approximation, seed-independent by
+construction) giving p≈0.017, confirming this isn't an artifact of one
+Monte Carlo draw. This is a single pre-specified comparison, not "best
+of several tried" the way the flow features above were — so the
+multiple-comparisons discount that sank the flow/onset results doesn't
+apply here the same way, and **this is the first signal all night, in
+any of tonight's investigations, to actually clear conventional
+significance.** Recall-risk check (`clip_base1`-`4`, `clip_foul1`,
+`clip_whiff1`): five of six score at the 68th-98th percentile of
+ambient — comfortably separated, no near-bottom misses like the flow
+angle-change features showed. One exception: `clip_base3`/`e1` scores at
+the 43rd percentile — below the ambient median, a real, confirmed play
+that a naive threshold on this exact signal would score as *less*
+swing-like than half of genuine dead time. Not a catastrophic miss the
+way the flow investigation's 4th-percentile finding was, but a real,
+named exception, not glossed over.
+
+*Semantic crowd-reaction audio.* License-checked two candidates first:
+PANNs (`qiuqiangkong/audioset_tagging_cnn`) has an MIT-licensed
+`LICENSE.MIT` for the *code*, but no separate statement covering the
+pretrained checkpoints themselves (same ambiguity already disqualifying
+enough to pass over for torchvision's Kinetics weights above) — not
+used. `MIT/ast-finetuned-audioset-10-10-0.4593` (Audio Spectrogram
+Transformer, 86.6M params, AudioSet-527) — confirmed **BSD-3-Clause**
+directly from its Hugging Face model card, the clean candidate, used for
+real testing. Confirmed it exposes real, relevant classes:
+Cheering(66)/Applause(67)/Crowd(69)/Shout(8)/Yell(11)/Children
+shouting(13)/Clapping(63). Windowed carefully to avoid a real
+contamination risk this project's own standards demand catching: a real
+event's window can safely extend forward in time (still real either
+way), but an ambient window extending past its actual gap boundary into
+a neighboring real event would silently corrupt the ambient class — so
+every ambient window was clipped to its real gap (recomputed from ground
+truth directly, not just the sample instant), with `ASTFeatureExtractor`'s
+own zero-padding filling any resulting shorter input rather than ever
+reading real content. Real result: **AUC 0.414 — below chance**,
+p=0.826. Every score, real or ambient, was near-zero (max reaction
+probability across all 181 windows: 0.0160 for real events, meaning the
+model detected essentially no audible crowd/parent reaction anywhere in
+this reference set, real play or not) — a genuine, mechanistically
+explained negative, not a modeling failure: this is small rec-league
+footage, not the golf paper's broadcast-with-audible-gallery source
+material, and there's no real crowd-reaction acoustic signal in this
+audio for any model to find.
+
+**The "28 examples" claim, checked at the primary source per this
+project's own standing rule, does not hold up as stated.** The
+underlying paper is real — "Automatic Curation of Golf Highlights using
+Multimodal Excitement Features" (arXiv 1707.07075) — but its own text,
+fetched and quoted directly rather than trusted from a restated summary,
+gives different numbers: the cheer classifier's actual training set was
+**156 positive / 193 negative** samples, and the related commentator-
+excitement classifier's was **131 positive / 217 negative** — both
+reached via iterative bootstrapping from an unspecified, smaller seed
+set, not a flat 28-example classifier. The technique itself is also a
+different animal than what got tested here: hand-curated cheer clips
+from 2016 Masters broadcast footage plus YouTube, encoded with SoundNet
+(a 2016 model, not an AudioSet event classifier) into a 17,152-dim
+feature vector, then a linear SVM — real labeled data curation and a
+bootstrapping loop, not an off-the-shelf pretrained classifier's direct
+output. Surfaced plainly rather than quietly built on: the real bar this
+paper demonstrates (131-217 curated examples) is closer to this
+project's own Tier 3 range than the cited 28 would have suggested, and
+moot here regardless, since the crowd-reaction signal itself doesn't
+exist in this footage to classify.
+
+**Crowd-reaction audio closed the same honest way as everything else
+tonight — real model, real clean license, real test, real negative,
+mechanistically explained.** Zero-shot X-CLIP is different: it is the
+first result all night that clears real statistical significance with a
+named, understood exception, and per this project's own standard
+("worth pursuing toward something shippable" if a signal clears this
+bar), it's a real candidate for a next step — but nothing is
+implemented yet. Still open: whether P(swinging) alone is a safe enough
+signal for anything more than review-queue instrumentation given the
+`clip_base3` exception, what a real operating threshold would cost in
+false positives at n=11, and whether a larger, real-usage-accumulated
+label set changes the picture. Reporting the finding, not shipping
+against it — same discipline as every other investigation tonight.
+
+**Follow-up on the zero-shot result: the real mechanism behind
+`clip_base3`, a real 9-clip threshold gate, and the resulting decision
+— review-queue instrumentation, not a destructive cutting signal.**
+Two things had to be answered honestly before any implementation
+decision: was `clip_base3`'s below-median score a one-off or a real
+structural gap, and does a real candidate threshold actually survive
+this project's own recall/continuity gate.
+
+*`clip_base3` investigation — the first hypothesis was wrong, checked
+directly rather than assumed.* The initial guess ("the sampled window
+mostly shows a static pre-swing stance, not the swing itself") didn't
+survive a direct frame check: `clip_whiff1`'s entire sampled window is
+*also* completely static (its real swing at 14.5-14.8s falls outside the
+[11,13] window entirely), yet it scored highest of all six fragile
+clips. Real frames pulled and inspected for both clips before trusting
+either explanation — see the standing rule this project has applied to
+every scored-but-unverified claim tonight.
+
+Five prompt variants were tested instead, reusing the already-computed
+video embeddings (only the text side changes per variant, so this cost
+seconds, not minutes): a 3-way split adding "fielders actively making a
+play", a more specific "idle" phrasing, a defensive-negative pair, and a
+"swing vs. game-in-progress" framing. `clip_base3`'s own score genuinely
+moved (up to the 50th-68th percentile in 3 of 4 alternates) — confirming
+prompt wording is a real, adjustable lever, not a fixed ceiling. But
+**no variant beat the original pair's aggregate AUC** (0.690 stayed the
+best of all five tested; alternates ranged 0.620-0.683, each trading
+which specific clips look strong for which look weak).
+
+The real, more precise pattern, found by checking all six fragile clips
+across all five variants rather than stopping at `clip_base3` alone:
+**`clip_whiff1` — the one event with zero defensive reaction anywhere
+in its own ground-truth note — is the only one that stays robustly high
+(96th-98th percentile) regardless of prompt wording.** The five
+contact/hit-type events, all with fielders visibly converging in frame,
+swing between the 31st and 79th percentile depending on exact phrasing.
+That's a real, structural prompt-sensitivity tied to defensive activity
+being visible in the frame — not a `clip_base3`-specific fluke — and
+it's the same structural shape already closed for the plate-distance and
+person-proximity signals earlier in this project: a real signal that
+goes unstable on exactly the plays that matter most.
+
+*Threshold safety — a real gate, all 9 reference clips, explicit
+pass/fail, same structure hard-cut's own shipping gate uses.* A
+full-timeline sweep (contiguous, non-overlapping 2s windows, sequential
+decode with no seek overhead — 370 windows across all 9 clips in 1.1
+min) fed a real recall/continuity check: a "cut candidate" is defined as
+P(swinging) below a threshold for ≥2 consecutive windows (≥4s
+sustained), checked against every required and `check_continuity`
+window. Result, binary-searched to a precise boundary the same way
+`exit_thresh`/padding were: **9/9 clean through threshold 0.44; a real
+failure appears at 0.46**, on `clip_60/e5` (`hit_and_run`, window
+[137,148], a sustained dip to P=0.391 spanning [133.1,137.1]s). Worth
+naming plainly: **this is the exact same event** dynamic padding's own
+writeup and the skip-ahead investigation both already flagged fragile,
+under completely different signals — real, cross-validated confirmation
+that this specific play is a genuinely hard case for this footage, not
+an X-CLIP-specific artifact.
+
+**Decision: held back from destructive cutting, wired in as review-queue
+instrumentation instead — the same safe path already open for pose and
+audio, not a bet on a threshold that's shown real instability across
+prompt wording.** Even though a real, precise safe threshold (≤0.44)
+exists on the 9-clip gate, the `clip_base3`/defensive-activity finding
+above means the signal's *reliability*, not just its operating point, is
+what's unproven — the same category of risk this project has never
+shipped against on a 9-clip gate alone (see the enter-side/ambient-
+discount and hard-cut history above: passing today's reference set has
+never been treated as sufficient on its own). Implemented:
+`pipeline/xclip.py` (new) wraps the model, the verified MIT license, the
+winning prompt pair, and this whole writeup's reasoning in its own
+docstring; `pipeline/review.py`'s `generate_review_candidates` now
+attaches a real `features["xclip"]` (`p_swinging` + the exact prompt
+pair used) to every candidate's `features_at_label_time`, alongside pose
+and audio — always attempted (no zone-gating needed, unlike pose), and
+the real model build itself is wrapped and non-fatal (a network hiccup
+on first download costs only this one instrumentation feature, never
+the rest of a real detect job), matching the same non-fatal philosophy
+every other piece of review-queue instrumentation already follows. Real
+production callers (`pipeline.run.process_video`) need no changes at
+all — same zero-touch defaulting pose/audio already had. Every future
+real label collected through actual usage now doubles as X-CLIP
+validation data automatically, exactly the same mechanism pose+audio
+already established, with real accumulation now possible since
+`FMH_TRAINING_DATA_DIR` defaults on via `.env` (see the transfer-
+learning writeup above). Tests: `tests/test_review.py` extended to cover
+xclip feature attachment, per-candidate failure (non-fatal), and model
+*load* failure (non-fatal, via a real monkeypatched `build_xclip`) —
+existing tests that don't care about xclip specifically now pass an
+explicit no-op `xclip_feature_fn` so the fast unit suite never triggers
+a real (network-dependent) model load, the same "tests inject cheap
+fakes" discipline `clip_runner` already established. Full suite: 411
+passed.
+
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
   validated against real footage the user supplied directly (not
@@ -892,15 +1083,21 @@ Built so far:
   `pipeline.stitch` injects its own `runner`, so it's fully testable
   without real video I/O; `scripts/review_stats.py` is the Tier 1
   disagreement-rate report over whatever's been labeled so far.
-- **Pose / audio instrumentation** (`pipeline/pose.py`, `pipeline/audio.py`)
-  — real MediaPipe BlazePose wrist-displacement and real audio onset
-  rise-time, each independently license-verified (Apache 2.0) and
-  validated at real scale (see Current Status's pose+audio writeup for
-  the real AUC numbers, both ≈ chance). Wired into `pipeline.review` as
+- **Pose / audio / xclip instrumentation** (`pipeline/pose.py`,
+  `pipeline/audio.py`, `pipeline/xclip.py`) — real MediaPipe BlazePose
+  wrist-displacement, real audio onset rise-time, and real X-CLIP
+  zero-shot "swinging" probability, each independently license-verified
+  (Apache 2.0, Apache 2.0, MIT respectively) and validated at real scale
+  (see Current Status's pose+audio and transfer-learning/zero-shot
+  writeups for the real AUC numbers — pose and audio both ≈ chance;
+  xclip the one signal that cleared real statistical significance, AUC
+  0.690/p=0.012, held back from cutting decisions over a real,
+  documented prompt-sensitivity risk on defensive plays, not a
+  validation gap). Wired into `pipeline.review` as
   `features_at_label_time` instrumentation on every review-queue
-  candidate, never as an input to any real kept/cut decision — neither
-  module is imported by `pipeline.run`'s actual detection path, only by
-  the opt-in review-candidate generation step.
+  candidate, never as an input to any real kept/cut decision — none of
+  the three modules is imported by `pipeline.run`'s actual detection
+  path, only by the opt-in review-candidate generation step.
 - **CLI** (`scripts/detect.py` for one file, `scripts/detect_multi.py` for
   several) — print candidate segments as timestamps (or JSON with
   `--json` for the single-file CLI), and `--manifest PATH` to write a
