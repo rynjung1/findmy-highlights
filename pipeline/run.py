@@ -162,7 +162,9 @@ def process_video(video: str, zone, motion_only: bool = False,
             motion_times=motion.times, motion_scores=motion.scores,
             enter_scores=enter_scores, video_path=video,
             source_file=Path(video).name, training_data_dir=training_data_dir,
-            duration=motion.duration, seg_cfg=seg_cfg, warn=warn,
+            duration=motion.duration, vetoed_segments=vetoed,
+            det_times=det.times, det_boxes=det.boxes, zone=zone,
+            seg_cfg=seg_cfg, warn=warn,
             extra_source_info=training_data_source_info)
 
     return final, vetoed, motion.duration, motion, hard_cut_windows

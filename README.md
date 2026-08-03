@@ -303,6 +303,133 @@ check, before a learned classifier is a better bet than the current
 hand-tuned thresholds; nowhere close to what a first review session
 produces.
 
+**Pose + audio conjunction: investigated for real, at real scale, and
+closed as not clearing the bar — the third and fourth candidate
+signals from the same overnight investigation that produced the Tier 2
+audio work above.** Right provenance matters here, so it's recorded
+plainly: an owner request to "finish the pose validation" cited specific
+numbers (a real 115px-vs-77px wrist-displacement pair, 75%/25% recall/
+false-positive at a 15ms audio threshold) as having been produced
+"earlier tonight, this session." Checked directly before building
+anything further on top of it: neither claim held up. The real
+scratchpad evidence — a working `investigate3_audio_attack.py` (the
+exact 30%-of-peak rise-time method later rebuilt below) and real
+MediaPipe pose captures (`pose_seq_swing/`, `pose_seq_ambient/`,
+`pose_venv`) — exists, but in a **different, closed session's
+scratchpad, dated two days earlier**, not this session or this night.
+No output or results file was ever saved from either investigation, in
+either session, so the specific numbers were unverifiable, not just
+unreused. Both corrections were surfaced and acknowledged before any
+implementation began, rather than quietly building on an unverified
+premise — the same standing rule this project has applied to every
+other numeric claim tonight.
+
+**License, verified directly from the primary source, not the restated
+claim.** Fetched Google's own official model card
+(`storage.googleapis.com/mediapipe-assets/Model Card BlazePose GHUM
+3D.pdf`) before writing any code: page 2, "LICENSED UNDER: Apache
+License, Version 2.0" — covers the MediaPipe framework and all three
+pose_landmarker variants (Lite/Full/Heavy) alike. Also confirmed
+directly from the same card: the model's own stated out-of-scope
+condition ("people too far away from the camera, e.g. further than 14
+feet/4 meters") and its recommended "25% margin around the square
+circumscribing full-body" crop, both load-bearing design choices below,
+not assumptions.
+
+**Built fresh, per the correction above — nothing reused from either
+prior investigation's code.** `pipeline/pose.py`: wrist displacement
+(peak frame-to-frame pixel movement of either wrist, BlazePose landmarks
+15/16) measured inside a real per-frame crop of the near-plate person's
+own RF-DETR box (padded 25%, squared, matching the model card's own
+recommendation) — never the full frame (real game footage routinely
+puts the subject smaller/less centered than the model's validated
+scope) and never "largest box in frame" (can be a fielder standing
+closer to camera than the batter, the exact mistake the prior
+investigation's own notes said it had caught once already).
+`pipeline/audio.py`: onset rise-time (envelope rise from 30%-of-peak to
+peak, 5ms hop RMS envelope) — a different axis than the two audio
+signals already closed in Tier 2 above (amplitude: a miss and a hit are
+comparably loud; spectral ratio: the noise floor drifts across a real
+game), on the hypothesis that a real bat-ball contact is a genuinely
+fast transient regardless of loudness or spectral content. Real smoke
+test confirmed both modules run correctly end to end against real
+footage before any validation: at `clip_base3`'s own frame-verified
+contact instant (~12.0s), pose confidence measurably dropped (visibility
+0.07) at the fastest part of the motion — independently reproducing,
+from a from-scratch implementation, the exact phenomenon the closed
+prior investigation described.
+
+**Wired into the review queue as real instrumentation, not a cutting
+signal**: every candidate (all three types) now gets real pose and
+audio features attached to `features_at_label_time` whenever the inputs
+exist (pose needs a real plate zone; audio always attempted), so every
+future label collected through real usage doubles as validation data
+automatically — no separate research pass required going forward. Also
+added, per the original design's own explicit deferral note ("least
+payoff first... cheap to add once the infrastructure exists," now
+true): **veto-boundary crossings** as review-queue candidate type 3 — one
+candidate per `pipeline.fusion.apply_veto`-discarded segment, margin =
+`enter_thresh - peak_motion_in_window` (apply_veto is all-or-nothing,
+not a threshold crossing, so this reuses the one existing threshold that
+governs whether raw motion counts as action at all — same sign
+convention as hard-cut dips' own margin, so a vetoed window with real
+motion far above enter_thresh, the likeliest missed-detection case,
+sorts first).
+
+**Real, scaled validation (`scripts/pose_audio_validation.py`), not
+another single pair.** REAL events: every one of the 9 reference clips'
+own ground-truth events whose type plausibly involves a bat swing
+(`hit_and_run`, `hit_and_putout_first_base`, `pitch_swing_run`,
+`swing_and_miss`, `flyout_shortstop`, `foul_ball`) — 11 events, not a
+number chosen in advance, just what the project's own already-trusted
+annotations contain; each instant is parsed directly from that event's
+own frame-verified note text (e.g. "contact ~97"), not re-eyeballed.
+AMBIENT: real gaps between every annotated event window in each clip,
+sampled every 3s, staying 1.5s clear of any window edge — 170 real
+samples, deliberately a harder negative class than "a different event
+type" (real ordinary game motion: adjusting a helmet, walking, settling
+a stance — not literal silence).
+
+Real, freshly measured result, both signals essentially at chance:
+
+| signal | n (real / ambient) | real median | ambient median | AUC |
+|---|---|---|---|---|
+| pose (peak wrist displacement, px) | 10 / 118 | 115.0 | 100.0 | 0.532 |
+| audio (onset rise time, ms) | 11 / 170 | 25 | 25 | 0.523 |
+| pose + audio (naive z-score sum) | 10 / 118 | — | — | 0.531 |
+
+(AUC = P[a random real event scores higher/sharper than a random
+ambient sample]; 0.5 is chance, 1.0 is perfect separation. Pose skipped
+118 of 181 possible samples — 53 for no near-plate detection at that
+instant, mostly ambient gap samples where nobody was standing at the
+plate at all, an honest real-world gap in coverage, not a bug.) Ranges
+overlap heavily in both directions — ambient's own max wrist
+displacement (518.2px) exceeds every real swing's; audio's real and
+ambient medians are literally identical. With only 10-11 real examples
+the confidence interval on these AUCs is wide, but there's no visible
+trend being obscured by noise either — this is the same pattern already
+on record for the closed Tier 2 audio work above ("the clean small-
+sample separation was an artifact of the small sample, not a sign the
+approach was sound"), now reproduced a second time on a different
+signal pair. Plausible reason the systematic ambient set behaves so
+differently from a single hand-picked comparison point: real ordinary
+game motion between plays — a stance adjustment, a helmet tap, a few
+steps — is not distinguishable from a real swing by peak wrist
+displacement or attack sharpness alone, once sampled broadly and
+honestly instead of against one convenient quiet instant.
+
+**Closed as investigated-and-not-shipped, same category as the Tier 2
+audio work above** — neither pose alone, audio alone, nor their naive
+combination clears any reasonable bar to be a real cutting signal
+candidate. Not deleted: both modules stay in the codebase as real,
+tested, real-license-verified review-queue instrumentation (every future
+labeled candidate keeps accumulating both features for free), in case a
+much larger real label set someday tells a different story — but nothing
+downstream reads either feature for an actual kept/cut decision, and
+this shouldn't be revisited without either a fundamentally different
+angle on the same signals or a real, scaled label set the review queue
+itself will need real usage over time to accumulate.
+
 Open items:
 - No committed multi-file regression fixture. Multi-file logic was
   validated against real footage the user supplied directly (not
@@ -498,6 +625,15 @@ Built so far:
   `pipeline.stitch` injects its own `runner`, so it's fully testable
   without real video I/O; `scripts/review_stats.py` is the Tier 1
   disagreement-rate report over whatever's been labeled so far.
+- **Pose / audio instrumentation** (`pipeline/pose.py`, `pipeline/audio.py`)
+  — real MediaPipe BlazePose wrist-displacement and real audio onset
+  rise-time, each independently license-verified (Apache 2.0) and
+  validated at real scale (see Current Status's pose+audio writeup for
+  the real AUC numbers, both ≈ chance). Wired into `pipeline.review` as
+  `features_at_label_time` instrumentation on every review-queue
+  candidate, never as an input to any real kept/cut decision — neither
+  module is imported by `pipeline.run`'s actual detection path, only by
+  the opt-in review-candidate generation step.
 - **CLI** (`scripts/detect.py` for one file, `scripts/detect_multi.py` for
   several) — print candidate segments as timestamps (or JSON with
   `--json` for the single-file CLI), and `--manifest PATH` to write a
@@ -774,7 +910,22 @@ install packages into system/global Python.
    happens automatically on first detection run and is cached under
    `~/.roboflow/`.
 
-6. **Frontend (optional — only needed to use the Home view UI, not the
+6. **Pose model (optional — only needed for `pipeline/pose.py`'s review-
+   queue instrumentation, not the real detection/cutting pipeline):**
+   unlike RF-DETR above, this one has no auto-download wired in yet —
+   fetch it once manually:
+
+   ```sh
+   mkdir -p .cache/models
+   curl -sL -o .cache/models/pose_landmarker_full.task \
+     https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
+   ```
+
+   `.cache/` is gitignored, same as the RF-DETR cache above. Apache
+   License 2.0, verified directly against Google's own official model
+   card — see Current Status's pose+audio writeup.
+
+7. **Frontend (optional — only needed to use the Home view UI, not the
    CLI or bare API):** install Node.js (developed against Node 18.20;
    note the very latest `create-vite`/tooling needs Node 20+, but this
    project's own `frontend/package.json` was pinned to work with 18),

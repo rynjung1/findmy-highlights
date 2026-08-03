@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.review import (ReviewConfig, boundary_crossing_candidates,
                              generate_review_candidates,
-                             hard_cut_dip_candidates, select_candidates)
+                             hard_cut_dip_candidates, select_candidates,
+                             veto_boundary_candidates)
 from pipeline.segments import HardCutConfig, SegmentConfig
 from pipeline.stitch import VideoParams
 
@@ -92,6 +93,43 @@ def test_boundary_crossing_candidates_empty():
     assert boundary_crossing_candidates([]) == []
 
 
+# ---- veto_boundary_candidates ----
+
+def test_veto_boundary_candidate_basic_fields():
+    t = np.arange(0, 10, 0.1)
+    s = np.full_like(t, 0.001)
+    s[(t >= 4.0) & (t < 4.5)] = 0.004  # real motion despite the veto
+    cfg = SegmentConfig(enter_thresh=0.006)
+    candidates = veto_boundary_candidates([(3.0, 5.0)], t, s, cfg)
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c["candidate_type"] == "veto_boundary"
+    assert c["window"] == {"start_s": 3.0, "end_s": 5.0}
+    assert c["pipeline_decision"] == "cut"
+    assert c["features_at_label_time"]["peak_score"] == pytest.approx(0.004)
+    # margin = enter_thresh - peak_score
+    assert c["margin"] == pytest.approx(0.006 - 0.004)
+
+
+def test_veto_boundary_candidate_margin_more_negative_for_riskier_windows():
+    # a vetoed window whose peak motion sits FAR above enter_thresh
+    # (real motion the pipeline discarded anyway) must sort ahead of one
+    # that's only barely above -- i.e. a more negative/smaller margin
+    t = np.arange(0, 10, 0.1)
+    risky = np.full_like(t, 0.001)
+    risky[(t >= 4.0) & (t < 4.5)] = 0.05  # way above enter_thresh
+    mild = np.full_like(t, 0.001)
+    mild[(t >= 4.0) & (t < 4.5)] = 0.0065  # barely above enter_thresh
+    cfg = SegmentConfig(enter_thresh=0.006)
+    risky_margin = veto_boundary_candidates([(3.0, 5.0)], t, risky, cfg)[0]["margin"]
+    mild_margin = veto_boundary_candidates([(3.0, 5.0)], t, mild, cfg)[0]["margin"]
+    assert risky_margin < mild_margin
+
+
+def test_veto_boundary_candidates_empty_input():
+    assert veto_boundary_candidates([], [0.0], [0.0]) == []
+
+
 # ---- select_candidates ----
 
 def test_select_candidates_lowest_margin_first_and_capped():
@@ -113,6 +151,27 @@ def test_select_candidates_mixes_both_types_by_margin():
     cfg = ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0)
     chosen = select_candidates(hc, bc, [], [], 100.0, cfg, rng=random.Random(0))
     assert [c["candidate_type"] for c in chosen] == ["boundary_crossing", "hard_cut_dip"]
+
+
+def test_select_candidates_includes_veto_candidates_in_ranking():
+    hc = [{"candidate_type": "hard_cut_dip", "window": {"start_s": 0, "end_s": 1},
+          "margin": 5.0, "pipeline_decision": "cut", "features_at_label_time": {}}]
+    vb = [{"candidate_type": "veto_boundary", "window": {"start_s": 2, "end_s": 3},
+          "margin": -1.0, "pipeline_decision": "cut", "features_at_label_time": {}}]
+    cfg = ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0)
+    chosen = select_candidates(hc, [], [], [], 100.0, cfg, rng=random.Random(0),
+                               veto_candidates=vb)
+    assert [c["candidate_type"] for c in chosen] == ["veto_boundary", "hard_cut_dip"]
+
+
+def test_select_candidates_veto_candidates_defaults_to_none_unaffected():
+    # every pre-veto call site (positional, no veto_candidates arg) must
+    # behave exactly as before
+    hc = [{"candidate_type": "hard_cut_dip", "window": {"start_s": 0, "end_s": 1},
+          "margin": 5.0, "pipeline_decision": "cut", "features_at_label_time": {}}]
+    cfg = ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0)
+    chosen = select_candidates(hc, [], [], [], 100.0, cfg, rng=random.Random(0))
+    assert len(chosen) == 1 and chosen[0]["candidate_type"] == "hard_cut_dip"
 
 
 def test_select_candidates_no_control_when_rate_zero():
@@ -321,6 +380,129 @@ def test_config_hash_changes_when_thresholds_change(tmp_path):
         rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
         seg_cfg=SegmentConfig(enter_thresh=0.009))
     assert w1[0]["config_hash"] != w2[0]["config_hash"]
+
+
+# ---- generate_review_candidates: veto-boundary + pose/audio wiring ----
+
+def test_generate_review_candidates_includes_veto_boundary(tmp_path):
+    t = np.arange(0, 30, 0.1)
+    s = np.full_like(t, 0.001)
+    s[(t >= 20.0) & (t < 20.5)] = 0.05  # real motion inside the vetoed window
+
+    def fake_runner(cmd):
+        Path(cmd[-1]).write_bytes(b"fake")
+
+    written = generate_review_candidates(
+        final_segments=[(0.0, 30.0)], hard_cut_windows=[],
+        motion_times=t, motion_scores=s, enter_scores=s, video_path="v.mp4",
+        source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
+        vetoed_segments=[(19.0, 21.0)],
+        review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
+        rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner)
+
+    # the real motion spike used to make this vetoed window "risky"
+    # legitimately also crosses enter_thresh, producing real
+    # boundary_crossing candidates too -- this test only asserts the
+    # veto_boundary candidate itself flows all the way through storage,
+    # not that it's the only candidate type produced
+    veto_written = [w for w in written if w["candidate_type"] == "veto_boundary"]
+    assert len(veto_written) == 1
+    assert veto_written[0]["id"].startswith("vb_")
+    assert veto_written[0]["window"] == {"start_s": 19.0, "end_s": 21.0}
+
+
+def test_generate_review_candidates_attaches_pose_and_audio_features(tmp_path):
+    t = np.arange(0, 30, 0.1)
+    s = np.full_like(t, 0.001)
+
+    def fake_runner(cmd):
+        Path(cmd[-1]).write_bytes(b"fake")
+
+    calls = {"pose": [], "audio": []}
+
+    def fake_pose(video_path, center_s):
+        calls["pose"].append(center_s)
+        return {"peak_displacement_px": 42.0, "min_visibility": 0.9,
+               "n_frames_with_pose": 10}
+
+    def fake_audio(video_path, center_s):
+        calls["audio"].append(center_s)
+        return {"peak_amplitude": 0.5, "peak_t": center_s, "rise_time_s": 0.01}
+
+    written = generate_review_candidates(
+        final_segments=[(0.0, 30.0)], hard_cut_windows=[(10.0, 11.0)],
+        motion_times=t, motion_scores=s, enter_scores=s, video_path="v.mp4",
+        source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
+        review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
+        rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
+        pose_feature_fn=fake_pose, audio_feature_fn=fake_audio)
+
+    assert len(written) == 1
+    assert written[0]["features_at_label_time"]["pose"]["peak_displacement_px"] == 42.0
+    assert written[0]["features_at_label_time"]["audio"]["rise_time_s"] == 0.01
+    # called at the candidate window's midpoint (10.0, 11.0) -> 10.5
+    assert calls["pose"] == [10.5]
+    assert calls["audio"] == [10.5]
+    # the candidate's own pre-existing features (e.g. peak_score for a
+    # hard-cut dip) must still be present alongside pose/audio, not
+    # overwritten by them
+    assert "peak_score" in written[0]["features_at_label_time"]
+
+
+def test_generate_review_candidates_pose_skipped_without_zone(tmp_path):
+    # no pose_feature_fn given and zone=None (the default) -> pose
+    # feature must simply be absent, not attempted/crash
+    t = np.arange(0, 30, 0.1)
+    s = np.full_like(t, 0.001)
+
+    def fake_runner(cmd):
+        Path(cmd[-1]).write_bytes(b"fake")
+
+    def fake_audio(video_path, center_s):
+        return {"peak_amplitude": 0.5, "peak_t": center_s, "rise_time_s": 0.01}
+
+    written = generate_review_candidates(
+        final_segments=[(0.0, 30.0)], hard_cut_windows=[(10.0, 11.0)],
+        motion_times=t, motion_scores=s, enter_scores=s, video_path="v.mp4",
+        source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
+        review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
+        rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
+        audio_feature_fn=fake_audio)
+
+    assert "pose" not in written[0]["features_at_label_time"]
+    assert "audio" in written[0]["features_at_label_time"]
+
+
+def test_generate_review_candidates_pose_and_audio_failures_are_non_fatal(tmp_path):
+    t = np.arange(0, 30, 0.1)
+    s = np.full_like(t, 0.001)
+
+    def fake_runner(cmd):
+        Path(cmd[-1]).write_bytes(b"fake")
+
+    def failing_pose(video_path, center_s):
+        raise RuntimeError("mediapipe exploded")
+
+    def failing_audio(video_path, center_s):
+        raise RuntimeError("ffmpeg exploded")
+
+    warnings = []
+    written = generate_review_candidates(
+        final_segments=[(0.0, 30.0)], hard_cut_windows=[(10.0, 11.0)],
+        motion_times=t, motion_scores=s, enter_scores=s, video_path="v.mp4",
+        source_file="v.mp4", training_data_dir=tmp_path, duration=30.0,
+        review_cfg=ReviewConfig(max_candidates_per_video=5, control_sample_rate=0.0),
+        rng=random.Random(0), prober=lambda p: vp(), clip_runner=fake_runner,
+        pose_feature_fn=failing_pose, audio_feature_fn=failing_audio,
+        warn=warnings.append)
+
+    # the record itself is still written -- a pose/audio failure doesn't
+    # cost the whole candidate, same non-fatal philosophy as clip extraction
+    assert len(written) == 1
+    assert "pose" not in written[0]["features_at_label_time"]
+    assert "audio" not in written[0]["features_at_label_time"]
+    assert any("mediapipe exploded" in w for w in warnings)
+    assert any("ffmpeg exploded" in w for w in warnings)
 
 
 # ---- real ffmpeg smoke test ----

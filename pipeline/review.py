@@ -8,9 +8,9 @@ against the same 9 reference clips) and any test-shaped run never
 pollutes the label store with redundant records. See backend/app.py for
 how a real deployment opts in.
 
-Two candidate types (Tier 1 scope only -- veto-boundary candidates, and
-Tier 2/3 usage of the resulting labels (threshold calibration, a learned
-classifier), are deliberately not built here, see README):
+Three candidate types (Tier 2/3 usage of the resulting labels --
+threshold calibration, a learned classifier -- deliberately not built
+here, see README):
 
   - hard-cut dips: one candidate per real hard-cut window this run
     actually shipped (pipeline.segments.HardCutConfig/apply_hard_cuts).
@@ -26,6 +26,26 @@ classifier), are deliberately not built here, see README):
     hysteresis crossing from the pipeline's pre-extension segmentation
     (pipeline.segments.find_boundary_crossings). margin = |score -
     threshold| at that exact sample.
+  - veto-boundary crossings: one candidate per segment
+    pipeline.fusion.apply_veto discarded outright (no person detected
+    near its motion for its whole duration). apply_veto is an all-or-
+    nothing decision, not a threshold crossing, so there's no natural
+    per-sample margin the way enter/exit have one -- instead this reuses
+    enter_thresh, the same threshold that governs whether raw motion
+    counts as "action" at all: margin = enter_thresh - peak_motion_in_window,
+    same sign convention as hard-cut dips' own score_margin (a vetoed
+    window whose peak motion sits FAR above enter_thresh despite the
+    veto is the riskiest case -- real motion the pipeline discarded
+    anyway -- so it gets a very negative margin and sorts first).
+
+Every candidate, regardless of type, also gets real pose (wrist
+displacement, pipeline.pose) and audio (onset rise-time,
+pipeline.audio) features attached to features_at_label_time when the
+inputs needed for them are available (a real zone for pose; audio
+always attempted). This is instrumentation, not a cutting signal --
+see the README's Task 2 pose+audio validation writeup for whether
+either one earned real trust before anything downstream ever reads
+these fields for a real decision.
 
 Selection: lowest margin first (most borderline, most useful to label),
 capped at ReviewConfig.max_candidates_per_video, plus (with probability
@@ -60,6 +80,7 @@ from pipeline.stitch import probe_video_params
 CANDIDATE_KIND_TO_ID_PREFIX = {
     "hard_cut_dip": "hc",
     "boundary_crossing": "bc",
+    "veto_boundary": "vb",
     "control": "ctl",
 }
 
@@ -139,6 +160,34 @@ def boundary_crossing_candidates(crossings):
     return candidates
 
 
+def veto_boundary_candidates(vetoed_segments, motion_times, motion_scores,
+                             seg_cfg: SegmentConfig | None = None):
+    """One candidate per segment pipeline.fusion.apply_veto discarded
+    (no person detected near its motion for its whole duration). See
+    module docstring for the margin definition -- reuses enter_thresh
+    since apply_veto has no threshold-crossing sample of its own to
+    measure a margin against."""
+    cfg = seg_cfg or SegmentConfig()
+    motion_times = np.asarray(motion_times, dtype=float)
+    motion_scores = np.asarray(motion_scores, dtype=float)
+    candidates = []
+    for (a, b) in vetoed_segments:
+        idx = (motion_times >= a) & (motion_times <= b)
+        peak = float(motion_scores[idx].max()) if idx.any() else 0.0
+        margin = cfg.enter_thresh - peak
+        candidates.append({
+            "candidate_type": "veto_boundary",
+            "window": {"start_s": float(a), "end_s": float(b)},
+            "margin": margin,
+            "pipeline_decision": "cut",
+            "features_at_label_time": {
+                "peak_score": peak, "enter_thresh": cfg.enter_thresh,
+                "score_margin": margin, "duration_s": float(b - a),
+            },
+        })
+    return candidates
+
+
 def _control_candidate(final_segments, hard_cut_windows, duration, rng):
     """One random window well inside either a clearly-kept segment or a
     clearly-cut ordinary gap (never inside a hard-cut window -- that's
@@ -174,14 +223,16 @@ def _control_candidate(final_segments, hard_cut_windows, duration, rng):
 
 def select_candidates(hard_cut_candidates, boundary_candidates, final_segments,
                       hard_cut_windows, duration, config: ReviewConfig | None = None,
-                      rng=None):
-    """Ranks hard-cut-dip and boundary-crossing candidates together by
-    margin (lowest/most-borderline first), keeps the top
-    max_candidates_per_video, and (probabilistically) adds one control
-    sample. Pure logic -- no clip extraction, no I/O."""
+                      rng=None, veto_candidates=None):
+    """Ranks hard-cut-dip, boundary-crossing, and veto-boundary
+    candidates together by margin (lowest/most-borderline first), keeps
+    the top max_candidates_per_video, and (probabilistically) adds one
+    control sample. Pure logic -- no clip extraction, no I/O.
+    `veto_candidates` defaults to None/[] so every existing caller that
+    predates veto-boundary candidates is unaffected."""
     cfg = config or ReviewConfig()
     rng = rng or random.Random()
-    ranked = sorted(hard_cut_candidates + boundary_candidates,
+    ranked = sorted(hard_cut_candidates + boundary_candidates + (veto_candidates or []),
                     key=lambda c: c["margin"])
     chosen = list(ranked[:cfg.max_candidates_per_video])
     if rng.random() < cfg.control_sample_rate:
@@ -211,14 +262,35 @@ def _extract_review_clip(video_path, start_s, end_s, start_offset, pad_s,
     run(cmd)
 
 
+def _default_pose_feature_fn(det_times, det_boxes, zone, landmarker):
+    from pipeline.pose import wrist_displacement
+
+    def fn(video_path, center_s):
+        return wrist_displacement(video_path, det_times, det_boxes, zone,
+                                  center_s, landmarker=landmarker)
+    return fn
+
+
+def _default_audio_feature_fn():
+    from pipeline.audio import onset_features
+    cache = {}
+
+    def fn(video_path, center_s):
+        return onset_features(video_path, center_s, envelope_cache=cache)
+    return fn
+
+
 def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
                                motion_scores, enter_scores, video_path,
                                source_file, training_data_dir, duration,
+                               vetoed_segments=None, det_times=None,
+                               det_boxes=None, zone=None,
                                seg_cfg: SegmentConfig | None = None,
                                hard_cut_cfg: HardCutConfig | None = None,
                                review_cfg: ReviewConfig | None = None,
                                extra_source_info=None, rng=None,
                                prober=probe_video_params, clip_runner=None,
+                               pose_feature_fn=None, audio_feature_fn=None,
                                warn=None) -> list:
     """Entry point called from pipeline.run.process_video when the caller
     opts in with a real training_data_dir. Selects candidates, extracts a
@@ -228,19 +300,34 @@ def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
     tests). Never raises on a single candidate's clip-extraction failure
     -- one bad ffmpeg run shouldn't cost the rest of a real detect job's
     output; failures go through `warn` if given, matching
-    pipeline.run.process_video's existing non-fatal warning convention."""
+    pipeline.run.process_video's existing non-fatal warning convention.
+
+    `vetoed_segments`/`det_times`/`det_boxes`/`zone` are all optional
+    (default None/[]) so every existing caller that predates
+    veto-boundary candidates and pose/audio features is unaffected --
+    veto candidates need `vetoed_segments`, pose features need real
+    `det_times`/`det_boxes`/`zone` (skipped, not a crash, when zone is
+    None -- an uncalibrated batch has no plate zone to crop a batter
+    from), audio features only need `video_path`. `pose_feature_fn`/
+    `audio_feature_fn`, if given, override the real
+    pipeline.pose/pipeline.audio calls -- tests inject cheap fakes here
+    the same way `clip_runner` lets them fake ffmpeg."""
     seg_cfg = seg_cfg or SegmentConfig()
     hard_cut_cfg = hard_cut_cfg or HardCutConfig()
     review_cfg = review_cfg or ReviewConfig()
     rng = rng or random.Random()
+    vetoed_segments = vetoed_segments or []
 
     crossings = find_boundary_crossings(motion_times, enter_scores, seg_cfg,
                                         sustain_scores=motion_scores)
     hc_candidates = hard_cut_dip_candidates(hard_cut_windows, motion_times,
                                             motion_scores, hard_cut_cfg)
     bc_candidates = boundary_crossing_candidates(crossings)
+    vb_candidates = veto_boundary_candidates(vetoed_segments, motion_times,
+                                             motion_scores, seg_cfg)
     chosen = select_candidates(hc_candidates, bc_candidates, final_segments,
-                               hard_cut_windows, duration, review_cfg, rng)
+                               hard_cut_windows, duration, review_cfg, rng,
+                               veto_candidates=vb_candidates)
     if not chosen:
         return []
 
@@ -250,40 +337,79 @@ def generate_review_candidates(final_segments, hard_cut_windows, motion_times,
     config_hash = _config_hash(seg_cfg, hard_cut_cfg)
     now = datetime.now(timezone.utc).isoformat()
 
-    written = []
-    for c in chosen:
-        prefix = CANDIDATE_KIND_TO_ID_PREFIX[c["candidate_type"]]
-        record_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
-        clip_path = reviews_dir / f"{record_id}.mp4"
-        try:
-            _extract_review_clip(video_path, c["window"]["start_s"],
-                                 c["window"]["end_s"], info.start_offset,
-                                 review_cfg.clip_padding_s, clip_path,
-                                 runner=clip_runner)
-        except Exception as e:
-            if warn:
-                warn(f"review clip extraction failed for {record_id}: {e}")
-            continue
+    # Real pose detection loads a model once and reuses it across every
+    # candidate in this call (matching pipeline.pose.build_landmarker's
+    # own docstring) rather than paying model-load cost per candidate --
+    # only built when actually needed (a real zone + real detections).
+    own_landmarker = None
+    if pose_feature_fn is not None:
+        pose_fn = pose_feature_fn
+    elif zone is not None and det_times is not None and det_boxes is not None:
+        from pipeline.pose import build_landmarker
+        own_landmarker = build_landmarker()
+        pose_fn = _default_pose_feature_fn(det_times, det_boxes, zone, own_landmarker)
+    else:
+        pose_fn = None
+    audio_fn = audio_feature_fn or _default_audio_feature_fn()
 
-        source = {"video_path": str(video_path), "source_file": source_file}
-        if extra_source_info:
-            source.update(extra_source_info)
+    try:
+        written = []
+        for c in chosen:
+            prefix = CANDIDATE_KIND_TO_ID_PREFIX[c["candidate_type"]]
+            record_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
+            clip_path = reviews_dir / f"{record_id}.mp4"
+            try:
+                _extract_review_clip(video_path, c["window"]["start_s"],
+                                     c["window"]["end_s"], info.start_offset,
+                                     review_cfg.clip_padding_s, clip_path,
+                                     runner=clip_runner)
+            except Exception as e:
+                if warn:
+                    warn(f"review clip extraction failed for {record_id}: {e}")
+                continue
 
-        record = {
-            "id": record_id,
-            "created_at": now,
-            "source": source,
-            "window": c["window"],
-            "candidate_type": c["candidate_type"],
-            "pipeline_decision": c["pipeline_decision"],
-            "margin": c["margin"],
-            "features_at_label_time": c["features_at_label_time"],
-            "config_hash": config_hash,
-            "label": None,
-            "labeled_at": None,
-            "note": None,
-        }
-        (reviews_dir / f"{record_id}.json").write_text(json.dumps(record, indent=2))
-        written.append(record)
+            source = {"video_path": str(video_path), "source_file": source_file}
+            if extra_source_info:
+                source.update(extra_source_info)
+
+            features = dict(c["features_at_label_time"])
+            center_s = 0.5 * (c["window"]["start_s"] + c["window"]["end_s"])
+            if pose_fn is not None:
+                try:
+                    pose_result = pose_fn(video_path, center_s)
+                except Exception as e:
+                    if warn:
+                        warn(f"pose feature extraction failed for {record_id}: {e}")
+                    pose_result = None
+                if pose_result is not None:
+                    features["pose"] = pose_result
+            try:
+                audio_result = audio_fn(video_path, center_s)
+            except Exception as e:
+                if warn:
+                    warn(f"audio feature extraction failed for {record_id}: {e}")
+                audio_result = None
+            if audio_result is not None:
+                features["audio"] = audio_result
+
+            record = {
+                "id": record_id,
+                "created_at": now,
+                "source": source,
+                "window": c["window"],
+                "candidate_type": c["candidate_type"],
+                "pipeline_decision": c["pipeline_decision"],
+                "margin": c["margin"],
+                "features_at_label_time": features,
+                "config_hash": config_hash,
+                "label": None,
+                "labeled_at": None,
+                "note": None,
+            }
+            (reviews_dir / f"{record_id}.json").write_text(json.dumps(record, indent=2))
+            written.append(record)
+    finally:
+        if own_landmarker is not None:
+            own_landmarker.close()
 
     return written
