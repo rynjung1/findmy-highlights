@@ -1,43 +1,43 @@
 {
-  "id": "hc_fd234ab5033c",
-  "created_at": "2026-08-04T21:24:08.677835+00:00",
+  "id": "hc_5f2905bcab76",
+  "created_at": "2026-08-04T21:53:14.694528+00:00",
   "source": {
     "video_path": "reference_clips/full_game.mkv",
     "source_file": "full_game.mkv",
     "mined_by": "scripts/mine_review_candidates.py"
   },
   "window": {
-    "start_s": 1147.791815454935,
-    "end_s": 1148.1473360948435
+    "start_s": 519.4558634480788,
+    "end_s": 519.9156549064419
   },
   "candidate_type": "hard_cut_dip",
   "pipeline_decision": "cut",
-  "margin": -0.14447936009150908,
+  "margin": -0.04020854163695731,
   "features_at_label_time": {
     "peak_score": 0.0010190927423536777,
     "quiet_thresh": 0.002,
     "score_margin": 0.0009809072576463223,
-    "duration_s": 0.3555206399084909,
+    "duration_s": 0.4597914583630427,
     "min_raw_dip_s": 0.5,
-    "duration_margin": -0.14447936009150908,
+    "duration_margin": -0.04020854163695731,
     "pose": {
-      "peak_displacement_px": 121.88474401067737,
-      "min_visibility": 0.014607568271458149,
-      "n_frames_with_pose": 136
+      "peak_displacement_px": 222.929419402397,
+      "min_visibility": 0.013729562051594257,
+      "n_frames_with_pose": 128
     },
     "audio": {
-      "peak_amplitude": 0.1265423867000595,
-      "peak_t": 1148.355,
-      "rise_time_s": 0.01999999999998181
+      "peak_amplitude": 0.0660254444699857,
+      "peak_t": 519.04,
+      "rise_time_s": 0.07499999999993179
     },
     "xclip": {
-      "p_swinging": 0.8571795225143433,
+      "p_swinging": 0.6485963463783264,
       "pos_prompt": "a baseball player swinging a bat",
       "neg_prompt": "baseball players standing idle"
     }
   },
   "config_hash": "9604b3477cb7a64d",
-  "label": "real_action",
-  "labeled_at": "2026-08-04T21:46:37.668830+00:00",
+  "label": null,
+  "labeled_at": null,
   "note": null
 }
