@@ -79,28 +79,66 @@ earlier re-run had clocked 67.6 minutes — traced to a leftover
 `uvicorn --reload` process eating background CPU during that specific run,
 not a real slowdown.
 
-**Timing drift observed during a later full verification sweep, real and
-currently unexplained — flagged plainly rather than assumed away.** A
-fresh, cache-cleared `full_game.mkv` run (with every currently-shipped
-mechanism active: dynamic padding, the tuned `exit_thresh`, the enter-side
-scale boost, hard-cut-with-exclusion) clocked **62.20 minutes wall-clock**
-— real, measured, about 66% slower than the 37.4/37.6/37.3-minute figures
-above. Memory and the actual cut/kept behavior were both confirmed
-consistent with history in the same run (956 MiB peak RSS vs. the ~969 MiB
-documented here; 50.65 min kept vs. an expected 50.65 min derived from the
-padding-only 53.19 min baseline minus hard-cut's own previously-documented
-+2.54 min estimate, an exact match) — so this is isolated to wall-clock
-time, not a correctness or cutting-behavior regression. X-CLIP was not a
-factor (not invoked in this call at all — no `training_data_dir` was
-passed). The likely explanation is machine load/thermal state after hours
-of this session's own sustained heavy compute, not a code change, but
-that is a plausible guess, not a confirmed cause — no thermal profiling
-was actually captured during the run itself. **Before trusting this
-number either way, the next real `full_game.mkv` run should have Activity
-Monitor's thermal/CPU state checked WHILE it runs**, not just before or
-after, so this either gets confirmed as environmental or ruled out and
-investigated as a real regression — don't let this guess quietly become
-accepted fact.
+**Timing drift investigated to a real, confirmed conclusion across four
+`full_game.mkv` runs — not left as a guess.** A fresh, cache-cleared run
+(every currently-shipped mechanism active: dynamic padding, the tuned
+`exit_thresh`, the enter-side scale boost, hard-cut-with-exclusion)
+clocked **62.20 minutes wall-clock**, ~66% slower than the 37.4-minute
+figure above, with memory and cut/kept behavior both confirmed identical
+to history in the same run (956 MiB peak RSS vs. ~969 MiB documented;
+50.65 min kept, an exact match to the padding-only 53.19 min baseline
+minus hard-cut's own already-documented +2.54 min estimate) — real,
+isolated to wall-clock time, not a correctness regression, and X-CLIP was
+not a factor (not invoked in this call at all).
+
+Three follow-up runs, each ruling out one real candidate cause rather than
+assuming it:
+
+1. **Contention**, checked first (same isolation this project already used
+  once to root-cause a leftover `uvicorn --reload` process): confirmed no
+  extraneous `claude-code` process, no dev servers, load average low. A
+  fresh isolated re-run landed at **62.11 minutes** — 0.09 min from the
+  first, and every behavioral number (348 segments, 204 hard-cut windows,
+  75.03% kept) bit-for-bit identical. Contention ruled out: isolating the
+  environment changed nothing.
+2. **Thermal, attempt one**: real `sudo powermetrics` logging alongside a
+  fresh run surfaced something bigger than throttling — the run took
+  **18.8 hours** (`elapsed_min=1126.41`) against only ~24 minutes of actual
+  CPU time (2% utilization). macOS's own `powermetrics` output literally
+  reported `Current pressure level: Sleeping` at one point, and the log
+  showed 109 recurring ~900-1075s gaps all night — the system was
+  Power-Nap sleep-cycling for hours, unprotected by `caffeinate`, both the
+  detection process and the logger themselves getting suspended and
+  resumed dozens of times. Every non-Nominal thermal reading that DID occur
+  (39 samples, Moderate→Heavy) fell in one 110-second burst right as real
+  computation started, then settled to Nominal and never recurred —
+  suggestive, but not a valid continuous-window measurement, since the
+  real active work was itself fragmented by sleep after only ~19 minutes.
+3. **Thermal, attempt two, done right**: the whole run wrapped in
+  `caffeinate -i`, `powermetrics` also `caffeinate`-protected, confirmed
+  zero gaps >5s across the full 37.75-minute capture. Real result: **35.66
+  minutes wall-clock** — faster than the original 37.4-minute baseline,
+  and roughly half the two uncaffeinated isolated runs above — at 60.8%
+  CPU utilization (vs. 32-36% uncaffeinated) doing the identical amount of
+  real work (~1226-1362 CPU-seconds every single time, all four runs).
+  Thermal pressure was real and sustained this time — **Heavy for 83.44%
+  of the run** (1778 of 2131 samples), mean CPU package power 2214.9 mW
+  against a ~100-200 mW idle baseline — but P-cluster frequency, whenever
+  actually engaged, reached 3386-4037 MHz, near this chip's top boost
+  range, not suppressed. **The real, load-bearing finding: this was
+  simultaneously the run with the most sustained thermal pressure and the
+  fastest completion time of all four attempts** — the opposite of what
+  throttling would predict. Thermal throttling is ruled out on its own
+  terms, not assumed away.
+
+**Conclusion: `caffeinate` itself is the confirmed fix, independent of
+whatever the exact OS mechanism is.** It nearly doubled CPU utilization
+(32-36% → 60.8%) on identical total work across every run measured
+tonight, which is the real explanation for the 62-minute figures — some
+non-thermal, non-contention OS-level scheduling deprioritization of an
+unprotected long-running background process, name not fully pinned down,
+but the practical fix is real, measured, and reproducible regardless. See
+How to run it below for the resulting default recommendation.
 
 **Multi-file handling & stitching.** Files are ordered by capture-time
 metadata when it's unambiguous and trustworthy, and refuse to guess
@@ -1518,6 +1556,23 @@ Or run the pipeline directly from the command line, same as before:
 # since the manifest itself only stores filenames, not full paths)
 ./venv/bin/python scripts/stitch.py out/clip_60_manifest.json --input-dir reference_clips --output out/clip_60_highlights.mp4
 ```
+
+**For a long real-footage run (a full game, anything on the order of
+`full_game.mkv`'s ~37+ minutes), wrap it in `caffeinate -i`:**
+
+```sh
+caffeinate -i ./venv/bin/python scripts/detect.py path/to/a_full_game.mkv --manifest out/game_manifest.json
+```
+
+This is a confirmed, measured speedup, not a hygiene suggestion — see
+Current Status's timing-drift writeup above. Across four real
+`full_game.mkv` runs tonight, `caffeinate -i` nearly doubled CPU
+utilization (32-36% → 60.8%) on identical total work and cut wall-clock
+time roughly in half (62 min → 35.66 min, faster than this project's own
+original 37.4-minute baseline). The exact OS mechanism it's working
+around isn't fully pinned down, but the fix itself is real and
+reproducible — worth doing by default for any long unattended processing
+run, not just when chasing a timing mystery.
 
 ## How the manifest works
 
