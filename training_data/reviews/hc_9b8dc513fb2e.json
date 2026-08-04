@@ -1,43 +1,38 @@
 {
-  "id": "hc_d5d812f83cdf",
-  "created_at": "2026-08-04T19:37:38.939595+00:00",
+  "id": "hc_9b8dc513fb2e",
+  "created_at": "2026-08-04T21:24:08.677835+00:00",
   "source": {
     "video_path": "reference_clips/full_game.mkv",
     "source_file": "full_game.mkv",
     "mined_by": "scripts/mine_review_candidates.py"
   },
   "window": {
-    "start_s": 924.8608055992,
-    "end_s": 925.0077846021996
+    "start_s": 2659.822953863734,
+    "end_s": 2659.9699328667334
   },
   "candidate_type": "hard_cut_dip",
   "pipeline_decision": "cut",
   "margin": -0.35302099700038525,
   "features_at_label_time": {
-    "peak_score": 0.0006706849671900272,
+    "peak_score": 0.001524284016340971,
     "quiet_thresh": 0.002,
-    "score_margin": 0.0013293150328099728,
+    "score_margin": 0.00047571598365902905,
     "duration_s": 0.14697900299961475,
     "min_raw_dip_s": 0.5,
     "duration_margin": -0.35302099700038525,
-    "pose": {
-      "peak_displacement_px": 22.732884778448,
-      "min_visibility": 0.041838664561510086,
-      "n_frames_with_pose": 144
-    },
     "audio": {
-      "peak_amplitude": 0.1618185137011193,
-      "peak_t": 924.075,
-      "rise_time_s": 0.04000000000007731
+      "peak_amplitude": 0.10407147882013251,
+      "peak_t": 2659.3,
+      "rise_time_s": 0.010000000000218279
     },
     "xclip": {
-      "p_swinging": 0.9139256477355957,
+      "p_swinging": 0.6373032927513123,
       "pos_prompt": "a baseball player swinging a bat",
       "neg_prompt": "baseball players standing idle"
     }
   },
   "config_hash": "9604b3477cb7a64d",
-  "label": "downtime",
-  "labeled_at": "2026-08-04T20:55:10.862558+00:00",
+  "label": null,
+  "labeled_at": null,
   "note": null
 }
