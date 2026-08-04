@@ -10,8 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.fusion import (FusionConfig, PlateZone, apply_veto,
                              boxes_to_grid_mask, compute_occupancy, fuse,
-                             robust_box_width, scale_boost_factor,
-                             vetoed_overlapping_required, FusedResult)
+                             occupancy_near_times, robust_box_width,
+                             scale_boost_factor, vetoed_overlapping_required,
+                             FusedResult)
 
 # Geometry used throughout: 1920x1080 source, 480x270 analysis, no border,
 # 16x9 grid -> each grid cell is 120x120 source px.
@@ -371,3 +372,38 @@ def test_scale_boost_is_noop_with_no_reliable_width_signal():
     boxes = [[centered_box(1147, 840, w=100)] for _ in range(2)]
     f = scale_boost_factor(list(range(2)), boxes, FRAME, ZONE, reference_width_px=200)
     assert f == 1.0
+
+
+# ---- occupancy_near_times (enter-side debounce investigation) ----
+
+def test_occupancy_near_times_true_within_window():
+    times = np.array([0.0, 1.0, 2.0, 5.0, 10.0])
+    det_times = np.array([1.9])
+    occupied = np.array([True])
+    result = occupancy_near_times(times, det_times, occupied, window_s=0.5)
+    assert list(result) == [False, False, True, False, False]
+
+
+def test_occupancy_near_times_no_occupied_samples_at_all():
+    times = np.array([0.0, 1.0, 2.0])
+    det_times = np.array([0.5, 1.5])
+    occupied = np.array([False, False])
+    result = occupancy_near_times(times, det_times, occupied, window_s=1.0)
+    assert list(result) == [False, False, False]
+
+
+def test_occupancy_near_times_uses_nearest_of_multiple_occupied_samples():
+    times = np.array([5.0])
+    det_times = np.array([0.0, 4.8, 20.0])
+    occupied = np.array([True, True, True])
+    # nearest real occupied sample (4.8) is 0.2s away -- within window
+    result = occupancy_near_times(times, det_times, occupied, window_s=0.3)
+    assert list(result) == [True]
+
+
+def test_occupancy_near_times_exactly_at_window_boundary_is_true():
+    times = np.array([3.0])
+    det_times = np.array([1.0])
+    occupied = np.array([True])
+    result = occupancy_near_times(times, det_times, occupied, window_s=2.0)
+    assert list(result) == [True]  # distance == window_s, inclusive

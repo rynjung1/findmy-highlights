@@ -158,6 +158,89 @@ def test_enter_side_boost_opens_segment_raw_alone_would_miss():
     assert other_segs[0][1] == b
 
 
+# ---- enter-side occupancy debounce (investigation only, see
+# SegmentConfig.enter_debounce_s and
+# scripts/enter_occupancy_gate_investigation.py) ----
+
+def test_occupancy_near_none_is_identical_to_current_behavior():
+    # the whole safety property this needs: every existing caller (which
+    # never passes occupancy_near) must see byte-identical behavior
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, enter_debounce_s=1.0)
+    t = np.arange(0, 10, 0.1)
+    s = np.where((t >= 3) & (t <= 5), 1.0, 0.0)
+    assert scores_to_segments(t, s, c) == scores_to_segments(t, s, c, occupancy_near=None)
+
+
+def test_debounce_filters_a_brief_spike_with_no_occupancy_nearby():
+    # min_len_s=0.0 so the post-hoc short-segment filter can't be the
+    # reason nothing comes back -- isolating the debounce specifically
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, enter_debounce_s=0.5, min_len_s=0.0)
+    t = np.arange(0, 10, 0.1)
+    # a single-sample-ish spike (0.2s), well under enter_debounce_s=0.5s
+    s = np.where((t >= 3.0) & (t <= 3.2), 1.0, 0.0)
+    occ_near = np.zeros_like(t, dtype=bool)  # no occupancy evidence anywhere
+    assert scores_to_segments(t, s, c, occupancy_near=occ_near) == []
+    # confirm it WOULD have opened without the debounce (proves the test
+    # spike is real and above threshold, not a vacuous pass)
+    assert scores_to_segments(t, s, c) != []
+
+
+def test_debounce_still_opens_a_real_sustained_crossing_no_occupancy():
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, enter_debounce_s=0.5)
+    t = np.arange(0, 10, 0.1)
+    s = np.where((t >= 3) & (t <= 5), 1.0, 0.0)  # a real 2s burst
+    occ_near = np.zeros_like(t, dtype=bool)
+    segs = scores_to_segments(t, s, c, occupancy_near=occ_near)
+    assert len(segs) == 1
+    a, b = segs[0]
+    # ZERO content lost: the segment is backdated to the TRUE first
+    # crossing instant (t=3.0), not the later debounce-confirmation
+    # instant (t=3.5) -- the debounce only delays the DECISION to trust
+    # the crossing, never the segment's actual start time once trusted.
+    assert abs(a - 3.0) < 0.15
+
+
+def test_occupancy_present_opens_immediately_no_debounce_delay():
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, enter_debounce_s=0.5, min_len_s=0.0)
+    t = np.arange(0, 10, 0.1)
+    # same brief 0.2s spike that got filtered above -- but WITH occupancy
+    # evidence present throughout, it must open immediately, unaffected
+    s = np.where((t >= 3.0) & (t <= 3.2), 1.0, 0.0)
+    occ_near = np.ones_like(t, dtype=bool)
+    segs = scores_to_segments(t, s, c, occupancy_near=occ_near)
+    assert len(segs) == 1
+    a, _ = segs[0]
+    assert abs(a - 3.0) < 0.15
+
+
+def test_occupancy_appearing_mid_debounce_opens_at_true_first_crossing():
+    # occupancy absent for the first couple samples, then present --
+    # must open the instant occupancy appears, backdated to the TRUE
+    # first crossing (not the debounce-confirmation instant, and not
+    # requiring the full debounce to elapse once occupancy is seen)
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, enter_debounce_s=1.0)
+    t = np.arange(0, 10, 0.1)
+    s = np.where((t >= 3) & (t <= 5), 1.0, 0.0)
+    occ_near = (t >= 3.15) & (t <= 5)  # occupancy shows up 0.15s after the true crossing
+    segs = scores_to_segments(t, s, c, occupancy_near=occ_near)
+    assert len(segs) == 1
+    a, _ = segs[0]
+    assert abs(a - 3.0) < 0.15
+
+
+def test_debounce_does_not_affect_exit_side_at_all():
+    # the debounce is enter-only by design -- a segment already open
+    # must still close exactly where sustain_scores crosses exit_thresh,
+    # occupancy_near or not
+    c = cfg(enter_thresh=0.5, exit_thresh=0.3, enter_debounce_s=1.0)
+    t = np.arange(0, 10, 0.1)
+    s = np.where((t >= 3) & (t <= 5), 1.0, 0.0)
+    occ_near = np.zeros_like(t, dtype=bool)
+    without = scores_to_segments(t, s, c)
+    with_debounce = scores_to_segments(t, s, c, occupancy_near=occ_near)
+    assert without[0][1] == with_debounce[0][1]  # identical close time
+
+
 def test_smooth_scores_preserves_length_and_mean():
     t = np.arange(0, 10, 0.1)
     s = np.random.RandomState(0).rand(len(t))

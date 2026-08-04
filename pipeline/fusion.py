@@ -158,6 +158,46 @@ def compute_occupancy(det_times, det_boxes, zone: PlateZone,
     return occupied
 
 
+def occupancy_near_times(times, det_times, occupied, window_s: float):
+    """For each sample in `times` (the ~10Hz motion timeline), is there
+    real occupancy evidence (`occupied`, a bool array aligned with
+    `det_times`, e.g. from compute_occupancy) within `window_s` seconds
+    of it, in either direction?
+
+    Built for pipeline.segments' enter-side occupancy debounce (see
+    SegmentConfig.enter_debounce_s and enter_occupancy_window_s), where
+    checking a SINGLE nearest detection sample would be too fragile:
+    RF-DETR samples at ~1fps, so a genuinely real but fast swing can have
+    its exact contact instant land between detection samples, or briefly
+    lose the batter to motion blur/partial occlusion right at the moment
+    that matters most. Windowing across real seconds (not just the
+    nearest sample) gives a real, fast swing room to be caught by ANY
+    nearby detection -- the walk-up, the load, or the follow-through --
+    without needing the exact instant of contact itself to have a clean
+    detection.
+
+    Pure numpy, no video I/O -- real occupancy evidence is required as an
+    input, not computed here, so this stays independently testable from
+    compute_occupancy itself."""
+    times = np.asarray(times, dtype=float)
+    det_times = np.asarray(det_times, dtype=float)
+    occupied = np.asarray(occupied, dtype=bool)
+    occ_times = det_times[occupied]
+    if len(occ_times) == 0:
+        return np.zeros(len(times), dtype=bool)
+    # searchsorted-based nearest-neighbor distance, O(n log n) rather than
+    # the naive O(n * m) pairwise comparison -- real real-time cost matters
+    # here since this runs once per real detect job, on real ~10Hz arrays.
+    occ_times = np.sort(occ_times)
+    idx = np.searchsorted(occ_times, times)
+    idx_lo = np.clip(idx - 1, 0, len(occ_times) - 1)
+    idx_hi = np.clip(idx, 0, len(occ_times) - 1)
+    dist_lo = np.abs(times - occ_times[idx_lo])
+    dist_hi = np.abs(times - occ_times[idx_hi])
+    nearest_dist = np.minimum(dist_lo, dist_hi)
+    return nearest_dist <= window_s
+
+
 def compute_zone_velocity(det_times, det_boxes, zone: PlateZone):
     """Per detection sample: box-height-normalized speed (box-heights/sec)
     of the fastest in-zone box, relative to the nearest box in the

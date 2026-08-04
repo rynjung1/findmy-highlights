@@ -674,6 +674,93 @@ could itself miss a real, fast, partially-occluded swing occupancy
 detection fails to catch — a real risk to design around carefully, not
 a free win just because the correlation is real.
 
+**Enter-side occupancy gating: designed, simulated, and safety-validated
+against all 9 reference clips (the same non-negotiable bar every
+segments.py-adjacent change gets) — real, safe, but modest.** A real
+discovery made while designing this: `pipeline.fusion.fuse()` already
+computes an occupancy-boosted `combined` score
+(`motion + w_person*person_motion + w_occupancy*occupied`, provably
+`>= motion` everywhere) but it's **never used anywhere** in the shipped
+pipeline — a pure additive boost like that structurally can't fix a
+false-positive problem anyway, since it can only ever help a segment
+open, never suppress one. The real finding needed something that could
+genuinely suppress a false open, done safely.
+
+*Design, informed specifically by the partial-occlusion risk.* A hard
+veto (never open without occupancy evidence) was rejected outright — the
+exact failure mode the ambient-motion-discount investigation already
+closed as a structural dead end: a real, fast swing that occupancy
+detection itself misses (RF-DETR samples at ~1fps; a real contact
+instant can land between samples) would be silently discarded. Built as
+a **debounce** instead: when no occupancy evidence exists within
+`enter_occupancy_window_s` (2.5s, matching the scale of `pre_pad_s`, this
+project's own existing "how much real lead-time a play needs" constant)
+of a candidate enter crossing, the crossing must sustain for
+`enter_debounce_s` before being trusted, instead of opening on the very
+first sample — filtering brief, single-sample spikes that don't look
+like a real swing burst (the shortest known real bursts, clip_foul1/
+clip_300's e4, run ~1-1.5s, comfortably longer than any debounce tested).
+**Critical safety property, real not assumed:** once trusted, the
+segment is backdated to its own TRUE first-crossing instant, not the
+later confirmation instant — the debounce only ever delays the DECISION
+to trust a crossing, it never loses real content, by construction.
+Occupancy evidence, when present, is completely unaffected (opens
+immediately, zero change from today) — the mechanism only ever touches
+the "nobody visible nearby" case.
+
+Implemented as `pipeline.fusion.occupancy_near_times()` (windowed
+occupancy lookup, O(n log n) via searchsorted) and two new
+`SegmentConfig` fields (`enter_debounce_s`, `enter_occupancy_window_s`)
+plus an `occupancy_near` parameter on `scores_to_segments` (`None` by
+default — every existing caller, including `pipeline.run.process_video`,
+is byte-for-byte unaffected; `find_boundary_crossings` deliberately left
+untouched, a separate, review-queue-only concern). 10 new unit tests,
+including one proving the "zero content lost" backdating property
+directly. **Not wired into `process_video` — investigation only.**
+
+*Real simulation, `scripts/enter_occupancy_gate_investigation.py`,
+mirroring `scripts/regression.py`'s exact real recall/continuity checks
+(not a lighter bar) against the FULL real pipeline (motion → scale
+boost → scores_to_segments → veto → refine_segments) run twice per
+clip, baseline vs. debounce, identical in every other respect.* **9/9
+clean, zero regressions, at both `enter_debounce_s=0.3` and `0.5`** —
+recall, continuity, and total flagged time (600.9s, to the decimal)
+identical to baseline on all 9 clips, explicitly confirmed on
+`clip_base1`-`4`/`clip_foul1`/`clip_whiff1`. Checked this wasn't a
+vacuous pass: 728 of 3465 real above-enter_thresh samples across the 9
+clips (21.0%) genuinely had no occupancy nearby, so the debounce
+genuinely activated — it just never mattered for these clips' own real
+events, because every one of them has a real, visible batter near the
+plate (that's what the reference clips are *of*), so the "no occupancy"
+condition never coincides with a real required event here.
+
+*Real effectiveness check against the actual motivating data
+(`full_game.mkv`'s 16 labeled `enter` records) — honest, not dramatic.*
+Ran the debounce against the real full_game.mkv motion/detection data
+and checked whether any of the 16 real labeled instants changed
+open/closed status. At `enter_debounce_s=0.3`: 1 of 16 changed, and it
+was a real, correct fix — a `downtime`-labeled crossing that was wrongly
+open under baseline correctly stopped opening. Swept `enter_debounce_s`
+up to 2.0s (still well under any known real event's burst duration): the
+fix count plateaus at **2 of 11 real disagreements**, zero broken, from
+0.5s onward — the remaining ~9 false positives are apparently *sustained*
+motion without a visible batter (ambient milling that lasts real
+seconds, not a brief blip), a genuinely different failure mode a
+debounce can't touch by design, not a tuning gap to push further on.
+
+**Verdict: a real, safe, zero-cost mechanism that fixes a real but
+modest slice of the problem — worth keeping in the codebase as validated
+investigation infrastructure, not (yet) worth shipping into
+`process_video` for what it currently buys.** Fixing 2 of 11 real
+disagreements doesn't meaningfully move the 68.8% enter-side
+disagreement rate on its own. Real next step, if pursued: a
+sustained-motion-without-occupancy signal (closer to a proper veto, but
+one that specifically distinguishes "sustained ambient milling" from "a
+sustained real play the system just isn't recognizing" — the same
+structural question the ambient-discount investigation couldn't answer
+with the tools available then) would need to address the other 9, not
+a bigger debounce window on this same mechanism.
+
 **Pose + audio conjunction: investigated for real, at real scale, and
 closed as not clearing the bar — the third and fourth candidate
 signals from the same overnight investigation that produced the Tier 2

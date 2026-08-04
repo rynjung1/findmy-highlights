@@ -94,6 +94,40 @@ class SegmentConfig:
     merge_gap_s: float = 3.0
     # Drop segments shorter than this (seconds) AFTER merging.
     min_len_s: float = 1.0
+    # INVESTIGATION ONLY -- not wired into pipeline.run.process_video,
+    # see scripts/enter_occupancy_gate_investigation.py. Real finding
+    # behind this (README): boundary_crossing "enter" candidates with NO
+    # person detected near the plate within enter_occupancy_window_s
+    # disagreed with real human labels 100% of the time (6/6), vs. 50%
+    # (5/10) when someone WAS detected nearby -- but the exact opposite
+    # pattern held for "exit" (no-one-nearby was RIGHT 100% of the time),
+    # so the fix can't be a hard veto on the enter side (a real, fast,
+    # partially-occluded swing that occupancy detection itself misses
+    # would be silently discarded outright -- exactly the failure mode
+    # the ambient-motion-discount investigation already closed as a
+    # structural dead end for the same reason). This is a DEBOUNCE, not a
+    # veto: when no occupancy evidence exists nearby, the enter crossing
+    # still fires, just after `enter_debounce_s` of the raw score
+    # sustaining above enter_thresh (a couple of ~10Hz samples) instead
+    # of on the very first one -- filtering brief single-sample spikes
+    # (camera jitter, a passing bird) that don't look like a real ~1-1.5s
+    # swing burst (the shortest known real bursts, clip_foul1/clip_300's
+    # e4, per the enter_thresh margin investigation), while a genuinely
+    # sustained real crossing still opens, backdated to its own true
+    # first-crossing instant either way -- zero content is ever lost by
+    # the debounce itself, only the DECISION to trust it is delayed.
+    # Occupancy evidence (real or missing) NEVER changes anything when
+    # present -- only its absence triggers the debounce at all, so any
+    # clip with a visible batter near the plate (every reference clip
+    # with a calibrated zone) is structurally unaffected regardless of
+    # how thin its own enter_thresh margin already is.
+    enter_debounce_s: float = 0.3
+    # How far (seconds, both directions) to look for real occupancy
+    # evidence around a candidate enter crossing -- see
+    # pipeline.fusion.occupancy_near_times. Matches the scale of
+    # pre_pad_s (RefineConfig), the project's own existing "how much
+    # real lead-time does a play need" constant, not an arbitrary choice.
+    enter_occupancy_window_s: float = 2.5
 
 
 def smooth_scores(times: np.ndarray, scores: np.ndarray,
@@ -110,7 +144,7 @@ def smooth_scores(times: np.ndarray, scores: np.ndarray,
 
 
 def scores_to_segments(times, scores, config: SegmentConfig | None = None,
-                       sustain_scores=None):
+                       sustain_scores=None, occupancy_near=None):
     """Return a list of (start_s, end_s) candidate action segments.
 
     If `sustain_scores` is given, hysteresis becomes two-signal: a segment
@@ -120,6 +154,14 @@ def scores_to_segments(times, scores, config: SegmentConfig | None = None,
     a motion lull, but can never open a segment on their own (measured on
     the reference clips: letting them open segments only inflated flagged
     time, it never added a play that motion hadn't already found).
+
+    `occupancy_near`, if given, is a bool array aligned with `times` (see
+    pipeline.fusion.occupancy_near_times) -- INVESTIGATION ONLY, see
+    SegmentConfig.enter_debounce_s for the real finding this exists to
+    test and why it's a debounce, not a veto. None (default) is
+    identical to every existing caller's current behavior -- an enter
+    crossing always opens immediately, exactly as before this parameter
+    existed.
     """
     cfg = config or SegmentConfig()
     times = np.asarray(times, dtype=float)
@@ -132,14 +174,25 @@ def scores_to_segments(times, scores, config: SegmentConfig | None = None,
     else:
         sustain_scores = np.asarray(sustain_scores, dtype=float)
         sm_sustain = smooth_scores(times, sustain_scores, cfg.smooth_window_s)
+    occ_near = None if occupancy_near is None else np.asarray(occupancy_near, dtype=bool)
 
     segments = []
     open_start = None
-    for t, so, ss in zip(times, sm_open, sm_sustain):
+    pending_start = None  # true first-crossing instant, awaiting debounce confirmation
+    for i in range(len(times)):
+        t, so, ss = times[i], sm_open[i], sm_sustain[i]
         if open_start is None:
-            if so >= cfg.enter_thresh:
-                open_start = t
+            if so < cfg.enter_thresh:
+                pending_start = None
+                continue
+            if pending_start is None:
+                pending_start = t
+            if (occ_near is None or occ_near[i]
+                    or t - pending_start >= cfg.enter_debounce_s):
+                open_start = pending_start
+                pending_start = None
         else:
+            pending_start = None
             if ss < cfg.exit_thresh:
                 segments.append((open_start, t))
                 open_start = None
