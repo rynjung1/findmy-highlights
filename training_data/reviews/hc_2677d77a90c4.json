@@ -1,0 +1,43 @@
+{
+  "id": "hc_2677d77a90c4",
+  "created_at": "2026-08-04T19:37:38.939595+00:00",
+  "source": {
+    "video_path": "reference_clips/full_game.mkv",
+    "source_file": "full_game.mkv",
+    "mined_by": "scripts/mine_review_candidates.py"
+  },
+  "window": {
+    "start_s": 1178.1346236251964,
+    "end_s": 1178.281602628196
+  },
+  "candidate_type": "hard_cut_dip",
+  "pipeline_decision": "cut",
+  "margin": -0.35302099700038525,
+  "features_at_label_time": {
+    "peak_score": 0.00031356699764728546,
+    "quiet_thresh": 0.002,
+    "score_margin": 0.0016864330023527146,
+    "duration_s": 0.14697900299961475,
+    "min_raw_dip_s": 0.5,
+    "duration_margin": -0.35302099700038525,
+    "pose": {
+      "peak_displacement_px": 126.27016742597922,
+      "min_visibility": 0.03299441933631897,
+      "n_frames_with_pose": 144
+    },
+    "audio": {
+      "peak_amplitude": 0.15210474489338055,
+      "peak_t": 1178.075,
+      "rise_time_s": 0.015000000000100044
+    },
+    "xclip": {
+      "p_swinging": 0.8971728086471558,
+      "pos_prompt": "a baseball player swinging a bat",
+      "neg_prompt": "baseball players standing idle"
+    }
+  },
+  "config_hash": "9604b3477cb7a64d",
+  "label": null,
+  "labeled_at": null,
+  "note": null
+}
