@@ -168,6 +168,19 @@ class ReviewConfig:
     # happened to produce.
     control_sample_rate: float = 0.1
     clip_padding_s: float = 1.5
+    # None considers every real candidate type (hard_cut_dip,
+    # boundary_crossing, veto_boundary) in one shared margin ranking --
+    # unchanged default behavior. A real frozenset (e.g.
+    # {"boundary_crossing", "veto_boundary"}) restricts the ranked pool
+    # to just those types before ranking/capping. Added because
+    # hard_cut_dip's margins run systematically more negative on real
+    # footage (a hard-cut dip is explicitly "near or below quiet_thresh"
+    # by construction), so an unrestricted mining pass on a real game
+    # only ever surfaces hard_cut_dip candidates -- this is
+    # scripts/mine_review_candidates.py's --candidate-types flag's real
+    # lever for actually sampling the other two types instead of
+    # assuming their overlap behavior generalizes from hard_cut_dip's.
+    candidate_types: frozenset | None = None
 
 
 def _config_hash(seg_cfg: SegmentConfig, hard_cut_cfg: HardCutConfig) -> str:
@@ -301,11 +314,15 @@ def select_candidates(hard_cut_candidates, boundary_candidates, final_segments,
     the top max_candidates_per_video, and (probabilistically) adds one
     control sample. Pure logic -- no clip extraction, no I/O.
     `veto_candidates` defaults to None/[] so every existing caller that
-    predates veto-boundary candidates is unaffected."""
+    predates veto-boundary candidates is unaffected. `config.candidate_types`,
+    if set, restricts the ranked pool to just those types before
+    ranking/capping -- see ReviewConfig's own docstring for why."""
     cfg = config or ReviewConfig()
     rng = rng or random.Random()
-    ranked = sorted(hard_cut_candidates + boundary_candidates + (veto_candidates or []),
-                    key=lambda c: c["margin"])
+    pool = hard_cut_candidates + boundary_candidates + (veto_candidates or [])
+    if cfg.candidate_types is not None:
+        pool = [c for c in pool if c["candidate_type"] in cfg.candidate_types]
+    ranked = sorted(pool, key=lambda c: c["margin"])
     chosen = list(ranked[:cfg.max_candidates_per_video])
     if rng.random() < cfg.control_sample_rate:
         control = _control_candidate(final_segments, hard_cut_windows, duration, rng)

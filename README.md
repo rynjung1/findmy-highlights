@@ -525,6 +525,85 @@ matched an already-mined window... discarded rather than duplicated" —
 
 Full suite: 442 passed.
 
+**LOO-CV re-checked at n=58 (40 original + 18 more real labels): the
+ranking signal got stronger, the threshold instability didn't.** Raw and
+LOO-CV AUC both moved from 0.662 (p≈0.045) to **0.700 (p=0.0050 raw,
+p=0.0045 LOO-CV)** — a real, meaningful improvement, confirming the
+ranking-signal decision was the right call, not a lucky small-sample
+read. But the threshold-safety question specifically did **not**
+improve: naive-midpoint LOO accuracy (65.5%) still trails the majority-
+class baseline (69.0%, now higher since the class split drifted to
+40/18), and letting each fold fit its own best-separating threshold
+still collapses accuracy (43.1%, up only slightly from 37.5% at n=40),
+with the fitted threshold now clustering near the *maximum* observed
+value rather than settling into a stable middle — a different, still-
+unstable failure mode, not a resolved one. Why these move in opposite
+directions: AUC measures ranking quality across the whole distribution,
+which more data makes more reliable; a specific threshold's accuracy
+depends on how much the two distributions overlap in the boundary
+region, and more data of the *same kind* doesn't shrink that overlap, it
+just gives a more confident read that a real difference exists on
+average. Verdict unchanged and now better-supported: ranking only, no
+threshold.
+
+**That last point raised a real, checkable question: is the overlap
+specific to `hard_cut_dip` candidates, since every one of the 83
+candidates mined so far was that one type?** `pipeline.review.ReviewConfig`
+gained a `candidate_types` field (a real frozenset filter applied to the
+ranked pool before capping, default `None` = unrestricted, unchanged
+behavior) and `scripts/mine_review_candidates.py` a `--candidate-types`
+flag, so a mining pass can deliberately target `boundary_crossing`/
+`veto_boundary` instead of letting `hard_cut_dip`'s systematically more
+negative margins dominate every unrestricted ranking.
+
+**A real bug, found and fixed the same session it shipped, not
+discovered later.** The first type-restricted run (`--limit 30
+--candidate-types boundary_crossing,veto_boundary`) wrote **114**
+candidates — the dedup budget math (`existing + budget`) counted every
+existing record for this video regardless of type (83, all
+`hard_cut_dip`), even though none of those windows could ever match a
+`boundary_crossing` one; the run asked for 83+30=113 and every single
+one came back "genuinely new" since nothing overlapped, overshooting the
+requested 30 by 83. Root cause and fix: `_existing_windows_for_video()`
+now takes the same `candidate_types` filter and only counts existing
+records of those same types — a real regression test
+(`test_existing_windows_for_video_scoped_to_requested_types`) locks in
+the specific before/after behavior. The 83 excess records were trimmed
+back to the real 30 lowest-margin ones (matching exactly what a
+correctly-sized run would have produced, since both draws come from the
+identical deterministic ranked pool) and deleted, not left sitting in
+the queue past what was actually asked for.
+
+**Real, honest result once fixed: 30 real `boundary_crossing` candidates,
+zero `veto_boundary`.** Not a bug — consistent with this project's own
+already-documented finding that the veto mechanism essentially never
+fires on real footage ("no person-free motion run longer than 0.6s,"
+see Signal fusion above). `boundary_crossing` margins are real,
+genuinely distinct floats in the 1e-8-to-1e-5 range (not literal ties,
+just naturally tiny near a real hysteresis crossing) — the ranking is
+meaningful even though it looks like "0.0000" at 4 decimal places.
+Whether this genuinely different, non-`hard_cut_dip` sample shows the
+same threshold-overlap pattern is still open — these 30 are freshly
+mined and unlabeled, ready for whenever real labeling picks back up.
+
+**`scripts/mine_review_candidates.py` gained real dedup logic** the
+first mining pass didn't need: real candidate ranking is deterministic
+(same video, same config → the same ranked list), so a second mining
+pass over the same video would otherwise just regenerate the same
+lowest-margin windows already mined (and likely already labeled) instead
+of reaching new ones. `_existing_windows_for_video()` scans existing
+records for the same `source.video_path`, and `mine_one()` requests
+enough candidates to cover what's already mined plus the new budget,
+then deletes (not skips-silently) any real duplicate window before
+writing anything permanent. **Real run**: 18 more real candidates mined
+from `full_game.mkv` in one pass, correctly reporting "40 candidate(s)
+matched an already-mined window... discarded rather than duplicated" —
+58 total records, 58 distinct windows, confirmed zero duplicates. A
+later, dedup-protected pass added 25 more real `hard_cut_dip` candidates
+the same way (83 total at that point, 58 labeled).
+
+Full suite: 446 passed.
+
 **Pose + audio conjunction: investigated for real, at real scale, and
 closed as not clearing the bar — the third and fourth candidate
 signals from the same overnight investigation that produced the Tier 2

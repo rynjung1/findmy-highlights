@@ -155,6 +155,34 @@ def test_select_candidates_uncapped_when_max_is_none():
     assert len(chosen) == 40
 
 
+def test_select_candidates_type_filter_excludes_other_types():
+    # real footage: hard_cut_dip margins run systematically lower, so an
+    # unrestricted mining pass only ever surfaces this type -- the whole
+    # reason candidate_types exists (see ReviewConfig's own docstring).
+    hc = [{"candidate_type": "hard_cut_dip", "window": {"start_s": 0, "end_s": 1},
+          "margin": -5.0, "pipeline_decision": "cut", "features_at_label_time": {}}]
+    bc = [{"candidate_type": "boundary_crossing", "window": {"start_s": 2, "end_s": 2},
+          "margin": 3.0, "pipeline_decision": "enter", "features_at_label_time": {}}]
+    vb = [{"candidate_type": "veto_boundary", "window": {"start_s": 4, "end_s": 5},
+          "margin": 4.0, "pipeline_decision": "cut", "features_at_label_time": {}}]
+    cfg = ReviewConfig(max_candidates_per_video=None, control_sample_rate=0.0,
+                       candidate_types=frozenset({"boundary_crossing", "veto_boundary"}))
+    chosen = select_candidates(hc, bc, [], [], 100.0, cfg, rng=random.Random(0),
+                               veto_candidates=vb)
+    assert {c["candidate_type"] for c in chosen} == {"boundary_crossing", "veto_boundary"}
+    assert len(chosen) == 2
+
+
+def test_select_candidates_type_filter_none_considers_everything():
+    hc = [{"candidate_type": "hard_cut_dip", "window": {"start_s": 0, "end_s": 1},
+          "margin": -5.0, "pipeline_decision": "cut", "features_at_label_time": {}}]
+    bc = [{"candidate_type": "boundary_crossing", "window": {"start_s": 2, "end_s": 2},
+          "margin": 3.0, "pipeline_decision": "enter", "features_at_label_time": {}}]
+    cfg = ReviewConfig(max_candidates_per_video=None, control_sample_rate=0.0)
+    chosen = select_candidates(hc, bc, [], [], 100.0, cfg, rng=random.Random(0))
+    assert len(chosen) == 2
+
+
 def test_select_candidates_mixes_both_types_by_margin():
     hc = [{"candidate_type": "hard_cut_dip", "window": {"start_s": 0, "end_s": 1},
           "margin": 5.0, "pipeline_decision": "cut", "features_at_label_time": {}}]

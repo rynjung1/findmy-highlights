@@ -26,9 +26,23 @@ mining stops once it's spent, even mid-batch in --all-batches mode, so
 "pull roughly N candidates" means N however many videos that takes, not
 N per video.
 
+--candidate-types restricts which real candidate types are eligible
+(default: all three). Real, measured reason this exists: on real
+footage, hard_cut_dip's own margins run systematically more negative
+than boundary_crossing's or veto_boundary's (a hard-cut dip is by
+construction "near or below quiet_thresh"), so an unrestricted mining
+pass on a real game only ever surfaces hard_cut_dip -- every one of the
+83 candidates mined from full_game.mkv before this flag existed was
+hard_cut_dip. Use this to deliberately sample the other types instead of
+assuming their overlap/separability behavior generalizes from
+hard_cut_dip's own (see README's single-feature-model writeup for why
+that's a real, open question, not just curiosity).
+
 Usage:
     python scripts/mine_review_candidates.py reference_clips/full_game.mkv --limit 50
     python scripts/mine_review_candidates.py --all-batches --limit 50
+    python scripts/mine_review_candidates.py reference_clips/full_game.mkv --limit 30 \
+        --candidate-types boundary_crossing,veto_boundary
 """
 
 import argparse
@@ -39,22 +53,38 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.calibration import resolve_zone
-from pipeline.review import ReviewConfig
+from pipeline.review import CANDIDATE_KIND_TO_ID_PREFIX, ReviewConfig
 from pipeline.run import DEFAULT_CACHE_DIR, process_video
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_UPLOADS_ROOT = ROOT / "uploads"
 DEFAULT_TRAINING_DATA_DIR = ROOT / "training_data"
+# "control" isn't part of select_candidates' ranked pool at all (it's a
+# separate, probabilistic addition -- see pipeline.review._control_candidate),
+# so it's not a valid --candidate-types value.
+REAL_CANDIDATE_TYPES = frozenset(CANDIDATE_KIND_TO_ID_PREFIX) - {"control"}
 
 
-def _existing_windows_for_video(reviews_dir: Path, video_path) -> set:
+def _existing_windows_for_video(reviews_dir: Path, video_path, candidate_types=None) -> set:
     """(start_s, end_s) of every real record already on disk whose
     source.video_path matches this exact video -- real candidates are
     re-derived deterministically from a video's own motion/hard-cut
     computation every time (same video, same config -> the same ranked
     list), so re-mining the same video without this would just
     regenerate the same lowest-margin windows already mined (and
-    probably already labeled) last time, not reach anything new."""
+    probably already labeled) last time, not reach anything new.
+
+    `candidate_types`, if given, only counts existing records of those
+    same types -- REAL BUG FOUND AND FIXED HERE: the first version of
+    this function counted every existing record regardless of type, so
+    a type-restricted mining call (e.g. boundary_crossing/veto_boundary
+    only, with 83 existing hard_cut_dip records already on disk) sized
+    its budget as 83+30=113 even though none of those 83 hard_cut_dip
+    windows could ever match a boundary_crossing/veto_boundary one --
+    every one of the 113 came back "genuinely new" and none were
+    deduped, overshooting a --limit 30 request by 83 real, unwanted
+    candidates. Scoping the count to the same types being requested is
+    the real fix, not a magic-number workaround."""
     windows = set()
     if not reviews_dir.exists():
         return windows
@@ -63,13 +93,17 @@ def _existing_windows_for_video(reviews_dir: Path, video_path) -> set:
             record = json.loads(f.read_text())
         except json.JSONDecodeError:
             continue
-        if record.get("source", {}).get("video_path") == str(video_path):
-            w = record.get("window", {})
-            windows.add((w.get("start_s"), w.get("end_s")))
+        if record.get("source", {}).get("video_path") != str(video_path):
+            continue
+        if candidate_types is not None and record.get("candidate_type") not in candidate_types:
+            continue
+        w = record.get("window", {})
+        windows.add((w.get("start_s"), w.get("end_s")))
     return windows
 
 
-def mine_one(video_path, training_data_dir, budget, extra_source_info=None):
+def mine_one(video_path, training_data_dir, budget, extra_source_info=None,
+            candidate_types=None):
     """Runs the real pipeline against one video and mines up to `budget`
     GENUINELY NEW candidates from it -- possibly fewer, if the video
     doesn't have that many real borderline candidates left or a clip
@@ -99,14 +133,15 @@ def mine_one(video_path, training_data_dir, budget, extra_source_info=None):
         source_info.update(extra_source_info)
 
     reviews_dir = Path(training_data_dir) / "reviews"
-    existing_windows = _existing_windows_for_video(reviews_dir, video_path)
+    existing_windows = _existing_windows_for_video(reviews_dir, video_path, candidate_types)
     total_request = len(existing_windows) + budget
 
     before = set(reviews_dir.glob("*.json")) if reviews_dir.exists() else set()
     process_video(str(video_path), zone, cache_dir=DEFAULT_CACHE_DIR, warn=warn,
                   training_data_dir=str(training_data_dir),
                   training_data_source_info=source_info,
-                  review_cfg=ReviewConfig(max_candidates_per_video=total_request))
+                  review_cfg=ReviewConfig(max_candidates_per_video=total_request,
+                                          candidate_types=candidate_types))
     after = set(reviews_dir.glob("*.json")) if reviews_dir.exists() else set()
     new_files = sorted(after - before)
 
@@ -160,10 +195,24 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=50,
                     help="total candidates to mine across the whole run (default 50)")
     ap.add_argument("--training-data-dir", default=str(DEFAULT_TRAINING_DATA_DIR))
+    ap.add_argument("--candidate-types", default=None,
+                    help="comma-separated subset of {hard_cut_dip,boundary_crossing,"
+                         "veto_boundary} to restrict mining to (default: all three). "
+                         "Real reason to use this: hard_cut_dip's margins run "
+                         "systematically more negative on real footage, so an "
+                         "unrestricted pass only ever surfaces hard_cut_dip.")
     args = ap.parse_args()
 
     if bool(args.video) == bool(args.all_batches):
         ap.error("pass exactly one of: a video path, or --all-batches")
+
+    candidate_types = None
+    if args.candidate_types:
+        candidate_types = frozenset(t.strip() for t in args.candidate_types.split(","))
+        unknown = candidate_types - REAL_CANDIDATE_TYPES
+        if unknown:
+            ap.error(f"unknown candidate type(s) {sorted(unknown)}, expected a subset "
+                     f"of {sorted(REAL_CANDIDATE_TYPES)}")
 
     training_data_dir = Path(args.training_data_dir)
     remaining = args.limit
@@ -173,8 +222,10 @@ def main() -> None:
         video_path = Path(args.video)
         if not video_path.exists():
             ap.error(f"no such file: {video_path}")
-        print(f"mining {video_path} (budget {remaining})...")
-        written = mine_one(video_path, training_data_dir, remaining)
+        print(f"mining {video_path} (budget {remaining})"
+             f"{f', types={sorted(candidate_types)}' if candidate_types else ''}...")
+        written = mine_one(video_path, training_data_dir, remaining,
+                           candidate_types=candidate_types)
         total_written += len(written)
         print(f"  wrote {len(written)} candidate(s)")
     else:
@@ -193,9 +244,11 @@ def main() -> None:
                 if not video_path.exists():
                     print(f"  {batch_id}/{name}: file missing, skipping")
                     continue
-                print(f"mining {batch_id}/{name} (budget {remaining})...")
+                print(f"mining {batch_id}/{name} (budget {remaining})"
+                     f"{f', types={sorted(candidate_types)}' if candidate_types else ''}...")
                 written = mine_one(video_path, training_data_dir, remaining,
-                                   extra_source_info={"batch_id": batch_id})
+                                   extra_source_info={"batch_id": batch_id},
+                                   candidate_types=candidate_types)
                 total_written += len(written)
                 remaining -= len(written)
                 print(f"  wrote {len(written)} candidate(s), {max(remaining, 0)} left in budget")
