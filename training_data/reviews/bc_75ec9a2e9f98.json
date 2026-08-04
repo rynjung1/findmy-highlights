@@ -1,0 +1,35 @@
+{
+  "id": "bc_75ec9a2e9f98",
+  "created_at": "2026-08-04T22:14:07.900083+00:00",
+  "source": {
+    "video_path": "reference_clips/full_game.mkv",
+    "source_file": "full_game.mkv",
+    "mined_by": "scripts/mine_review_candidates.py"
+  },
+  "window": {
+    "start_s": 2492.3853735180687,
+    "end_s": 2492.3853735180687
+  },
+  "candidate_type": "boundary_crossing",
+  "pipeline_decision": "enter",
+  "margin": 4.298549838051627e-06,
+  "features_at_label_time": {
+    "score": 0.006004298549838052,
+    "threshold": 0.006,
+    "kind": "enter",
+    "audio": {
+      "peak_amplitude": 0.11210824199720394,
+      "peak_t": 2493.175,
+      "rise_time_s": 0.06500000000005457
+    },
+    "xclip": {
+      "p_swinging": 0.6380406022071838,
+      "pos_prompt": "a baseball player swinging a bat",
+      "neg_prompt": "baseball players standing idle"
+    }
+  },
+  "config_hash": "9604b3477cb7a64d",
+  "label": null,
+  "labeled_at": null,
+  "note": null
+}
