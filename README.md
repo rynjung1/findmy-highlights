@@ -604,6 +604,76 @@ the same way (83 total at that point, 58 labeled).
 
 Full suite: 446 passed.
 
+**X-CLIP's AUC confirmed on a genuinely mixed, harder set — not overfit
+to one candidate type.** Once real labels existed across `hard_cut_dip`,
+`boundary_crossing`, and a control sample together (114 labeled records:
+34 real_action, 80 downtime), raw AUC = **0.691** (permutation p=0.0005,
+2000 shuffles) — real_action median p_swinging 0.809 vs. downtime's
+0.669. This is the same signal already validated on the clean reference-
+clip swing/ambient set (0.690) and on `hard_cut_dip`-only real labels
+(0.700 at n=58) holding up on a structurally different, harder mix it
+was never tuned against — real evidence this is a genuine property of
+the signal, not a fit to one narrow candidate type.
+
+**A real, structural pattern found in `boundary_crossing`'s own
+disagreement rate, investigated down to the code, not left as "needs
+more labels."** Per-type disagreement rates on the 114 labeled records:
+`hard_cut_dip` 30.1% (25/83), `boundary_crossing` exit 28.6% (4/14), but
+**`boundary_crossing` enter 68.8% (11/16)** — far worse than everything
+else measured tonight. Pulled all 16 real `enter` records and looked for
+what actually separates the 11 disagreements from the 5 agreements.
+
+Every one of the 16 sits within 0.00001 of `enter_thresh` (0.006) — not
+a bug, just what "lowest margin first" mechanically selects — so raw
+score itself doesn't separate the groups (both groups run
+0.00600-0.00601). What does: **whether a person was detected near the
+plate at that exact instant** (`pose` present/absent in
+`features_at_label_time`, meaning a real near-plate RF-DETR box existed
+at all, not a missing-calibration artifact — this video has real
+calibration and other candidates in the same set have real pose data).
+`enter` crossings with no one detected near the plate: **wrong 100% of
+the time (6/6)**. With someone detected: wrong 50% of the time (5/10).
+Fisher's exact test on that split: p=0.093 — real and suggestive, not
+fully significant at this n (the "no pose" cell is only 6 records).
+
+**Checked whether this is just "pose correlates with correctness in
+general" by pulling the 14 real `exit` records the same way — it isn't;
+the direction flips, and that flip is the more informative result.**
+`exit` crossings with no one detected near the plate: correct 100% of
+the time (0/5 disagree). With someone detected: wrong 44.4% of the time
+(4/9). This is the same underlying signal read in both directions,
+mechanistically coherent: a real person still at the plate means the
+play is more likely still live (making a same-instant `enter` more
+likely right and an `exit` more likely wrong); nobody at the plate means
+it's more likely genuinely dead (the reverse). Confirmed directly against
+the code, not just inferred from the correlation:
+`pipeline.segments.scores_to_segments`/`find_boundary_crossings` open
+and close a segment purely from `smoothed_score >= enter_thresh` — the
+scale-boosted raw motion score alone, with **zero plate-occupancy or
+person-detection input** at the crossing decision itself (occupancy is
+used elsewhere in this pipeline — at-bat detection, zone velocity — but
+never gates the raw hysteresis crossing). The real data is showing
+exactly the gap the architecture predicts.
+
+**Honest calibration check before claiming this is "fixable" outright:
+neither the pipeline's own decision nor a naive pose-presence rule beats
+just guessing the majority class on this real 30-record boundary_crossing
+set** (21 downtime / 9 real_action, 70.0% majority baseline). The
+pipeline's own enter/exit decision: 50.0% (15/30) — *worse* than the
+baseline, a real, concerning number on its own regardless of what
+explains it. A naive "predict real_action iff a person is detected near
+the plate" rule: 66.7% (20/30) — a real, meaningful improvement over the
+pipeline's own decision, but still short of the trivial baseline, so
+this is a real structural insight about *where* the enter-side gap comes
+from, not yet a validated, ready-to-ship replacement rule. Investigation
+only — no pipeline logic changed. A real next step, if pursued, would
+need to weigh the same priority-rule tradeoff this project has navigated
+before with occupancy-based gating (see the enter-side ambient-discount
+investigation in Known Limitations): gating `enter` on plate occupancy
+could itself miss a real, fast, partially-occluded swing occupancy
+detection fails to catch — a real risk to design around carefully, not
+a free win just because the correlation is real.
+
 **Pose + audio conjunction: investigated for real, at real scale, and
 closed as not clearing the bar — the third and fourth candidate
 signals from the same overnight investigation that produced the Tier 2
