@@ -143,6 +143,17 @@ def test_select_candidates_lowest_margin_first_and_capped():
     assert [c["margin"] for c in chosen] == [3, 4, 5]
 
 
+def test_select_candidates_uncapped_when_max_is_none():
+    # scripts/mine_review_candidates.py's whole reason to exist: None
+    # means every real candidate, not a magic large number.
+    hc = [{"candidate_type": "hard_cut_dip", "window": {"start_s": i, "end_s": i + 1},
+          "margin": 10 - i, "pipeline_decision": "cut", "features_at_label_time": {}}
+         for i in range(40)]
+    cfg = ReviewConfig(max_candidates_per_video=None, control_sample_rate=0.0)
+    chosen = select_candidates(hc, [], [], [], 100.0, cfg, rng=random.Random(0))
+    assert len(chosen) == 40
+
+
 def test_select_candidates_mixes_both_types_by_margin():
     hc = [{"candidate_type": "hard_cut_dip", "window": {"start_s": 0, "end_s": 1},
           "margin": 5.0, "pipeline_decision": "cut", "features_at_label_time": {}}]

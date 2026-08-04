@@ -1144,7 +1144,7 @@ def test_review_next_done_when_queue_empty(tmp_path):
     with TestClient(app) as client:
         r = client.get("/review/next")
     assert r.status_code == 200
-    assert r.json() == {"done": True}
+    assert r.json() == {"done": True, "remaining": 0}
 
 
 def test_review_next_returns_lowest_margin_first(tmp_path):
@@ -1159,6 +1159,24 @@ def test_review_next_returns_lowest_margin_first(tmp_path):
     body = r.json()
     assert body["id"] == "hc_bbb"
     assert body["clip_url"] == "/review/hc_bbb/clip"
+    # 3 unlabeled records total, this one included -- a real backlog
+    # size, not just presence/absence of a next item (see
+    # scripts/mine_review_candidates.py for why this started mattering:
+    # a mined batch can be 30-50+, not the normal 5/run trickle).
+    assert body["remaining"] == 3
+
+
+def test_review_next_remaining_shrinks_as_records_are_labeled(tmp_path):
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_aaa", margin=1.0)
+    write_review_record(td, "hc_bbb", margin=2.0)
+    write_review_record(td, "hc_ccc", margin=3.0, label="downtime")  # already labeled
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.get("/review/next")
+    # only the 2 unlabeled records count -- an already-labeled one isn't
+    # part of "how much is left"
+    assert r.json()["remaining"] == 2
 
 
 def test_review_next_skips_already_labeled_records(tmp_path):
@@ -1219,6 +1237,8 @@ def test_review_label_writes_and_returns_next(tmp_path):
         r = client.post("/review/hc_aaa/label", json={"label": "real_action"})
     assert r.status_code == 200
     assert r.json()["id"] == "hc_bbb"
+    # hc_aaa just got labeled -- only hc_bbb is left unlabeled
+    assert r.json()["remaining"] == 1
 
     record = json.loads((td / "reviews" / "hc_aaa.json").read_text())
     assert record["label"] == "real_action"
@@ -1242,7 +1262,7 @@ def test_review_label_done_when_that_was_the_last_one(tmp_path):
     app = make_app(tmp_path, training_data_dir=td)
     with TestClient(app) as client:
         r = client.post("/review/hc_aaa/label", json={"label": "downtime"})
-    assert r.json() == {"done": True}
+    assert r.json() == {"done": True, "remaining": 0}
 
 
 def test_review_label_rejects_invalid_label_value(tmp_path):

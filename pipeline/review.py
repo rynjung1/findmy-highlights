@@ -92,7 +92,12 @@ CANDIDATE_KIND_TO_ID_PREFIX = {
 
 @dataclass
 class ReviewConfig:
-    max_candidates_per_video: int = 5
+    # None means uncapped -- ranked[:None] is a full-list slice in Python,
+    # so this is a real, first-class option, not a magic large number.
+    # Used by scripts/mine_review_candidates.py to pull every real
+    # candidate a video produces, deliberately bypassing the per-run
+    # default below (which stays 5 for every normal process_video call).
+    max_candidates_per_video: int | None = 5
     # probability, per process_video run, of adding one extra random
     # control sample from a clearly-not-borderline window -- "~1-in-10",
     # a per-run coin flip rather than a per-candidate one, since a

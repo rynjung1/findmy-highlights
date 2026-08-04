@@ -514,7 +514,7 @@ def create_app(uploads_root=None, run_in_background=None,
         records.sort(key=lambda r: (r["margin"] is None, r["margin"] or 0.0))
         return records
 
-    def _review_response(record: dict) -> dict:
+    def _review_response(record: dict, remaining: int) -> dict:
         return {
             "id": record["id"],
             "candidate_type": record["candidate_type"],
@@ -525,6 +525,12 @@ def create_app(uploads_root=None, run_in_background=None,
             "source": record["source"],
             "created_at": record["created_at"],
             "clip_url": f"/review/{record['id']}/clip",
+            # Total unlabeled records right now, INCLUDING this one -- so
+            # a caller showing "N remaining" doesn't off-by-one it. Added
+            # once a real mined batch (30-50+ candidates in one sitting,
+            # not the normal 5/run trickle) made "how much is left" a
+            # real question the UI had no answer to.
+            "remaining": remaining,
         }
 
     @app.get("/review/next")
@@ -534,8 +540,8 @@ def create_app(uploads_root=None, run_in_background=None,
         either way, since an empty queue isn't an error condition."""
         pending = _pending_reviews(_reviews_dir())
         if not pending:
-            return {"done": True}
-        return _review_response(pending[0])
+            return {"done": True, "remaining": 0}
+        return _review_response(pending[0], remaining=len(pending))
 
     @app.get("/review/{review_id}/clip")
     def get_review_clip(review_id: str):
@@ -567,8 +573,8 @@ def create_app(uploads_root=None, run_in_background=None,
 
         pending = _pending_reviews(reviews_dir)
         if not pending:
-            return {"done": True}
-        return _review_response(pending[0])
+            return {"done": True, "remaining": 0}
+        return _review_response(pending[0], remaining=len(pending))
 
     return app
 

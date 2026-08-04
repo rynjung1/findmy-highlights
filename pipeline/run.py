@@ -31,7 +31,8 @@ DEFAULT_CACHE_DIR = ROOT / ".cache" / "detections"
 
 def process_video(video: str, zone, motion_only: bool = False,
                   cache_dir=None, warn=None, on_stage=None,
-                  training_data_dir=None, training_data_source_info=None):
+                  training_data_dir=None, training_data_source_info=None,
+                  review_cfg=None):
     """Run the full pipeline on one video. `zone` is a PlateZone or None
     (already resolved by the caller — this function does no calibration
     lookup of its own, keeping single- and multi-file callers consistent).
@@ -53,6 +54,13 @@ def process_video(video: str, zone, motion_only: bool = False,
     backend/app.py for how a real deployment opts in. `training_data_source_info`,
     if given, is merged into each written record's `source` field
     (e.g. a real batch id) -- ignored unless `training_data_dir` is also set.
+    `review_cfg`, if given, overrides the default `ReviewConfig()` (5
+    candidates/video, see pipeline.review) -- ignored unless
+    `training_data_dir` is also set. The real backend and every CLI
+    script leave this None (unchanged default behavior);
+    scripts/mine_review_candidates.py is the one caller that passes a
+    real override, deliberately bypassing the per-run cap to build up a
+    real labeling batch.
 
     Returns (final_segments, vetoed, duration, motion_result,
     hard_cut_windows). hard_cut_windows is always [] for the
@@ -165,6 +173,7 @@ def process_video(video: str, zone, motion_only: bool = False,
             duration=motion.duration, vetoed_segments=vetoed,
             det_times=det.times, det_boxes=det.boxes, zone=zone,
             seg_cfg=seg_cfg, warn=warn,
-            extra_source_info=training_data_source_info)
+            extra_source_info=training_data_source_info,
+            review_cfg=review_cfg)
 
     return final, vetoed, motion.duration, motion, hard_cut_windows

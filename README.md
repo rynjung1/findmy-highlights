@@ -364,6 +364,85 @@ check, before a learned classifier is a better bet than the current
 hand-tuned thresholds; nowhere close to what a first review session
 produces.
 
+**Bulk candidate mining, real backlog handling, and real feature-vs-label
+pattern analysis — the label-accumulation infrastructure the Tier 3 bar
+above actually needs, built once real usage made "5 candidates per run"
+too slow a trickle to ever reach it.** Three real, separate pieces, all
+built on the existing Tier 1 machinery, none of it duplicated.
+
+*`scripts/mine_review_candidates.py` (new).* The per-run cap
+(`ReviewConfig.max_candidates_per_video`, still 5 for every normal
+`process_video` call) turned out to just be a config value —
+`select_candidates()`'s own `ranked[:cfg.max_candidates_per_video]`
+already returns everything when the cap is `None` (a real Python slicing
+property, not new logic), so widening the field to `int | None` and
+adding a `review_cfg` passthrough to `pipeline.run.process_video()`
+(defaults to `None`, zero behavior change for the backend or either CLI
+script) was the whole change needed to make "uncapped" a first-class
+option. The script itself reuses `process_video()` directly — real
+detection is already cached, so mining against an already-processed
+video is cheap — in two modes: a single video path (calibration resolved
+the same way `scripts/detect.py` does), or `--all-batches` (scans
+`uploads/*/` for batches with a real `manifest.json` — "already
+processed" — using each one's own `files.json` and calibration; a batch
+without a manifest is reported and skipped, never triggered into
+processing as a side effect of running this script). `--limit` is a
+total budget across the whole invocation, not per video. Mined records
+get `source.mined_by` set for provenance, same pattern as the existing
+`batch_id` tag. **Real run**: mined 40 real candidates from
+`reference_clips/full_game.mkv` in one invocation (detection cache hit,
+motion computed fresh) — all real hard-cut-dip candidates, real margins,
+real audio/xclip features attached (pose absent on the specific ones
+checked by hand, correctly, since no near-plate detection existed at
+those exact instants) — sitting in `training_data/reviews/` now, real
+and committed, unlabeled, ready.
+
+*Review-queue backlog handling.* The real gap wasn't queue-scan
+performance (`_pending_reviews` already re-reads and re-parses every
+record file, labeled and unlabeled, on every request — real, honest,
+O(n) with no cache or index, but trivial at the scale that matters here)
+— it was that nothing reported queue size at all;
+`ReviewQueueView.jsx`'s own `reviewedCount` was session-only, no
+denominator. Fixed with a `remaining` field added to `GET /review/next`
+and `POST /review/{id}/label`'s responses (both already compute the full
+pending list; this is just its length) and shown prominently in the UI.
+**Verified against the real 40-candidate batch above, not a synthetic
+one**: copied it to a scratch `training_data_dir` (never the real one —
+a script clicking through and labeling all 40 for real would have
+destroyed the actual batch before real labeling started), pointed a
+second real backend instance at the copy, and drove all 40 real
+`GET .../clip` + `POST .../label` calls end to end. `remaining` counted
+40 → 0 with zero gaps or off-by-ones. Real timing:
+`POST /review/{id}/label` mean 1.5ms/max 2.3ms, `GET /review/{id}/clip`
+mean 2.5ms/max 3.7ms — both effectively instant at this scale, confirming
+"smooth through 30-50+ in one sitting" empirically rather than assuming
+it from the O(n) design alone.
+
+*`scripts/review_stats.py` extended*: a new "Feature vs. label patterns"
+section, real distribution split by real label (not just an aggregate
+disagreement rate) for all four instrumentation features — motion score
+(`peak_score`/`score`, unified with a fallback since the two candidate
+types name it differently), pose `peak_displacement_px`, audio
+`rise_time_s`, xclip `p_swinging` — each reporting real n/min/median/
+mean/max per label group plus a real AUC (same `P[real_action >
+downtime]` formula used for every signal validation tonight), correctly
+oriented per feature (audio's own polarity is inverted — a short rise
+time is the real-action-like direction, not a long one — so its AUC is
+computed against the reversed pair, not naively). Records missing a
+feature are excluded from that feature's own analysis and the skip count
+reported, not hidden. Kept dependency-light (stdlib `statistics`, no new
+import), matching the script's existing style. 12 new unit tests cover
+the pure `auc()`/`_motion_score()`/`feature_label_pattern()` logic
+directly, including the audio-inversion case specifically (a real_action
+group with genuinely shorter rise times than downtime must still read as
+a *high*, correctly-oriented AUC).
+
+Nothing here changes what the pipeline cuts or how a real detect job
+behaves by default — `mine_review_candidates.py` is the one real caller
+that ever passes a non-default `review_cfg`, and the `remaining` field
+is purely additive to the existing response shape. Full suite (429
+passed) confirmed clean before and after.
+
 **Pose + audio conjunction: investigated for real, at real scale, and
 closed as not clearing the bar — the third and fourth candidate
 signals from the same overnight investigation that produced the Tier 2
@@ -1500,7 +1579,20 @@ session" to "opt-in once, in a file" (the queue existed for a while
 collecting nothing, because nobody kept re-typing the env-var prefix).
 The sidebar's "Review Queue" tab has borderline clips to label, and
 `./venv/bin/python scripts/review_stats.py` reports disagreement rates
-over whatever's been labeled so far.
+and real feature-vs-label patterns over whatever's been labeled so far.
+
+To build up a real labeling batch in one sitting instead of waiting on
+the normal 5-per-run trickle (see Current Status's bulk-mining writeup
+above for the real numbers this was verified against):
+
+```sh
+# mine up to 50 real candidates from one video (calibration resolved the
+# same way scripts/detect.py does)
+./venv/bin/python scripts/mine_review_candidates.py path/to/a_game.mkv --limit 50
+
+# or mine across every already-processed batch under uploads/
+./venv/bin/python scripts/mine_review_candidates.py --all-batches --limit 50
+```
 
 To run a one-off without collecting (e.g. a throwaway smoke test against
 a reference clip — see the transfer-learning writeup for why that

@@ -21,6 +21,7 @@ export default function ReviewQueueView() {
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [reviewedCount, setReviewedCount] = useState(0)
+  const [remaining, setRemaining] = useState(null)
 
   useEffect(() => {
     loadNext()
@@ -43,9 +44,11 @@ export default function ReviewQueueView() {
       setLoadState('disabled')
     } else if (next.done) {
       setItem(null)
+      setRemaining(0)
       setLoadState('empty')
     } else {
       setItem(next)
+      setRemaining(next.remaining)
       setLoadState('item')
     }
   }
@@ -118,6 +121,11 @@ export default function ReviewQueueView() {
         {reviewedCount > 0 ? `${reviewedCount} labeled this session. ` : ''}
         Watch the clip, then say whether the pipeline's decision was right.
       </p>
+      {remaining !== null && (
+        <p style={{ fontWeight: 600, margin: '4px 0 14px' }}>
+          {remaining} remaining
+        </p>
+      )}
 
       {error && <p className="alert alert-danger">{error}</p>}
 
