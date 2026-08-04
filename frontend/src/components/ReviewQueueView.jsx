@@ -7,6 +7,20 @@ const CANDIDATE_TYPE_LABEL = {
   control: 'Control sample',
 }
 
+// Mirrors pipeline.review.DECISION_EXPECTS_LABEL -- what a
+// pipeline_decision claims about its own instant, used here only to
+// show whether xclip's own p_swinging score agrees, not to decide
+// anything. The backend already reorders the queue by real disagreement
+// (see pipeline.review.review_priority_key); this is the transparency
+// half of that -- showing the raw signal so a reviewer can see WHY an
+// item was surfaced, never a silent reorder.
+const DECISION_EXPECTS_LABEL = {
+  cut: 'downtime',
+  exit: 'downtime',
+  kept: 'real_action',
+  enter: 'real_action',
+}
+
 // Tier 1 review queue (see README's Task 2 design, pipeline/review.py,
 // backend/app.py): a global queue, not scoped to any one batch -- shows
 // the pipeline's own most-borderline hard-cut and segment-boundary
@@ -113,6 +127,12 @@ export default function ReviewQueueView() {
   }
 
   const isControl = item.candidate_type === 'control'
+  const xclip = item.features_at_label_time && item.features_at_label_time.xclip
+  const expectedLabel = DECISION_EXPECTS_LABEL[item.pipeline_decision]
+  const xclipDisagrees = xclip && expectedLabel && (
+    (expectedLabel === 'downtime' && xclip.p_swinging > 0.5) ||
+    (expectedLabel === 'real_action' && xclip.p_swinging < 0.5)
+  )
 
   return (
     <div className="card">
@@ -145,6 +165,14 @@ export default function ReviewQueueView() {
         </span>
         {item.margin !== null && item.margin !== undefined && (
           <span className="badge">margin: {item.margin.toFixed(4)}</span>
+        )}
+        {xclip && (
+          <span className="badge">xclip p(swinging): {xclip.p_swinging.toFixed(3)}</span>
+        )}
+        {xclipDisagrees && (
+          <span className="badge badge-warning">
+            xclip signal disagrees with pipeline decision
+          </span>
         )}
         {isControl && <span className="badge badge-warning">control sample</span>}
       </div>

@@ -443,6 +443,88 @@ that ever passes a non-default `review_cfg`, and the `remaining` field
 is purely additive to the existing response shape. Full suite (429
 passed) confirmed clean before and after.
 
+**First real single-feature model against real human labels: xclip
+p_swinging alone, n=40, real LOO-CV, closed as a genuine-but-fragile
+replication — not stable enough for a threshold, but real enough to
+become a review-queue ranking signal.** The 40 mined candidates above
+got labeled for real (14 real_action, 26 downtime) — the first real test
+of whether xclip's own AUC finding (0.690/p=0.012 against the clean
+reference-clip swing/ambient set) replicates on genuinely different,
+harder data: real human labels on `hard_cut_dip` candidates specifically
+(already-borderline-by-construction, not clean swing-vs-ambient-gap
+instants).
+
+Same LOO-CV + permutation-test discipline as the joint classifier
+investigation earlier tonight. **Raw AUC: 0.662 (permutation p=0.0455).
+LOO-CV AUC (midpoint-of-group-means threshold, refit per fold): 0.662
+(p=0.0410)** — a real, single, pre-specified test (not "best of several
+tried," so no multiple-comparisons discount applies), and a real
+replication of the earlier finding's direction and rough magnitude on
+independent data.
+
+**But a fitted threshold demonstrably doesn't survive at this n, checked
+directly rather than assumed from the AUC alone.** LOO accuracy at the
+naive midpoint threshold: 62.5% (25/40) — *worse* than just always
+guessing "downtime" (65%, the majority class at this 26/14 split). Then,
+letting each LOO fold fit its own best-separating threshold on the other
+39 points (not just the midpoint) to see if a better cutoff existed:
+accuracy **collapsed to 37.5%**, with the fitted threshold swinging from
+0.618 to 0.941 across folds — the same "textbook overfitting instability"
+signature (a boundary that swings too much fold-to-fold to generalize)
+the joint classifier hit earlier tonight, demonstrated directly here on
+a single feature, not assumed. AUC is threshold-free and doesn't feel
+class imbalance the way a fitted cutoff does — that gap is the real
+finding, not a contradiction.
+
+**Verdict: real, replicated ranking signal; not a safe threshold.**
+Grounded sample-size projection (not a repeat of the general 300-500
+Tier 3 figure): using the actual observed effect size
+(|AUC−0.5|=0.162) and the actual permutation-null standard deviation
+measured at n=40 (0.097, scales ~1/√n), **~57 total labels** would be
+needed for this specific effect to clear ~2 standard errors from chance
+as a ranking signal — not a promise that a safe threshold exists even
+then, given the demonstrated overfitting risk. Approved for one real use:
+review-queue **priority ranking**, not cutting.
+
+**Implemented**: `pipeline.review.xclip_disagreement()` computes, per
+candidate, how strongly xclip's `p_swinging` disagrees with what that
+candidate's own `pipeline_decision` claims (reusing
+`DECISION_EXPECTS_LABEL`, now defined once in `pipeline.review` and
+imported by `scripts/review_stats.py` instead of duplicated).
+`review_priority_key()` reorders the pending queue: real disagreement
+first (highest first), falling back to the original lowest-margin-first
+order for anything xclip has no opinion on — a candidate with a real,
+even mild, xclip disagreement now outranks a candidate with no xclip
+data regardless of margin, but every existing margin-only ordering is
+completely unchanged for records xclip has no opinion on.
+`backend/app.py`'s `_pending_reviews()` calls this directly (no pipeline
+logic reimplemented in the backend, matching this project's own
+architecture rule). **Nothing is hidden, skipped, or auto-decided** — a
+human still sees and labels every real candidate eventually, just in a
+different order; `ReviewQueueView.jsx` shows the raw `p_swinging` value
+and a "signal disagrees" badge whenever present, so the reordering is
+never invisible. Verified against a real, fresh, unlabeled batch (see
+below): the API's real top-of-queue item matched the independently
+computed expected order exactly, on a real case where the pipeline
+confidently said "cut" (margin -0.353) but xclip read 0.917 — precisely
+the kind of case this is meant to surface first.
+
+**`scripts/mine_review_candidates.py` gained real dedup logic** the
+first mining pass didn't need: real candidate ranking is deterministic
+(same video, same config → the same ranked list), so a second mining
+pass over the same video would otherwise just regenerate the same
+lowest-margin windows already mined (and likely already labeled) instead
+of reaching new ones. `_existing_windows_for_video()` scans existing
+records for the same `source.video_path`, and `mine_one()` requests
+enough candidates to cover what's already mined plus the new budget,
+then deletes (not skips-silently) any real duplicate window before
+writing anything permanent. **Real run**: 18 more real candidates mined
+from `full_game.mkv` in one pass, correctly reporting "40 candidate(s)
+matched an already-mined window... discarded rather than duplicated" —
+58 total records, 58 distinct windows, confirmed zero duplicates.
+
+Full suite: 442 passed.
+
 **Pose + audio conjunction: investigated for real, at real scale, and
 closed as not clearing the bar — the third and fourth candidate
 signals from the same overnight investigation that produced the Tier 2

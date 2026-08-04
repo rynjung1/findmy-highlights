@@ -43,13 +43,9 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-DECISION_EXPECTS_LABEL = {
-    "cut": "downtime",
-    "exit": "downtime",
-    "kept": "real_action",
-    "enter": "real_action",
-}
+from pipeline.review import DECISION_EXPECTS_LABEL  # noqa: E402
 
 
 def _motion_score(record: dict):

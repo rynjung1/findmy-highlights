@@ -16,8 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.review import (ReviewConfig, boundary_crossing_candidates,
                              generate_review_candidates,
-                             hard_cut_dip_candidates, select_candidates,
-                             veto_boundary_candidates)
+                             hard_cut_dip_candidates, review_priority_key,
+                             select_candidates, veto_boundary_candidates,
+                             xclip_disagreement)
 from pipeline.segments import HardCutConfig, SegmentConfig
 from pipeline.stitch import VideoParams
 
@@ -565,6 +566,78 @@ def test_generate_review_candidates_xclip_model_load_failure_is_non_fatal(tmp_pa
     assert len(written) == 1
     assert "xclip" not in written[0]["features_at_label_time"]
     assert any("no network" in w for w in warnings)
+
+
+# ---- xclip_disagreement / review_priority_key ----
+
+def _record(pipeline_decision, margin=1.0, p_swinging=None, label=None):
+    features = {}
+    if p_swinging is not None:
+        features["xclip"] = {"p_swinging": p_swinging}
+    return {"pipeline_decision": pipeline_decision, "margin": margin,
+           "features_at_label_time": features, "label": label}
+
+
+def test_xclip_disagreement_none_without_xclip_feature():
+    r = _record("cut", p_swinging=None)
+    assert xclip_disagreement(r) is None
+
+
+def test_xclip_disagreement_none_for_unrecognized_decision():
+    r = _record("something_else", p_swinging=0.9)
+    assert xclip_disagreement(r) is None
+
+
+def test_xclip_disagreement_high_when_downtime_claim_but_high_p_swinging():
+    # pipeline says "cut" (claims downtime), xclip says 0.95 (looks very
+    # swing-like) -- maximal disagreement
+    r = _record("cut", p_swinging=0.95)
+    assert xclip_disagreement(r) == pytest.approx(0.95)
+
+
+def test_xclip_disagreement_high_when_real_action_claim_but_low_p_swinging():
+    # pipeline says "enter" (claims real_action), xclip says 0.05 (looks
+    # very idle-like) -- maximal disagreement
+    r = _record("enter", p_swinging=0.05)
+    assert xclip_disagreement(r) == pytest.approx(0.95)
+
+
+def test_xclip_disagreement_low_when_signals_agree():
+    r = _record("cut", p_swinging=0.05)  # both say downtime
+    assert xclip_disagreement(r) == pytest.approx(0.05)
+
+
+def test_review_priority_key_disagreement_sorts_before_margin_only():
+    # a record with real (even mild) xclip disagreement outranks a
+    # record with no xclip data at all, regardless of margin
+    with_xclip = _record("cut", margin=100.0, p_swinging=0.51)  # barely disagrees
+    no_xclip = _record("cut", margin=0.0001)  # extremely borderline margin, no xclip
+    ranked = sorted([no_xclip, with_xclip], key=review_priority_key)
+    assert ranked[0] is with_xclip
+
+
+def test_review_priority_key_higher_disagreement_sorts_first():
+    mild = _record("cut", margin=1.0, p_swinging=0.6)
+    strong = _record("cut", margin=1.0, p_swinging=0.99)
+    ranked = sorted([mild, strong], key=review_priority_key)
+    assert ranked[0] is strong
+
+
+def test_review_priority_key_falls_back_to_margin_when_no_xclip_data():
+    # matches the pre-existing lowest-margin-first behavior exactly for
+    # records xclip has no opinion on
+    low_margin = _record("cut", margin=1.0)
+    high_margin = _record("cut", margin=5.0)
+    ranked = sorted([high_margin, low_margin], key=review_priority_key)
+    assert ranked[0] is low_margin
+
+
+def test_review_priority_key_control_samples_still_sort_last_within_fallback():
+    control = _record("kept", margin=None)
+    real_margin = _record("cut", margin=100.0)
+    ranked = sorted([control, real_margin], key=review_priority_key)
+    assert ranked[0] is real_margin
+    assert ranked[1] is control
 
 
 # ---- real ffmpeg smoke test ----

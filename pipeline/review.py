@@ -66,6 +66,16 @@ training_data_dir/reviews/<id>.mp4 clip (full-frame, not cropped, window
 padded ~1.5s each side) plus training_data_dir/reviews/<id>.json record.
 training_data/*.mp4 is gitignored (bulky, personal footage);
 training_data/*.json stays tracked.
+
+Viewing order (separate from the generation-time selection above, and
+applied later, at review time, by backend/app.py's GET /review/next):
+`review_priority_key` reorders the pending queue to surface real xclip/
+pipeline disagreement first (see that function's own docstring for the
+real numbers behind why this is trusted only as a reordering, never a
+cutting or auto-labeling signal), falling back to the original
+lowest-margin-first order for anything xclip has no opinion on. Purely a
+display-order change -- nothing is hidden, skipped, or auto-decided; a
+human still sees and labels every real candidate eventually.
 """
 
 import hashlib
@@ -88,6 +98,58 @@ CANDIDATE_KIND_TO_ID_PREFIX = {
     "veto_boundary": "vb",
     "control": "ctl",
 }
+
+# What each pipeline_decision claims about its own instant -- shared with
+# scripts/review_stats.py's disagreement-rate reporting (imported from
+# here, not duplicated) and with review_priority_key below.
+DECISION_EXPECTS_LABEL = {
+    "cut": "downtime",
+    "exit": "downtime",
+    "kept": "real_action",
+    "enter": "real_action",
+}
+
+
+def xclip_disagreement(record: dict):
+    """How strongly xclip's own p_swinging score disagrees with what this
+    candidate's pipeline_decision claims about it, in [0, 1] -- 0 is full
+    agreement, 1 is maximum disagreement. None if this record has no real
+    xclip feature (model load failed for that run, or a record from
+    before xclip was wired in) or an unrecognized pipeline_decision.
+
+    Real, measured basis for using this at all (see README's follow-up
+    zero-shot writeup): xclip p_swinging alone showed a real, REPLICATED
+    AUC (~0.66-0.69 across two independent label sets) against real
+    human labels, but a fitted threshold badly overfit at n=40 (LOO
+    accuracy collapsed to 37.5%, well under just guessing the majority
+    class). So this is used ONLY to reorder review priority -- surfacing
+    the cases where an independent signal disagrees with the pipeline's
+    own claim, since those are the most useful to check first -- never
+    to hide a candidate, auto-label it, or feed any cutting decision."""
+    xclip = (record.get("features_at_label_time") or {}).get("xclip")
+    if not xclip or "p_swinging" not in xclip:
+        return None
+    expected = DECISION_EXPECTS_LABEL.get(record.get("pipeline_decision"))
+    if expected is None:
+        return None
+    p = xclip["p_swinging"]
+    return p if expected == "downtime" else (1.0 - p)
+
+
+def review_priority_key(record: dict):
+    """Sort key for the review queue (ascending -- smaller sorts first).
+    Real xclip disagreement takes priority when available (highest
+    disagreement first); the existing margin-based order (lowest margin
+    first, control samples last) is both the tie-breaker within that
+    group and the whole ranking for any record with no real disagreement
+    score, so nothing about the original, validated margin ranking
+    changes for candidates xclip has no opinion on."""
+    disagreement = xclip_disagreement(record)
+    margin = record.get("margin")
+    margin_key = (margin is None, margin if margin is not None else 0.0)
+    if disagreement is None:
+        return (1, 0.0, margin_key)
+    return (0, -disagreement, margin_key)
 
 
 @dataclass

@@ -1110,7 +1110,7 @@ def test_startup_sweep_marks_stale_in_progress_job_interrupted(tmp_path):
 
 def write_review_record(training_data_dir, record_id, margin, label=None,
                         candidate_type="hard_cut_dip", pipeline_decision="cut",
-                        write_clip=True):
+                        write_clip=True, features_at_label_time=None):
     reviews_dir = Path(training_data_dir) / "reviews"
     reviews_dir.mkdir(parents=True, exist_ok=True)
     record = {
@@ -1118,7 +1118,7 @@ def write_review_record(training_data_dir, record_id, margin, label=None,
         "source": {"video_path": "v.mp4", "source_file": "v.mp4"},
         "window": {"start_s": 1.0, "end_s": 2.0},
         "candidate_type": candidate_type, "pipeline_decision": pipeline_decision,
-        "margin": margin, "features_at_label_time": {},
+        "margin": margin, "features_at_label_time": features_at_label_time or {},
         "config_hash": "abc123", "label": label, "labeled_at": None, "note": None,
     }
     (reviews_dir / f"{record_id}.json").write_text(json.dumps(record))
@@ -1198,6 +1198,24 @@ def test_review_next_control_samples_sort_last(tmp_path):
     with TestClient(app) as client:
         r = client.get("/review/next")
     assert r.json()["id"] == "hc_bbb"
+
+
+def test_review_next_xclip_disagreement_outranks_lower_margin(tmp_path):
+    # hc_lowmargin looks maximally borderline by the pipeline's own
+    # margin, but hc_disagree has a real xclip signal actively
+    # contradicting the pipeline's "cut" (downtime) claim -- the real
+    # feature this project just spent a whole investigation validating
+    # (see README) should win the review queue's front slot.
+    td = tmp_path / "training_data"
+    write_review_record(td, "hc_lowmargin", margin=0.0001)
+    write_review_record(td, "hc_disagree", margin=50.0,
+                        features_at_label_time={"xclip": {"p_swinging": 0.97}})
+    app = make_app(tmp_path, training_data_dir=td)
+    with TestClient(app) as client:
+        r = client.get("/review/next")
+    body = r.json()
+    assert body["id"] == "hc_disagree"
+    assert body["features_at_label_time"]["xclip"]["p_swinging"] == pytest.approx(0.97)
 
 
 def test_review_clip_serves_the_real_file(tmp_path):

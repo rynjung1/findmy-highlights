@@ -47,10 +47,42 @@ DEFAULT_UPLOADS_ROOT = ROOT / "uploads"
 DEFAULT_TRAINING_DATA_DIR = ROOT / "training_data"
 
 
+def _existing_windows_for_video(reviews_dir: Path, video_path) -> set:
+    """(start_s, end_s) of every real record already on disk whose
+    source.video_path matches this exact video -- real candidates are
+    re-derived deterministically from a video's own motion/hard-cut
+    computation every time (same video, same config -> the same ranked
+    list), so re-mining the same video without this would just
+    regenerate the same lowest-margin windows already mined (and
+    probably already labeled) last time, not reach anything new."""
+    windows = set()
+    if not reviews_dir.exists():
+        return windows
+    for f in reviews_dir.glob("*.json"):
+        try:
+            record = json.loads(f.read_text())
+        except json.JSONDecodeError:
+            continue
+        if record.get("source", {}).get("video_path") == str(video_path):
+            w = record.get("window", {})
+            windows.add((w.get("start_s"), w.get("end_s")))
+    return windows
+
+
 def mine_one(video_path, training_data_dir, budget, extra_source_info=None):
     """Runs the real pipeline against one video and mines up to `budget`
-    candidates from it -- possibly fewer, if the video doesn't have that
-    many real borderline candidates or a clip extraction fails.
+    GENUINELY NEW candidates from it -- possibly fewer, if the video
+    doesn't have that many real borderline candidates left or a clip
+    extraction fails. Real candidates already covered by an earlier
+    mining pass over this same video are requested again internally
+    (there's no cheaper way to ask the pipeline's own deterministic
+    ranking for "the next N beyond what I already have" -- see
+    _existing_windows_for_video above) but then deleted rather than left
+    as literal duplicate records; the real, extra ffmpeg/pose/audio/xclip
+    cost of re-extracting already-known windows is the honest price of
+    not touching pipeline.review's core selection API for what's a
+    bulk-mining-only concern.
+
     process_video() doesn't return the written review records itself
     (changing that return shape would touch every real caller: the
     backend, both detect scripts, every test), so this counts what
@@ -67,13 +99,33 @@ def mine_one(video_path, training_data_dir, budget, extra_source_info=None):
         source_info.update(extra_source_info)
 
     reviews_dir = Path(training_data_dir) / "reviews"
+    existing_windows = _existing_windows_for_video(reviews_dir, video_path)
+    total_request = len(existing_windows) + budget
+
     before = set(reviews_dir.glob("*.json")) if reviews_dir.exists() else set()
     process_video(str(video_path), zone, cache_dir=DEFAULT_CACHE_DIR, warn=warn,
                   training_data_dir=str(training_data_dir),
                   training_data_source_info=source_info,
-                  review_cfg=ReviewConfig(max_candidates_per_video=budget))
+                  review_cfg=ReviewConfig(max_candidates_per_video=total_request))
     after = set(reviews_dir.glob("*.json")) if reviews_dir.exists() else set()
-    return sorted(after - before)
+    new_files = sorted(after - before)
+
+    kept = []
+    n_deduped = 0
+    for f in new_files:
+        record = json.loads(f.read_text())
+        w = (record["window"]["start_s"], record["window"]["end_s"])
+        if w in existing_windows:
+            f.unlink()
+            f.with_suffix(".mp4").unlink(missing_ok=True)
+            n_deduped += 1
+            continue
+        existing_windows.add(w)
+        kept.append(f)
+    if n_deduped:
+        print(f"  ({n_deduped} candidate(s) matched an already-mined window for "
+             f"this video, discarded rather than duplicated)")
+    return kept
 
 
 def discover_batches(uploads_root: Path):

@@ -37,6 +37,7 @@ from pipeline.calibration import (build_calibration, grab_preview_frame,
 from pipeline.manifest import (VALID_STATUS, load_manifest, save_manifest,
                                set_status)
 from pipeline.multifile import order_infos, probe_file, resolve_order
+from pipeline.review import review_priority_key
 
 from backend import jobs, storage
 from backend.pipeline_runner import run_detect_then_export_job, run_export_job
@@ -497,10 +498,12 @@ def create_app(uploads_root=None, run_in_background=None,
         return p
 
     def _pending_reviews(reviews_dir: Path) -> list:
-        """Every unlabeled record, lowest margin first -- a record with
-        margin=None (a control sample, see pipeline.review) sorts last,
-        since it's not meant to compete with genuinely borderline
-        candidates for review priority."""
+        """Every unlabeled record, ranked by pipeline.review.review_priority_key:
+        real xclip/pipeline disagreement first (an independent signal
+        pointing the opposite way from the pipeline's own decision is the
+        most useful case to check), then the original lowest-margin-first
+        order for everything else -- a control sample (margin=None) still
+        sorts last within that fallback group, unchanged from before."""
         records = []
         if not reviews_dir.exists():
             return records
@@ -511,7 +514,7 @@ def create_app(uploads_root=None, run_in_background=None,
                 continue
             if record.get("label") is None:
                 records.append(record)
-        records.sort(key=lambda r: (r["margin"] is None, r["margin"] or 0.0))
+        records.sort(key=review_priority_key)
         return records
 
     def _review_response(record: dict, remaining: int) -> dict:
