@@ -763,14 +763,56 @@ integration introduces no drift from what was validated.
 
 A real, safe, zero-cost mechanism that fixes a real but modest slice of
 the problem: fixing 2 of 11 real disagreements doesn't meaningfully move
-the 68.8% enter-side disagreement rate on its own. Real next step, if
-pursued: a
-sustained-motion-without-occupancy signal (closer to a proper veto, but
-one that specifically distinguishes "sustained ambient milling" from "a
-sustained real play the system just isn't recognizing" — the same
-structural question the ambient-discount investigation couldn't answer
-with the tools available then) would need to address the other 9, not
-a bigger debounce window on this same mechanism.
+the 68.8% enter-side disagreement rate on its own.
+
+**The 9 remaining post-ship disagreements: a real hypothesis, checked
+directly, and corrected.** Re-ran the shipped pipeline against the same
+16 real labeled `enter` records and confirmed exactly 9 disagreements
+survive (`scripts/sustained_ambient_xclip_check.py`). The working
+hypothesis going in was "sustained ambient motion, no batter visible" —
+checked directly against real occupancy over a wide (±10s, well beyond
+the 2.5s debounce window) window around each: **wrong for 8 of the 9**.
+Only one (`bc_121f61ed3d15`) is genuinely no-occupancy-anywhere-nearby;
+the other 8 have real occupancy present somewhere in the wide window.
+The actual failure mode is **presence without action** — a person
+(batter between pitches, catcher, umpire) at/near the plate who isn't
+swinging — structurally the same "resting fielder confound" already
+solved for bases via `compute_zone_velocity` (Stage 11), just not yet
+addressed at the plate. Occupancy, at any window size, cannot
+distinguish "someone is here" from "someone is swinging" — it was never
+going to resolve this by construction.
+
+X-CLIP's stored `p_swinging` (already computed at mining time) was
+checked against the same 9: mean 0.671, statistically indistinguishable
+from the overall downtime-label mean (0.669) across all 16 records — no
+special power on this failure mode either. At a naive 0.5 threshold, 8
+of 9 would be misclassified as swinging, the same direction of error as
+the pipeline itself.
+
+**A fourth angle, genuinely different in kind: Claude's own vision, not
+another embedding-similarity model.** No `ANTHROPIC_API_KEY` is
+configured anywhere in this project, so a literal scripted API call
+wasn't available; instead, 4 real frames per clip (from the self-
+contained review clips already generated for each record) were shown
+directly to a *separate, blind* Claude agent instance — no ground-truth
+labels, no knowledge of which records the pipeline had flagged, given
+only the raw frames and asked to judge purely on body positioning/bat
+motion. Real, honest result: **8 of the 9 target disagreements
+correctly classified as downtime** (the one miss, `bc_90606259a06d`, was
+independently flagged by a first, non-blind pass as the single most
+visually ambiguous case in the whole set — a batter holding a static
+pre-pitch stance with no clear swing evidence in any of its 4 frames).
+On a separate 7-clip sanity check (5 clear real_action + 2 clear
+downtime cases), the same blind agent scored only 4/7 — a reminder that
+even genuine reasoning from 4 static frames has a real, non-trivial
+error rate, not a free pass. Motion, the occupancy debounce, static
+occupancy presence, and X-CLIP all score ~0/9 on the target set by
+construction or near-construction; blind semantic reasoning scores 8/9.
+That's a real, qualitatively different result, not the same wall a
+fourth time — worth a properly-scoped follow-up (a real scripted Claude
+API vision call, a larger blind label set) before any implementation
+decision, but a genuinely promising direction where four prior signal
+families were not.
 
 **Pose + audio conjunction: investigated for real, at real scale, and
 closed as not clearing the bar — the third and fourth candidate
