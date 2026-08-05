@@ -7,19 +7,24 @@ import { runDemo, uploadBatch } from '../api'
 // purely a UX improvement, never trusted as the actual gate.
 const ACCEPTED_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.m4v']
 
-function isVideoFile(file) {
+function isVideoFile(file: File): boolean {
   const name = file.name.toLowerCase()
   return ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))
 }
 
-export default function UploadStep({ onUploaded, onDemoStarted }) {
-  const fileInputRef = useRef(null)
-  const [files, setFiles] = useState([])
-  const [error, setError] = useState(null)
+interface UploadStepProps {
+  onUploaded: (batchId: string) => void
+  onDemoStarted: (batchId: string) => void
+}
+
+export default function UploadStep({ onUploaded, onDemoStarted }: UploadStepProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [files, setFiles] = useState<File[]>([])
+  const [error, setError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [demoStarting, setDemoStarting] = useState(false)
-  const [demoError, setDemoError] = useState(null)
+  const [demoError, setDemoError] = useState<string | null>(null)
 
   async function handleTryDemo() {
     setDemoStarting(true)
@@ -32,12 +37,12 @@ export default function UploadStep({ onUploaded, onDemoStarted }) {
       // job -- a real upload or someone else's demo run -- already in
       // progress; see backend/app.py's single-job-at-a-time rule), so
       // the message is shown as-is rather than a generic fallback.
-      setDemoError(err.message)
+      setDemoError(err instanceof Error ? err.message : String(err))
       setDemoStarting(false)
     }
   }
 
-  function pickFiles(fileList) {
+  function pickFiles(fileList: FileList) {
     const picked = Array.from(fileList)
     if (!picked.length) return
     const bad = picked.filter((f) => !isVideoFile(f))
@@ -60,7 +65,7 @@ export default function UploadStep({ onUploaded, onDemoStarted }) {
       const { batch_id } = await uploadBatch(files)
       onUploaded(batch_id)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setUploading(false)
     }
@@ -120,7 +125,7 @@ export default function UploadStep({ onUploaded, onDemoStarted }) {
             accept="video/*"
             multiple
             className="visually-hidden"
-            onChange={(e) => pickFiles(e.target.files)}
+            onChange={(e) => e.target.files && pickFiles(e.target.files)}
           />
           <button type="button" className="secondary" onClick={() => fileInputRef.current?.click()}>
             Browse files

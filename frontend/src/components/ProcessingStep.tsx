@@ -1,15 +1,22 @@
 import { useEffect, useState } from 'react'
 import { getJob } from '../api'
+import type { Job } from '../types'
 
 const POLL_INTERVAL_MS = 2000
 
-export default function ProcessingStep({ batchId, onDone, onError }) {
-  const [detectJob, setDetectJob] = useState(null)
-  const [exportJob, setExportJob] = useState(null)
+interface ProcessingStepProps {
+  batchId: string
+  onDone: () => void
+  onError: (message: string) => void
+}
+
+export default function ProcessingStep({ batchId, onDone, onError }: ProcessingStepProps) {
+  const [detectJob, setDetectJob] = useState<Job | null>(null)
+  const [exportJob, setExportJob] = useState<Job | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    let timer
+    let timer: ReturnType<typeof setTimeout>
 
     async function poll() {
       try {
@@ -51,7 +58,7 @@ export default function ProcessingStep({ batchId, onDone, onError }) {
 
         timer = setTimeout(poll, POLL_INTERVAL_MS)
       } catch (err) {
-        if (!cancelled) onError(err.message)
+        if (!cancelled) onError(err instanceof Error ? err.message : String(err))
       }
     }
 

@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import { getJob, getManifest, outputUrl, sourceUrl, triggerExport, updateSegmentStatus } from '../api'
+import type { Manifest, Segment } from '../types'
 import SkippableVideo from './SkippableVideo'
 
 const EXPORT_POLL_MS = 1000
+
+type LoadState = 'loading' | 'ready' | 'not_ready' | 'error'
 
 // Segments with origin "gap" or "hard_cut" were ever cut by detection
 // (see pipeline/manifest.py: origin is set once at build time and never
@@ -15,24 +18,28 @@ const EXPORT_POLL_MS = 1000
 // than an ordinary "gap" (motion that never crossed the enter threshold
 // at all), which is why it gets its own origin value and its own
 // prominent treatment below rather than being listed identically.
-function isEditLogEntry(seg) {
+function isEditLogEntry(seg: Segment): boolean {
   return seg.origin === 'gap' || seg.origin === 'hard_cut'
 }
 
-export default function EditLogView({ batchId }) {
-  const [manifest, setManifest] = useState(null)
-  const [loadState, setLoadState] = useState('loading') // loading | ready | not_ready | error
-  const [error, setError] = useState(null)
-  const [previewingId, setPreviewingId] = useState(null)
-  const [pendingId, setPendingId] = useState(null)
+interface EditLogViewProps {
+  batchId: string | null
+}
+
+export default function EditLogView({ batchId }: EditLogViewProps) {
+  const [manifest, setManifest] = useState<Manifest | null>(null)
+  const [loadState, setLoadState] = useState<LoadState>('loading')
+  const [error, setError] = useState<string | null>(null)
+  const [previewingId, setPreviewingId] = useState<string | null>(null)
+  const [pendingId, setPendingId] = useState<string | null>(null)
   // Set once an export is confirmed completed (initial load or after a
   // toggle-triggered re-export) -- also doubles as the cache-bust token
   // for the output <video>, so a re-export always shows fresh content
   // instead of the browser serving back the previous export's response
   // for the same URL.
-  const [exportVersion, setExportVersion] = useState(null)
+  const [exportVersion, setExportVersion] = useState<string | number | null>(null)
   const [exporting, setExporting] = useState(false)
-  const [exportError, setExportError] = useState(null)
+  const [exportError, setExportError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -60,7 +67,7 @@ export default function EditLogView({ batchId }) {
         }
       } catch (err) {
         if (cancelled) return
-        setError(err.message)
+        setError(err instanceof Error ? err.message : String(err))
         setLoadState('error')
       }
     }
@@ -70,13 +77,19 @@ export default function EditLogView({ batchId }) {
     }
   }, [batchId])
 
-  async function waitForExport() {
+  // batchId! below (here and in reExport/handleToggle) is safe on the
+  // same grounds as the `bid` narrowing further down: these are only
+  // ever invoked from the 'ready' render path (a button click, or
+  // chained from one), by which point batchId is confirmed non-null --
+  // they just can't share that render-scope `const bid` since they're
+  // defined earlier in this function body.
+  async function waitForExport(): Promise<{ ok: true } | { ok: false; message: string }> {
     // Re-export is stitching only (extract + concat kept spans), not
     // re-running detection, so this is expected to be fast in practice
     // (measured: ~1s on clip_300) -- but it's still a real background
     // job, so poll rather than assume.
     while (true) {
-      const job = await getJob(batchId, 'export')
+      const job = await getJob(batchId!, 'export')
       if (job?.status === 'completed') return { ok: true }
       if (job?.status === 'failed' || job?.status === 'interrupted') {
         return { ok: false, message: job.error || `export ${job.status}` }
@@ -89,7 +102,7 @@ export default function EditLogView({ batchId }) {
     setExporting(true)
     setExportError(null)
     try {
-      await triggerExport(batchId)
+      await triggerExport(batchId!)
       const result = await waitForExport()
       if (result.ok) {
         setExportVersion(Date.now())
@@ -97,13 +110,13 @@ export default function EditLogView({ batchId }) {
         setExportError(`Re-export failed: ${result.message}`)
       }
     } catch (err) {
-      setExportError(err.message)
+      setExportError(err instanceof Error ? err.message : String(err))
     } finally {
       setExporting(false)
     }
   }
 
-  async function handleToggle(seg) {
+  async function handleToggle(seg: Segment) {
     const nextStatus = seg.status === 'cut' ? 'kept' : 'cut'
     // Fires the instant the click is registered, before any request
     // goes out -- lets a real click be told apart from a request that
@@ -112,7 +125,7 @@ export default function EditLogView({ batchId }) {
     setPendingId(seg.id)
     setError(null)
     try {
-      await updateSegmentStatus(batchId, seg.id, nextStatus)
+      await updateSegmentStatus(batchId!, seg.id, nextStatus)
       // Re-fetch the manifest fresh from the server rather than merging
       // the PATCH response into local state. Whatever was causing the
       // UI to not reflect a real, confirmed-correct server-side change,
@@ -120,14 +133,14 @@ export default function EditLogView({ batchId }) {
       // bug class outright: what's rendered is always exactly what the
       // server just reported, not what this component locally believes
       // happened.
-      const fresh = await getManifest(batchId)
+      const fresh = await getManifest(batchId!)
       if (fresh) {
         setManifest(fresh)
       } else {
         setError('Segment was updated, but re-fetching the manifest afterward failed.')
       }
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       return
     } finally {
       setPendingId(null)
@@ -169,12 +182,20 @@ export default function EditLogView({ batchId }) {
     )
   }
 
+  // Both non-null assertions below are guaranteed by the effect above,
+  // not just hoped for: 'ready' is only ever set right after
+  // setManifest(m) with a real, non-null m, and only once batchId
+  // itself was confirmed non-null (the 'not_ready' branch already
+  // returned otherwise).
+  const activeManifest = manifest!
+  const bid = batchId!
+
   // Hard-cut entries surface first -- they're the higher-risk kind (real
   // content trimmed from inside an otherwise-kept segment, not just
   // ordinary never-flagged dead time) and are the actual safety net for
   // the hard-cut mechanism now: fast, visible, easy to review and
   // restore, not "must never happen" (see README's hard-cut writeup).
-  const cutEntries = manifest.segments
+  const cutEntries = activeManifest.segments
     .filter(isEditLogEntry)
     .sort((a, b) => (a.origin === 'hard_cut' ? 0 : 1) - (b.origin === 'hard_cut' ? 0 : 1))
   const unreviewedHardCuts = cutEntries.filter(
@@ -196,11 +217,11 @@ export default function EditLogView({ batchId }) {
         {exportVersion ? (
           <>
             <SkippableVideo
-              src={outputUrl(batchId, exportVersion)}
-              segments={manifest.segments}
+              src={outputUrl(bid, exportVersion)}
+              segments={activeManifest.segments}
             />
             <p>
-              <a href={outputUrl(batchId, exportVersion)} download="highlights.mp4">
+              <a href={outputUrl(bid, exportVersion)} download="highlights.mp4">
                 <button className="secondary">Download</button>
               </a>
             </p>
@@ -263,7 +284,7 @@ export default function EditLogView({ batchId }) {
                   </div>
                 </div>
                 {previewingId === seg.id && (
-                  <SegmentPreview batchId={batchId} segment={seg} />
+                  <SegmentPreview batchId={bid} segment={seg} />
                 )}
               </li>
             )
@@ -274,14 +295,19 @@ export default function EditLogView({ batchId }) {
   )
 }
 
-function SegmentPreview({ batchId, segment }) {
-  function handleLoadedMetadata(e) {
-    e.target.currentTime = segment.start_s
+interface SegmentPreviewProps {
+  batchId: string
+  segment: Segment
+}
+
+function SegmentPreview({ batchId, segment }: SegmentPreviewProps) {
+  function handleLoadedMetadata(e: React.SyntheticEvent<HTMLVideoElement>) {
+    e.currentTarget.currentTime = segment.start_s
   }
 
-  function handleTimeUpdate(e) {
-    if (e.target.currentTime >= segment.end_s) {
-      e.target.pause()
+  function handleTimeUpdate(e: React.SyntheticEvent<HTMLVideoElement>) {
+    if (e.currentTarget.currentTime >= segment.end_s) {
+      e.currentTarget.pause()
     }
   }
 

@@ -1,7 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { Segment } from '../types'
 
 const TOAST_VISIBLE_MS = 2000
 const TOAST_FADE_MS = 300
+
+interface SkipWindow {
+  start: number
+  end: number
+}
+
+interface Toast {
+  key: number
+  message: string
+  leaving: boolean
+}
 
 // Each kept segment's REAL position in the current output --
 // output_start_s/output_end_s -- is computed once at stitch time
@@ -25,9 +37,9 @@ const TOAST_FADE_MS = 300
 // preserve frame timing (this project never does variable-speed
 // playback), so real time flows 1:1 with source-local time within one
 // segment's own footage.
-function computeSkipWindows(segments) {
+function computeSkipWindows(segments: Segment[] | undefined): SkipWindow[] {
   if (!segments) return []
-  const windows = []
+  const windows: SkipWindow[] = []
   for (const seg of segments) {
     if (seg.status !== 'kept' || seg.output_start_s == null) continue
     for (const sug of seg.skip_suggestions || []) {
@@ -38,6 +50,11 @@ function computeSkipWindows(segments) {
     }
   }
   return windows
+}
+
+interface SkippableVideoProps extends React.VideoHTMLAttributes<HTMLVideoElement> {
+  src: string
+  segments?: Segment[]
 }
 
 // A <video> with a skip-ahead affordance for the manifest's
@@ -55,17 +72,17 @@ function computeSkipWindows(segments) {
 //   - Manual (the original behavior, kept for anyone who'd rather
 //     decide per-window): a "Skip ahead" button appears while playback
 //     is inside a window and the viewer clicks it themselves.
-export default function SkippableVideo({ src, segments, style, ...videoProps }) {
-  const videoRef = useRef(null)
+export default function SkippableVideo({ src, segments, style, ...videoProps }: SkippableVideoProps) {
+  const videoRef = useRef<HTMLVideoElement>(null)
   const skipWindows = useMemo(() => computeSkipWindows(segments), [segments])
   const [autoSkip, setAutoSkip] = useState(true)
-  const [activeSkip, setActiveSkip] = useState(null)
-  const [toast, setToast] = useState(null) // { key, message, leaving }
-  const toastTimers = useRef([])
+  const [activeSkip, setActiveSkip] = useState<SkipWindow | null>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
+  const toastTimers = useRef<ReturnType<typeof setTimeout>[]>([])
 
   useEffect(() => () => toastTimers.current.forEach(clearTimeout), [])
 
-  function showToast(message) {
+  function showToast(message: string) {
     toastTimers.current.forEach(clearTimeout)
     const key = Date.now()
     setToast({ key, message, leaving: false })
@@ -77,8 +94,8 @@ export default function SkippableVideo({ src, segments, style, ...videoProps }) 
     ]
   }
 
-  function handleTimeUpdate(e) {
-    const t = e.target.currentTime
+  function handleTimeUpdate(e: React.SyntheticEvent<HTMLVideoElement>) {
+    const t = e.currentTarget.currentTime
     const hit = skipWindows.find((w) => t >= w.start && t < w.end)
     if (autoSkip) {
       if (hit && videoRef.current) {

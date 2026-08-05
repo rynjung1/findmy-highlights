@@ -1,12 +1,24 @@
 import { useState } from 'react'
 import { confirmOrder } from '../api'
 
-export default function OrderConfirmStep({ batchId, suggestedOrder, reason, onConfirmed }) {
-  const [order, setOrder] = useState(suggestedOrder)
-  const [error, setError] = useState(null)
+interface OrderConfirmStepProps {
+  batchId: string
+  suggestedOrder: string[]
+  reason: string | null
+  onConfirmed: () => void
+}
+
+export default function OrderConfirmStep({
+  batchId,
+  suggestedOrder,
+  reason,
+  onConfirmed,
+}: OrderConfirmStepProps) {
+  const [order, setOrder] = useState<string[]>(suggestedOrder)
+  const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  function move(index, delta) {
+  function move(index: number, delta: number) {
     const target = index + delta
     if (target < 0 || target >= order.length) return
     const next = [...order]
@@ -21,7 +33,7 @@ export default function OrderConfirmStep({ batchId, suggestedOrder, reason, onCo
       await confirmOrder(batchId, order)
       onConfirmed()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }

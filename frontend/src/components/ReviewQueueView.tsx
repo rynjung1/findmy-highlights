@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { getNextReview, labelReview, reviewClipUrl } from '../api'
+import type { ReviewLabel, ReviewNextResponse, ReviewRecord } from '../types'
 
-const CANDIDATE_TYPE_LABEL = {
+const CANDIDATE_TYPE_LABEL: Record<string, string> = {
   hard_cut_dip: 'Hard cut',
   boundary_crossing: 'Segment boundary',
   control: 'Control sample',
@@ -14,12 +15,14 @@ const CANDIDATE_TYPE_LABEL = {
 // (see pipeline.review.review_priority_key); this is the transparency
 // half of that -- showing the raw signal so a reviewer can see WHY an
 // item was surfaced, never a silent reorder.
-const DECISION_EXPECTS_LABEL = {
+const DECISION_EXPECTS_LABEL: Record<string, ReviewLabel> = {
   cut: 'downtime',
   exit: 'downtime',
   kept: 'real_action',
   enter: 'real_action',
 }
+
+type LoadState = 'loading' | 'disabled' | 'empty' | 'item' | 'error'
 
 // Tier 1 review queue (see README's Task 2 design, pipeline/review.py,
 // backend/app.py): a global queue, not scoped to any one batch -- shows
@@ -29,13 +32,12 @@ const DECISION_EXPECTS_LABEL = {
 // reporting (scripts/review_stats.py). Nothing here changes any batch's
 // manifest or output -- purely a labeling tool.
 export default function ReviewQueueView() {
-  // loading | disabled | empty | item | error
-  const [loadState, setLoadState] = useState('loading')
-  const [item, setItem] = useState(null)
-  const [error, setError] = useState(null)
+  const [loadState, setLoadState] = useState<LoadState>('loading')
+  const [item, setItem] = useState<ReviewRecord | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [reviewedCount, setReviewedCount] = useState(0)
-  const [remaining, setRemaining] = useState(null)
+  const [remaining, setRemaining] = useState<number | null>(null)
 
   useEffect(() => {
     loadNext()
@@ -48,26 +50,26 @@ export default function ReviewQueueView() {
       const next = await getNextReview()
       applyNext(next)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
       setLoadState('error')
     }
   }
 
-  function applyNext(next) {
+  function applyNext(next: ReviewNextResponse | null) {
     if (next === null) {
       setLoadState('disabled')
-    } else if (next.done) {
+    } else if ('done' in next && next.done) {
       setItem(null)
       setRemaining(0)
       setLoadState('empty')
     } else {
-      setItem(next)
-      setRemaining(next.remaining)
+      setItem(next as ReviewRecord)
+      setRemaining((next as ReviewRecord).remaining)
       setLoadState('item')
     }
   }
 
-  async function handleLabel(label) {
+  async function handleLabel(label: ReviewLabel) {
     if (!item) return
     setSubmitting(true)
     setError(null)
@@ -76,7 +78,7 @@ export default function ReviewQueueView() {
       setReviewedCount((c) => c + 1)
       applyNext(next)
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSubmitting(false)
     }
@@ -126,9 +128,13 @@ export default function ReviewQueueView() {
     )
   }
 
-  const isControl = item.candidate_type === 'control'
-  const xclip = item.features_at_label_time && item.features_at_label_time.xclip
-  const expectedLabel = DECISION_EXPECTS_LABEL[item.pipeline_decision]
+  // loadState === 'item' -- applyNext only sets this after item/remaining
+  // are both real values, never nulls.
+  const activeItem = item!
+
+  const isControl = activeItem.candidate_type === 'control'
+  const xclip = activeItem.features_at_label_time?.xclip
+  const expectedLabel = DECISION_EXPECTS_LABEL[activeItem.pipeline_decision]
   const xclipDisagrees = xclip && expectedLabel && (
     (expectedLabel === 'downtime' && xclip.p_swinging > 0.5) ||
     (expectedLabel === 'real_action' && xclip.p_swinging < 0.5)
@@ -150,21 +156,21 @@ export default function ReviewQueueView() {
       {error && <p className="alert alert-danger">{error}</p>}
 
       <video
-        key={item.id}
+        key={activeItem.id}
         controls
         autoPlay
         loop
-        src={reviewClipUrl(item.id)}
+        src={reviewClipUrl(activeItem.id)}
         style={{ maxWidth: '100%', width: '100%', background: '#000', marginTop: 10 }}
       />
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '14px 0' }}>
-        <span className="badge">{CANDIDATE_TYPE_LABEL[item.candidate_type] || item.candidate_type}</span>
+        <span className="badge">{CANDIDATE_TYPE_LABEL[activeItem.candidate_type] || activeItem.candidate_type}</span>
         <span className="badge">
-          pipeline decision: {item.pipeline_decision}
+          pipeline decision: {activeItem.pipeline_decision}
         </span>
-        {item.margin !== null && item.margin !== undefined && (
-          <span className="badge">margin: {item.margin.toFixed(4)}</span>
+        {activeItem.margin !== null && activeItem.margin !== undefined && (
+          <span className="badge">margin: {activeItem.margin.toFixed(4)}</span>
         )}
         {xclip && (
           <span className="badge">xclip p(swinging): {xclip.p_swinging.toFixed(3)}</span>
@@ -178,8 +184,8 @@ export default function ReviewQueueView() {
       </div>
 
       <p className="muted" style={{ fontSize: '0.9em' }}>
-        {item.source.source_file} — {item.window.start_s.toFixed(2)}s
-        {item.window.end_s !== item.window.start_s && ` to ${item.window.end_s.toFixed(2)}s`}
+        {activeItem.source.source_file} — {activeItem.window.start_s.toFixed(2)}s
+        {activeItem.window.end_s !== activeItem.window.start_s && ` to ${activeItem.window.end_s.toFixed(2)}s`}
       </p>
 
       <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>

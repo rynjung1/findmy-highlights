@@ -1,10 +1,15 @@
 import { useEffect, useState } from 'react'
 import { getManifest, outputUrl } from '../api'
+import type { Manifest } from '../types'
 import SkippableVideo from './SkippableVideo'
 
-export default function ResultStep({ batchId }) {
+interface ResultStepProps {
+  batchId: string
+}
+
+export default function ResultStep({ batchId }: ResultStepProps) {
   const url = outputUrl(batchId)
-  const [manifest, setManifest] = useState(null)
+  const [manifest, setManifest] = useState<Manifest | null>(null)
 
   useEffect(() => {
     let cancelled = false

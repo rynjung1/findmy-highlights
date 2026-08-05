@@ -1610,6 +1610,53 @@ queue (`FMH_TRAINING_DATA_DIR`) for a public deployment, and TLS/custom
 domain — see Deployment's "Open decisions" for the real reasoning behind
 leaving each of these open.
 
+**Deployment target switched from Railway to GCP Compute Engine, and the
+frontend converted from JavaScript to TypeScript — both real, both
+verified, not just written.** See Deployment for the full GCP how-to
+(real `gcloud` commands, a real measured 1.6GB worst-case memory number
+driving the `e2-medium` instance recommendation, and a real gap the
+platform switch surfaced: Railway/Vercel both provided managed TLS
+automatically, a bare Compute Engine VM doesn't, and Vercel's HTTPS
+frontend would be silently blocked by the browser's mixed-content policy
+calling a plain-HTTP backend -- fixed with Caddy + a free `sslip.io`
+hostname, no domain purchase needed).
+
+**TypeScript conversion:** all 10 frontend source files renamed
+`.jsx`/`.js` → `.tsx`/`.ts`, `tsconfig.json`/`tsconfig.app.json`/
+`tsconfig.node.json` added (the standard Vite+React project-references
+split), `strict: true` plus `noUnusedLocals`/`noUnusedParameters` --
+real strictness, not just enough to compile. A `src/types.ts` module
+defines the real backend response shapes (`Job`, `Manifest`, `Segment`,
+`ReviewRecord`, etc.) once, shared across every component, instead of
+each one re-guessing its own. `npm run build` now runs `tsc -b` before
+Vite's own build, so a real type error fails the build -- verified this
+is actually wired up and not vacuously passing, not just assumed:
+deliberately typed a prop as `number` instead of `string`, confirmed
+`tsc` failed with real errors (including a real cascading error in the
+*calling* component, `App.tsx`, not just the one directly edited), then
+reverted and confirmed a clean build again. Also verified the installed
+`@types/react`/`@types/react-dom` actually match the real `react`/
+`react-dom` major version in use (18, not 19) -- `npm install` initially
+pulled the latest type packages by default, which would have produced
+real but spurious type errors unrelated to any real code problem, since
+this project's own `react`/`react-dom` are pinned to 18.
+
+Real caveat, not swept past: a few `!` non-null assertions remain
+(`EditLogView.tsx`, `ReviewQueueView.tsx`) where a value's non-null-ness
+is guaranteed by this component's own control flow (e.g. `batchId` is
+confirmed non-null before `loadState` can reach `'ready'`) but isn't
+something the type system can see from the render path alone -- each is
+commented with the specific invariant that makes it safe, not left bare.
+This is a real, deliberate, narrow use of the escape hatch, not a
+substitute for real typing elsewhere.
+
+Full backend test suite re-run after every step (frontend-only changes,
+but re-verified rather than assumed unaffected): 457 passed throughout.
+Browser-level verification (every feature, by hand) intentionally left
+to the user, same as every other UI change tonight -- this write-up
+covers what was verified at the build/type level, not a substitute for
+that pass.
+
 ## Architecture overview
 
 Built so far:
@@ -1917,7 +1964,7 @@ Built so far:
   pending/in_progress/completed, since it can no longer take effect at
   that point. `GET /batches/{id}/preview.jpg` (below) is what the
   in-browser click-to-calibrate flow reads a frame from — see
-  `frontend/src/components/CalibrateStep.jsx`.
+  `frontend/src/components/CalibrateStep.tsx`.
 
   **`POST /batches/{id}/process` requires calibration to have been set**
   (400 if not) **unless the caller explicitly passes
@@ -1946,15 +1993,15 @@ Built so far:
 
 - **Frontend** (`frontend/`, React + Vite, own `package.json`/lockfile
   per the project's own rule to keep Node and Python dependencies separate) —
-  a top-level Home / Edit Log nav (`App.jsx`), independent of Home's own
+  a top-level Home / Edit Log nav (`App.tsx`), independent of Home's own
   linear stage machine: upload → click to calibrate → (order
   confirmation, only if needed) → progress → player + download.
   Switching to Edit Log and back doesn't reset in-progress upload state,
   since it's a separate `view` toggle, not a stage. No pipeline or
-  business logic here either — `src/api.js` is a thin fetch wrapper, one
+  business logic here either — `src/api.ts` is a thin fetch wrapper, one
   function per backend endpoint.
 
-  **Edit Log** (`EditLogView.jsx`) — lists every segment detection ever
+  **Edit Log** (`EditLogView.tsx`) — lists every segment detection ever
   cut (filtered on the manifest's `origin === "gap"`, which is set once
   at build time and never changes, independent of `status` — see How
   the manifest works below), each with a Preview toggle (an inline
@@ -1984,7 +2031,7 @@ Built so far:
 
   **Mid-processing browser close/reopen is handled by design, not as an
   afterthought.** The only client state kept is the batch id
-  (`localStorage`); on load, `App.jsx` always re-fetches the batch's
+  (`localStorage`); on load, `App.tsx` always re-fetches the batch's
   actual job status from the server and resumes whatever stage that
   implies, rather than assuming a fresh session — durable server-side
   job state (see Backend API, above) is what makes this possible at all.
@@ -1992,7 +2039,7 @@ Built so far:
   **Coordinate scaling for click-to-calibrate**, since this is the one
   most likely to fail silently: the browser displays `preview.jpg` at
   whatever size fits the layout, not its native resolution.
-  `CalibrateStep.jsx` reads the loaded `<img>`'s `naturalWidth`/
+  `CalibrateStep.tsx` reads the loaded `<img>`'s `naturalWidth`/
   `naturalHeight` (the browser's own decoded pixel dimensions) and
   scales the click's on-screen offset by `natural / displayed` before
   sending coordinates — no extra backend round trip needed, since the
@@ -2078,16 +2125,20 @@ install packages into system/global Python.
    card — see Current Status's pose+audio writeup.
 
 7. **Frontend (optional — only needed to use the Home view UI, not the
-   CLI or bare API):** install Node.js (developed against Node 18.20;
-   note the very latest `create-vite`/tooling needs Node 20+, but this
-   project's own `frontend/package.json` was pinned to work with 18),
-   then:
+   CLI or bare API):** TypeScript, real `.tsx`/`.ts` throughout (see
+   Current Status's TypeScript conversion writeup) — install Node.js
+   (developed against Node 18.20; note the very latest `create-vite`/
+   tooling needs Node 20+, but this project's own `frontend/package.json`
+   was pinned to work with 18), then:
 
    ```sh
    cd frontend
    npm install
    ```
 
+   `npm run build` runs a real type-check (`tsc -b`) before Vite's own
+   build, so a type error fails the build rather than silently shipping
+   -- `npm run typecheck` runs the same check alone, without building.
    Kept in its own `package.json`/lockfile, separate from the Python venv
    — see Version control workflow.
 
@@ -2109,7 +2160,7 @@ install packages into system/global Python.
 
 ```sh
 # terminal 1: backend, must be on port 8420 -- the frontend dev server's
-# proxy (frontend/vite.config.js) is hardcoded to that port
+# proxy (frontend/vite.config.ts) is hardcoded to that port
 ./venv/bin/uvicorn backend.app:app --reload --port 8420
 
 # terminal 2: frontend dev server
@@ -2296,12 +2347,12 @@ VITE_API_BASE_URL="https://your-backend-domain.example.com" npm run build
 `VITE_API_BASE_URL` is a **build-time** substitution (Vite's own
 `import.meta.env.VITE_*` mechanism, verified locally: built with a real
 URL configured, grepped the output bundle, confirmed it's baked in
-literally — see `frontend/src/api.js`), not a runtime setting, so it has
+literally — see `frontend/src/api.ts`), not a runtime setting, so it has
 to be set wherever the build itself runs (a static host's build-command
 environment, e.g. Vercel/Netlify project settings — not a `.env` file
 committed to the repo). Left unset, every request stays a relative path,
 which is what makes local dev (`npm run dev`) work against Vite's own
-proxy with zero configuration — see `frontend/vite.config.js`.
+proxy with zero configuration — see `frontend/vite.config.ts`.
 
 Deploy the resulting `frontend/dist/` to any static host (Vercel,
 Netlify, S3+CloudFront, etc.) — it's a plain static bundle (verified
@@ -2500,7 +2551,7 @@ before committing:
 ### Vercel (frontend)
 
 No `vercel.json` added — Vercel's built-in Vite framework preset
-auto-detects this project correctly (a `vite.config.js` + `vite` in
+auto-detects this project correctly (a `vite.config.ts` + `vite` in
 `package.json`, exactly this repo's setup) with no config file needed,
 and since dashboard behavior can't be exercised without a real account,
 adding config here that couldn't be verified end to end seemed worse

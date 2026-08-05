@@ -1,5 +1,6 @@
 node_modules/
 dist/
+*.tsbuildinfo
 
 # Local env overrides (e.g. VITE_API_BASE_URL for testing against a
 # non-default backend) -- see README's Deployment section. Vite loads

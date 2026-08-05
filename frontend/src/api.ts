@@ -4,7 +4,7 @@
 //
 // Backend base URL: empty string by default, meaning every path here
 // stays relative -- which is what makes local dev work with zero CORS
-// handling (Vite's dev-server proxy, see vite.config.js, forwards
+// handling (Vite's dev-server proxy, see vite.config.ts, forwards
 // relative /batches and /review paths to the backend on the same
 // origin from the browser's point of view). A production deployment
 // with the frontend on a different domain from the backend (e.g. a
@@ -15,16 +15,28 @@
 // "https://findmy-highlights-api.example.com". The backend's own
 // FMH_CORS_ORIGINS must then be set to the frontend's origin for these
 // cross-origin requests to actually succeed.
-const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+import type {
+  Calibration,
+  DemoRunResponse,
+  Job,
+  JobType,
+  Manifest,
+  ReviewNextResponse,
+  ReviewLabel,
+  SegmentStatus,
+  UploadResponse,
+} from './types'
 
-function apiUrl(path) {
+const API_BASE: string = import.meta.env.VITE_API_BASE_URL || ''
+
+function apiUrl(path: string): string {
   return `${API_BASE}${path}`
 }
 
-async function request(path, options = {}) {
+async function request(path: string, options: RequestInit = {}): Promise<Response> {
   const res = await fetch(apiUrl(path), options)
   if (!res.ok) {
-    let detail
+    let detail: string | undefined
     try {
       detail = (await res.json()).detail
     } catch {
@@ -35,7 +47,7 @@ async function request(path, options = {}) {
   return res
 }
 
-export async function uploadBatch(files) {
+export async function uploadBatch(files: File[]): Promise<UploadResponse> {
   const form = new FormData()
   for (const f of files) form.append('files', f)
   const res = await request('/batches', { method: 'POST', body: form })
@@ -46,22 +58,26 @@ export async function uploadBatch(files) {
 // no upload, no calibration step (see backend/demo.py). Returns the same
 // shape as triggerProcess plus batch_id, so the caller can jump straight
 // to the 'processing' stage exactly as if calibration had just finished.
-export async function runDemo() {
+export async function runDemo(): Promise<DemoRunResponse> {
   const res = await request('/demo/run', { method: 'POST' })
   return res.json()
 }
 
-export async function getCalibration(batchId) {
+export async function getCalibration(batchId: string): Promise<Calibration | null> {
   const res = await fetch(apiUrl(`/batches/${batchId}/calibration`))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
-export async function setCalibrationCoords(batchId, x, y) {
+export async function setCalibrationCoords(
+  batchId: string,
+  x: number,
+  y: number,
+): Promise<Calibration> {
   const form = new FormData()
-  form.append('x', x)
-  form.append('y', y)
+  form.append('x', String(x))
+  form.append('y', String(y))
   const res = await request(`/batches/${batchId}/calibration`, {
     method: 'POST',
     body: form,
@@ -69,13 +85,21 @@ export async function setCalibrationCoords(batchId, x, y) {
   return res.json()
 }
 
-export function previewUrl(batchId) {
+export function previewUrl(batchId: string): string {
   // cache-bust: a retry after an error shouldn't ever show a stale
   // cached preview from a previous attempt
   return apiUrl(`/batches/${batchId}/preview.jpg?_=${Date.now()}`)
 }
 
-export async function triggerProcess(batchId, opts = {}) {
+export interface TriggerProcessOptions {
+  order?: string[]
+  allow_uncalibrated?: boolean
+}
+
+export async function triggerProcess(
+  batchId: string,
+  opts: TriggerProcessOptions = {},
+): Promise<Job> {
   const res = await request(`/batches/${batchId}/process`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -84,7 +108,7 @@ export async function triggerProcess(batchId, opts = {}) {
   return res.json()
 }
 
-export async function confirmOrder(batchId, order) {
+export async function confirmOrder(batchId: string, order: string[]): Promise<Job> {
   const res = await request(`/batches/${batchId}/order`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -93,21 +117,21 @@ export async function confirmOrder(batchId, order) {
   return res.json()
 }
 
-export async function getJob(batchId, jobType) {
+export async function getJob(batchId: string, jobType: JobType): Promise<Job | null> {
   const res = await fetch(apiUrl(`/batches/${batchId}/jobs/${jobType}`))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
-export async function getManifest(batchId) {
+export async function getManifest(batchId: string): Promise<Manifest | null> {
   const res = await fetch(apiUrl(`/batches/${batchId}/manifest`))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
-export function outputUrl(batchId, cacheBust) {
+export function outputUrl(batchId: string, cacheBust?: string | number): string {
   // cacheBust is optional so ResultStep's existing usage (one output
   // per session, no reason to distrust the cache) is unaffected; the
   // Edit Log passes a fresh value after every re-export so the browser
@@ -117,11 +141,15 @@ export function outputUrl(batchId, cacheBust) {
   )
 }
 
-export function sourceUrl(batchId, filename) {
+export function sourceUrl(batchId: string, filename: string): string {
   return apiUrl(`/batches/${batchId}/source/${encodeURIComponent(filename)}`)
 }
 
-export async function updateSegmentStatus(batchId, segmentId, status) {
+export async function updateSegmentStatus(
+  batchId: string,
+  segmentId: string,
+  status: SegmentStatus,
+) {
   const res = await request(`/batches/${batchId}/manifest/segments/${segmentId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -130,7 +158,7 @@ export async function updateSegmentStatus(batchId, segmentId, status) {
   return res.json()
 }
 
-export async function triggerExport(batchId) {
+export async function triggerExport(batchId: string): Promise<Job> {
   const res = await request(`/batches/${batchId}/export`, { method: 'POST' })
   return res.json()
 }
@@ -141,14 +169,18 @@ export async function triggerExport(batchId) {
 // training_data_dir configured at all (FMH_TRAINING_DATA_DIR unset),
 // which ReviewQueueView treats as a distinct "not enabled" state from
 // an empty-but-enabled queue ({done: true}, a normal 200).
-export async function getNextReview() {
+export async function getNextReview(): Promise<ReviewNextResponse | null> {
   const res = await fetch(apiUrl('/review/next'))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
-export async function labelReview(reviewId, label, note) {
+export async function labelReview(
+  reviewId: string,
+  label: ReviewLabel,
+  note?: string,
+): Promise<ReviewNextResponse> {
   const res = await request(`/review/${reviewId}/label`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -157,6 +189,6 @@ export async function labelReview(reviewId, label, note) {
   return res.json()
 }
 
-export function reviewClipUrl(reviewId) {
+export function reviewClipUrl(reviewId: string): string {
   return apiUrl(`/review/${reviewId}/clip`)
 }

@@ -10,6 +10,24 @@ import { getJob, triggerProcess } from './api'
 
 const STORAGE_KEY = 'fmh_batch_id'
 
+// Stages: loading -> upload -> calibrate -> [order_confirm ->] processing -> done
+//                                                                        \-> error
+type Stage =
+  | 'loading'
+  | 'upload'
+  | 'calibrate'
+  | 'order_confirm'
+  | 'processing'
+  | 'done'
+  | 'error'
+
+type View = 'home' | 'editlog' | 'review'
+
+interface OrderInfo {
+  suggestedOrder: string[]
+  reason: string | null
+}
+
 // order_confirm is a sub-state that only sometimes appears between
 // calibrate and processing -- it's folded into the "Process" tracker
 // step rather than given its own, since the tracker's fixed 4 steps
@@ -20,7 +38,7 @@ const TRACKER_STEPS = [
   { label: 'Process', desc: 'Detect and cut highlights' },
   { label: 'Done', desc: 'Watch and download' },
 ]
-const STAGE_TO_STEP_INDEX = {
+const STAGE_TO_STEP_INDEX: Partial<Record<Stage, number>> = {
   upload: 0,
   calibrate: 1,
   order_confirm: 2,
@@ -28,7 +46,7 @@ const STAGE_TO_STEP_INDEX = {
   done: 3,
 }
 
-function SidebarSteps({ stage }) {
+function SidebarSteps({ stage }: { stage: Stage }) {
   const currentIndex = STAGE_TO_STEP_INDEX[stage]
   if (currentIndex === undefined) return null
   return (
@@ -55,14 +73,12 @@ function SidebarSteps({ stage }) {
   )
 }
 
-// Stages: loading -> upload -> calibrate -> [order_confirm ->] processing -> done
-//                                                                        \-> error
 export default function App() {
-  const [view, setView] = useState('home') // home | editlog -- independent of the stage machine below
-  const [stage, setStage] = useState('loading')
-  const [batchId, setBatchId] = useState(null)
-  const [orderInfo, setOrderInfo] = useState(null)
-  const [errorMessage, setErrorMessage] = useState(null)
+  const [view, setView] = useState<View>('home') // independent of the stage machine below
+  const [stage, setStage] = useState<Stage>('loading')
+  const [batchId, setBatchId] = useState<string | null>(null)
+  const [orderInfo, setOrderInfo] = useState<OrderInfo | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   // On mount: resume from wherever the batch actually is on the server,
   // never assume a fresh client. Job state is durable server-side (see
@@ -79,7 +95,7 @@ export default function App() {
     resumeFromServer(saved)
   }, [])
 
-  async function resumeFromServer(id) {
+  async function resumeFromServer(id: string) {
     try {
       const detect = await getJob(id, 'detect')
       if (!detect) {
@@ -87,7 +103,7 @@ export default function App() {
         return
       }
       if (detect.status === 'needs_order_confirmation') {
-        setOrderInfo({ suggestedOrder: detect.suggested_order, reason: detect.order_reason })
+        setOrderInfo({ suggestedOrder: detect.suggested_order ?? [], reason: detect.order_reason })
         setStage('order_confirm')
         return
       }
@@ -107,12 +123,12 @@ export default function App() {
       )
       setStage('error')
     } catch (err) {
-      setErrorMessage(err.message)
+      setErrorMessage(err instanceof Error ? err.message : String(err))
       setStage('error')
     }
   }
 
-  function handleUploaded(id) {
+  function handleUploaded(id: string) {
     localStorage.setItem(STORAGE_KEY, id)
     setBatchId(id)
     setStage('calibrate')
@@ -123,7 +139,7 @@ export default function App() {
   // upload, this jumps straight to 'processing', skipping 'calibrate'
   // entirely, since there's nothing left for the user to do before the
   // job that's already running.
-  function handleDemoStarted(id) {
+  function handleDemoStarted(id: string) {
     localStorage.setItem(STORAGE_KEY, id)
     setBatchId(id)
     setStage('processing')
@@ -137,17 +153,18 @@ export default function App() {
     // the server yet (a real, always-reproducible 404, not a rare
     // race). CalibrateStep's own "Saving..." button state already
     // covers this brief extra wait, so there's no UX gap.
+    if (!batchId) return
     try {
       const job = await triggerProcess(batchId)
       if (job.status === 'needs_order_confirmation') {
-        setOrderInfo({ suggestedOrder: job.suggested_order, reason: job.order_reason })
+        setOrderInfo({ suggestedOrder: job.suggested_order ?? [], reason: job.order_reason })
         setStage('order_confirm')
       } else {
         setStage('processing')
       }
       // otherwise ProcessingStep's own polling takes over from here
     } catch (err) {
-      setErrorMessage(err.message)
+      setErrorMessage(err instanceof Error ? err.message : String(err))
       setStage('error')
     }
   }
@@ -229,7 +246,7 @@ export default function App() {
             <ProcessingStep
               batchId={batchId}
               onDone={() => setStage('done')}
-              onError={(msg) => {
+              onError={(msg: string) => {
                 setErrorMessage(msg)
                 setStage('error')
               }}

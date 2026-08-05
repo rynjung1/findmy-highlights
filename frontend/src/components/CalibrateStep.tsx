@@ -1,17 +1,28 @@
 import { useRef, useState } from 'react'
 import { previewUrl, setCalibrationCoords } from '../api'
 
-export default function CalibrateStep({ batchId, onCalibrated }) {
-  const imgRef = useRef(null)
+interface Point {
+  x: number
+  y: number
+}
+
+interface CalibrateStepProps {
+  batchId: string
+  onCalibrated: () => void
+}
+
+export default function CalibrateStep({ batchId, onCalibrated }: CalibrateStepProps) {
+  const imgRef = useRef<HTMLImageElement>(null)
   // native = actual video pixel coordinates (what the backend needs);
   // display = on-screen position, only used to draw the marker
-  const [native, setNative] = useState(null)
-  const [display, setDisplay] = useState(null)
-  const [error, setError] = useState(null)
+  const [native, setNative] = useState<Point | null>(null)
+  const [display, setDisplay] = useState<Point | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  function handleClick(e) {
+  function handleClick(e: React.MouseEvent<HTMLImageElement>) {
     const img = imgRef.current
+    if (!img) return
     const rect = img.getBoundingClientRect()
 
     if (!img.naturalWidth || !img.naturalHeight) {
@@ -67,7 +78,7 @@ export default function CalibrateStep({ batchId, onCalibrated }) {
       await setCalibrationCoords(batchId, native.x, native.y)
       onCalibrated()
     } catch (err) {
-      setError(err.message)
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSaving(false)
     }
