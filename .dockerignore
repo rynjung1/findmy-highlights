@@ -1,0 +1,32 @@
+# Real, large local-only content that must never enter the build
+# context -- reference_clips/ alone is ~2GB, uploads/ is real user data
+# that grows unbounded (~5GB+ already on this dev machine), venv/ is a
+# host-specific Python environment rebuilt fresh in the image anyway.
+venv/
+.venv/
+node_modules/
+frontend/dist/
+frontend/node_modules/
+reference_clips/
+training_data/
+uploads/
+.cache/
+.git/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# The demo clip is the one exception -- it's what actually needs to
+# ship in the image. Everything else matching these video extensions
+# stays out (same logic as .gitignore's own exception for this file).
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.m4v
+!demo_assets/clip_whiff1.mkv
+
+.DS_Store
+.env
+.vscode/
+.idea/

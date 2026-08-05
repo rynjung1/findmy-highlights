@@ -12,6 +12,7 @@ computation and starts its at-bat detector unarmed-at-clip-start, with
 no channel for state to leak from one file into the next.
 """
 
+import os
 from pathlib import Path
 
 from pipeline.atbat import AtBatConfig, atbat_start_times
@@ -27,7 +28,13 @@ from pipeline.segments import (SegmentConfig, apply_hard_cuts, scores_to_segment
 from pipeline.settle import SettleConfig
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CACHE_DIR = ROOT / ".cache" / "detections"
+# Overridable via FMH_DETECTION_CACHE_DIR so a deployment can point this
+# at a mounted persistent volume instead of the repo-relative default —
+# same env-var-with-a-repo-relative-fallback convention backend/app.py's
+# FMH_TRAINING_DATA_DIR already established. A fresh container with no
+# persistent volume still works fine (this is a performance cache, not
+# required data), it just re-detects instead of hitting a warm cache.
+DEFAULT_CACHE_DIR = Path(os.environ.get("FMH_DETECTION_CACHE_DIR", str(ROOT / ".cache" / "detections")))
 
 
 def process_video(video: str, zone, motion_only: bool = False,

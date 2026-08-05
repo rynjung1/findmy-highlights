@@ -19,6 +19,11 @@ node_modules/
 *.MP4
 *.MOV
 
+# Exception: the one short demo clip deployment/demo mode bundles and
+# ships in the Docker image (see backend/demo.py) -- this is real,
+# deployed content, not a training/reference asset.
+!demo_assets/clip_whiff1.mkv
+
 # Generated output
 output/
 uploads/

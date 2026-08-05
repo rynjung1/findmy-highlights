@@ -1,10 +1,28 @@
 // Thin wrapper around the backend's HTTP API (see backend/app.py) --
 // every function here maps to exactly one endpoint, no client-side
-// business logic. Proxied through Vite's dev server (see vite.config.js)
-// so all paths are relative.
+// business logic.
+//
+// Backend base URL: empty string by default, meaning every path here
+// stays relative -- which is what makes local dev work with zero CORS
+// handling (Vite's dev-server proxy, see vite.config.js, forwards
+// relative /batches and /review paths to the backend on the same
+// origin from the browser's point of view). A production deployment
+// with the frontend on a different domain from the backend (e.g. a
+// static host + a separately-hosted API) sets VITE_API_BASE_URL at
+// BUILD time (Vite only substitutes import.meta.env.VITE_* at build
+// time, not runtime -- see README's Deployment section) to the
+// backend's real absolute URL, e.g.
+// "https://findmy-highlights-api.example.com". The backend's own
+// FMH_CORS_ORIGINS must then be set to the frontend's origin for these
+// cross-origin requests to actually succeed.
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+
+function apiUrl(path) {
+  return `${API_BASE}${path}`
+}
 
 async function request(path, options = {}) {
-  const res = await fetch(path, options)
+  const res = await fetch(apiUrl(path), options)
   if (!res.ok) {
     let detail
     try {
@@ -24,8 +42,17 @@ export async function uploadBatch(files) {
   return res.json()
 }
 
+// Runs the bundled sample clip through the real pipeline end to end --
+// no upload, no calibration step (see backend/demo.py). Returns the same
+// shape as triggerProcess plus batch_id, so the caller can jump straight
+// to the 'processing' stage exactly as if calibration had just finished.
+export async function runDemo() {
+  const res = await request('/demo/run', { method: 'POST' })
+  return res.json()
+}
+
 export async function getCalibration(batchId) {
-  const res = await fetch(`/batches/${batchId}/calibration`)
+  const res = await fetch(apiUrl(`/batches/${batchId}/calibration`))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
@@ -45,7 +72,7 @@ export async function setCalibrationCoords(batchId, x, y) {
 export function previewUrl(batchId) {
   // cache-bust: a retry after an error shouldn't ever show a stale
   // cached preview from a previous attempt
-  return `/batches/${batchId}/preview.jpg?_=${Date.now()}`
+  return apiUrl(`/batches/${batchId}/preview.jpg?_=${Date.now()}`)
 }
 
 export async function triggerProcess(batchId, opts = {}) {
@@ -67,14 +94,14 @@ export async function confirmOrder(batchId, order) {
 }
 
 export async function getJob(batchId, jobType) {
-  const res = await fetch(`/batches/${batchId}/jobs/${jobType}`)
+  const res = await fetch(apiUrl(`/batches/${batchId}/jobs/${jobType}`))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
 export async function getManifest(batchId) {
-  const res = await fetch(`/batches/${batchId}/manifest`)
+  const res = await fetch(apiUrl(`/batches/${batchId}/manifest`))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
@@ -85,11 +112,13 @@ export function outputUrl(batchId, cacheBust) {
   // per session, no reason to distrust the cache) is unaffected; the
   // Edit Log passes a fresh value after every re-export so the browser
   // can't serve back a stale video from before the restore took effect.
-  return cacheBust ? `/batches/${batchId}/output?_=${cacheBust}` : `/batches/${batchId}/output`
+  return apiUrl(
+    cacheBust ? `/batches/${batchId}/output?_=${cacheBust}` : `/batches/${batchId}/output`,
+  )
 }
 
 export function sourceUrl(batchId, filename) {
-  return `/batches/${batchId}/source/${encodeURIComponent(filename)}`
+  return apiUrl(`/batches/${batchId}/source/${encodeURIComponent(filename)}`)
 }
 
 export async function updateSegmentStatus(batchId, segmentId, status) {
@@ -113,7 +142,7 @@ export async function triggerExport(batchId) {
 // which ReviewQueueView treats as a distinct "not enabled" state from
 // an empty-but-enabled queue ({done: true}, a normal 200).
 export async function getNextReview() {
-  const res = await fetch('/review/next')
+  const res = await fetch(apiUrl('/review/next'))
   if (res.status === 404) return null
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
@@ -129,5 +158,5 @@ export async function labelReview(reviewId, label, note) {
 }
 
 export function reviewClipUrl(reviewId) {
-  return `/review/${reviewId}/clip`
+  return apiUrl(`/review/${reviewId}/clip`)
 }

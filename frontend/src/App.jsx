@@ -118,6 +118,17 @@ export default function App() {
     setStage('calibrate')
   }
 
+  // Demo mode's /demo/run already calibrates and triggers processing
+  // server-side in one call (see backend/demo.py) -- unlike a real
+  // upload, this jumps straight to 'processing', skipping 'calibrate'
+  // entirely, since there's nothing left for the user to do before the
+  // job that's already running.
+  function handleDemoStarted(id) {
+    localStorage.setItem(STORAGE_KEY, id)
+    setBatchId(id)
+    setStage('processing')
+  }
+
   async function handleCalibrated() {
     // Stage flips to 'processing' only AFTER the trigger call resolves,
     // not before it's even sent -- ProcessingStep starts polling
@@ -200,7 +211,9 @@ export default function App() {
               Loading...
             </div>
           )}
-          {stage === 'upload' && <UploadStep onUploaded={handleUploaded} />}
+          {stage === 'upload' && (
+            <UploadStep onUploaded={handleUploaded} onDemoStarted={handleDemoStarted} />
+          )}
           {stage === 'calibrate' && batchId && (
             <CalibrateStep batchId={batchId} onCalibrated={handleCalibrated} />
           )}

@@ -1520,6 +1520,96 @@ Notes for whoever picks this up next:
   provided over the course of this project and then intentionally not
   committed.
 
+**Deployment-ready: real Dockerfile, real env-based config, real demo
+mode, all verified locally before being called done.** Driven by a real
+deadline (an application demo), not a scoped feature request — see
+Deployment for the actual how-to; this entry covers what was built and
+the real problems caught along the way.
+
+Backend config that was previously hardcoded repo-relative
+(`backend.storage.DEFAULT_UPLOADS_ROOT`, `pipeline.run.DEFAULT_CACHE_DIR`,
+`pipeline.pose.DEFAULT_MODEL_PATH`) is now overridable via `FMH_*` env
+vars, same convention `FMH_TRAINING_DATA_DIR` already established —
+every existing caller that doesn't set them is byte-for-byte unaffected.
+CORS is off by default (real security reasoning: this API accepts real
+file uploads, a wildcard origin would be a real hole, not a
+convenience), on via `FMH_CORS_ORIGINS`, verified with real preflight
+requests against both an allowed and a disallowed origin.
+
+**Demo mode** (`backend/demo.py`, `POST /demo/run`): runs a real ~45s
+bundled clip (`clip_whiff1.mkv`, a genuine swing-and-miss from this
+project's own reference set) through the exact same
+`run_detect_then_export_job` code path a real upload takes — no special
+fake pipeline. The one real engineering problem this needed solving: RF-
+DETR detection is the only slow, ML-inference step in the core pipeline,
+and a live cold run of it on unknown demo hardware would threaten the
+"well under a minute" target. Pre-computing it and shipping the result
+seemed simple until the cache key turned out to be derived from the
+video file's real mtime (`pipeline.detection._cache_key`) — and neither
+`git` nor `docker build` reliably preserve a source file's real mtime,
+so a naively pre-cached result would silently miss its own cache on
+every real deployment. Fixed by stamping a fixed, deterministic mtime on
+the copied file at the moment each demo batch is created
+(`backend/demo.py`'s `seed_demo_batch`), computed fresh every time
+rather than trusted from disk — verified directly: real, repeated demo
+runs (both bare-metal and through the built Docker container) hit the
+seeded cache every time, no RF-DETR cold-start. Real, measured demo
+run time: 6s locally, 11s in the built container. Real detected output
+was checked, not assumed: the pipeline's kept segments genuinely cover
+the clip's real labeled swing-and-miss event
+(`tests/ground_truth/clip_whiff1.json`'s e1, `[12,18]`).
+
+**A real process mistake caught mid-verification, not swept past:**
+testing the demo endpoint through the actual dev-server proxy path
+(rather than an isolated scratch instance) accidentally hit the user's
+own already-running dev backend and frontend on their standard ports
+instead of new isolated ones, because both were already occupied and
+the new instances silently fell back to different ports without that
+being checked first. This wrote one real test batch into the project's
+actual `uploads/` directory. Caught by checking `lsof`/`ps` before
+concluding what had actually served the request (rather than assuming
+the just-started process had), the test batch was removed, and the
+user's real running servers were confirmed untouched throughout — an
+accidental but real confirmation that the new code works correctly
+against a live `--reload` server that had picked up the changes via a
+hot reload, not just a clean from-scratch process.
+
+The Docker image itself (`Dockerfile`) installs `torch`/`torchvision`
+from PyTorch's CPU-only wheel index specifically (not PyPI's default,
+which resolves to CUDA-bundled wheels several GB larger and entirely
+wasted on a GPU-less demo host) — real, measured image size 4.66 GB.
+RF-DETR's pretrained weights are downloaded and warmed up at build time,
+not on a visitor's first real request, via a real call through
+`detect_persons()` against the bundled demo clip itself (if this step
+fails, the image fails to build, not a visitor's first click). Runs as a
+non-root user. All verified with a real `docker build` + `docker run` +
+a real demo run through the running container + a real named-volume
+persistence check (mounted the same volume from a second, fresh
+container and confirmed the real output files were there) — not just
+"the Dockerfile looks right."
+
+Frontend: every API call was already routed through `frontend/src/api.js`
+(no path build logic duplicated across components), so making the
+backend URL configurable was a single-file change — added a
+`VITE_API_BASE_URL` build-time env var (Vite's own `import.meta.env.VITE_*`
+substitution), defaulting to empty/relative (unchanged local-dev
+behavior via the existing Vite proxy). Verified for real, not assumed:
+built once with no override and grepped the output bundle for the env
+var name (absent — correctly inlined away), built again with a real
+URL configured and grepped for that URL (present — correctly baked in),
+then ran `npm run preview` against the default build and confirmed it
+serves standalone. Caught one real bug in the same pass: the dev-server
+proxy (`vite.config.js`) only forwarded `/batches` and `/review`, not
+the new `/demo` prefix — the demo button would have 404'd in local dev
+if this hadn't been checked.
+
+Explicitly NOT decided here, flagged rather than picked silently:
+hosting provider for the backend, static host for the frontend, whether
+to keep the backend warm vs. scale-to-zero, whether to enable the review
+queue (`FMH_TRAINING_DATA_DIR`) for a public deployment, and TLS/custom
+domain — see Deployment's "Open decisions" for the real reasoning behind
+leaving each of these open.
+
 ## Architecture overview
 
 Built so far:
@@ -2126,6 +2216,142 @@ original 37.4-minute baseline). The exact OS mechanism it's working
 around isn't fully pinned down, but the fix itself is real and
 reproducible — worth doing by default for any long unattended processing
 run, not just when chasing a timing mystery.
+
+## Deployment
+
+Two independent pieces, deployed separately: the **backend** (FastAPI +
+the full ML pipeline) as a Docker container with a persistent volume,
+and the **frontend** (`frontend/dist/`, a static build) on any static
+host. They talk over plain HTTP with CORS, not a shared origin — real,
+not hypothetical: verified locally the same way as everything else in
+this project (`docker build`, `docker run`, a real end-to-end demo run
+through the running container, real CORS preflight checks against both
+an allowed and a disallowed origin — see the real numbers below).
+
+### Backend: build and run
+
+```sh
+docker build -t findmy-highlights-backend .
+
+docker volume create fmh-data   # real user data + the detection cache
+docker run -d --name fmh-backend -p 8420:8420 \
+  -v fmh-data:/data \
+  -e FMH_CORS_ORIGINS="https://your-frontend-domain.example.com" \
+  findmy-highlights-backend
+```
+
+`/data` inside the container is where `FMH_UPLOADS_ROOT` and
+`FMH_DETECTION_CACHE_DIR` already point (baked in as image `ENV`
+defaults, see `Dockerfile`) — mounting a volume there is what makes
+uploads, manifests, and `output.mp4` survive a container restart or
+redeploy. Skipping the `-v` flag still works for a quick throwaway demo
+(the container's own writable layer stands in), it just means every
+restart starts from zero: no past uploads, no warm detection cache.
+
+**What's baked into the image at build time, and why:** RF-DETR's
+Apache-2.0 pretrained weights (~355 MB) are downloaded and warmed up
+during `docker build`, not on a visitor's first real request — the whole
+point of demo mode is a fast, reliable first impression, and a cold
+multi-hundred-MB download on an unknown network at demo time is exactly
+the kind of invisible risk that would undermine that. The bundled demo
+clip and its precomputed detection cache (see `backend/demo.py` and
+Current Status's demo-mode writeup) are baked in the same way. Real
+measured build time on this machine: ~3 minutes total (pip installs
+~45s, RF-DETR download+warmup ~2 min, image export ~45s). Real image
+size: **4.66 GB** — the ML dependency stack (torch, torchvision,
+mediapipe, transformers, opencv, RF-DETR's weights) dominates this;
+`torch`/`torchvision` are installed from PyTorch's CPU-only wheel index
+specifically to avoid pulling in several extra GB of unused CUDA
+runtime libraries on what's expected to be CPU-only hosting.
+
+**Real resource numbers, measured, not estimated:** idle container
+memory ~150 MB. A real detect job (RF-DETR inference) needs ~1 GB RSS
+and drives CPU hard while it runs (see this doc's single-job-at-a-time
+design elsewhere) — size the host accordingly; 2 GB RAM / 1-2 vCPU is a
+reasonable floor for a demo deployment handling one job at a time, more
+if concurrent real uploads (not just the demo) are expected. No GPU
+required or used. Disk: the image itself (4.66 GB) plus whatever the
+mounted volume accumulates from real uploads (source videos run
+100s of MB to low GB each) and `output.mp4` exports.
+
+### Backend: environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FMH_UPLOADS_ROOT` | `./uploads` | Real user data: batch uploads, job state, manifests, `output.mp4`. Point this (via the image's own `ENV` default, `/data/uploads`) at a mounted persistent volume. |
+| `FMH_DETECTION_CACHE_DIR` | `./.cache/detections` | RF-DETR result cache, keyed by file mtime+size+config. Safe to lose (just means re-detecting), nice to persist for repeat runs on the same file. |
+| `FMH_CORS_ORIGINS` | *(unset — no cross-origin access at all)* | Comma-separated allowed origins for the deployed frontend, e.g. `https://findmy-highlights.vercel.app`. **Required** whenever frontend and backend are on different domains — unset is safe-by-default, not a bug, but the app won't work cross-origin until this is set. Deliberately never defaults to `*`: this API accepts real file uploads. |
+| `FMH_TRAINING_DATA_DIR` | *(unset — review queue off)* | Opts real detect jobs into the Tier 1 review-queue instrumentation (see Current Status's transfer-learning writeup). An explicit choice, not a default-on for a public deployment — see "Open decisions" below. |
+| `FMH_POSE_MODEL_PATH` | `./.cache/models/pose_landmarker_full.task` | Only read if `FMH_TRAINING_DATA_DIR` is set. Not auto-downloaded (Setup step 6) and not baked into the Docker image (not needed for the core pipeline or demo mode) — must be mounted onto the volume manually if the review queue is enabled in production. |
+| `RF_HOME` | `~/.roboflow` (baked to `/data/cache/roboflow` in the image) | Where RF-DETR's own weight cache lives. Already pre-warmed into the image at build time — this only matters if you rebuild against a newer `rfdetr` pin. |
+| `HF_HOME` | HuggingFace's own default (`~/.cache/huggingface`) | Only relevant if `FMH_TRAINING_DATA_DIR` is set — the review queue's X-CLIP instrumentation downloads `microsoft/xclip-base-patch32` (~600 MB) on first use. Not baked into the image; not needed for the core pipeline or demo mode. |
+
+### Frontend: build and deploy
+
+```sh
+cd frontend
+VITE_API_BASE_URL="https://your-backend-domain.example.com" npm run build
+```
+
+`VITE_API_BASE_URL` is a **build-time** substitution (Vite's own
+`import.meta.env.VITE_*` mechanism, verified locally: built with a real
+URL configured, grepped the output bundle, confirmed it's baked in
+literally — see `frontend/src/api.js`), not a runtime setting, so it has
+to be set wherever the build itself runs (a static host's build-command
+environment, e.g. Vercel/Netlify project settings — not a `.env` file
+committed to the repo). Left unset, every request stays a relative path,
+which is what makes local dev (`npm run dev`) work against Vite's own
+proxy with zero configuration — see `frontend/vite.config.js`.
+
+Deploy the resulting `frontend/dist/` to any static host (Vercel,
+Netlify, S3+CloudFront, etc.) — it's a plain static bundle (verified
+locally with `npm run build` + `npm run preview`, no server-side
+rendering or build-time API calls involved). Whatever domain it ends up
+on must be added to the backend's `FMH_CORS_ORIGINS`.
+
+### Demo mode
+
+The "Try the demo" button on the upload screen (`backend/demo.py`, see
+Current Status for the full design writeup) runs a real ~45-second
+bundled clip through the complete real pipeline — no upload, no
+calibration step, the exact same `run_detect_then_export_job` code path
+a real upload takes. The only thing pre-computed is the RF-DETR
+detection pass itself; everything else (motion, fusion, segment
+detection, hard-cut, ffmpeg export) runs live. Real, measured end-to-end
+time: **6 seconds** on this dev machine, **11 seconds** through the
+built Docker container on this machine's Docker Desktop VM — both
+comfortably under the "well under a minute" target. Demo runs never opt
+into the review queue regardless of `FMH_TRAINING_DATA_DIR` (see
+`backend/app.py`'s `/demo/run`) — the same fixed clip every time would
+only ever mine exact duplicate candidates.
+
+### Open decisions — real choices this doc won't make silently
+
+- **Hosting provider for the backend.** The Docker image is portable
+  (Fly.io, Render, Railway, a plain VPS, ECS/Cloud Run, etc. all work —
+  none of this project's own code assumes a specific one), but cost,
+  cold-start behavior, and persistent-volume support differ meaningfully
+  between them. Not picked here.
+- **Frontend static host.** Vercel and Netlify were both named as
+  candidates; either works identically from this project's side (a
+  plain static build pointed at `VITE_API_BASE_URL`). Not picked here.
+- **Keeping the backend warm vs. scale-to-zero.** A cold container adds
+  the ~10-20s Docker/process startup itself on top of the pipeline's own
+  work (not measured here, since the local runs above started from an
+  already-running container) — real for a live demo where a visitor's
+  first click matters, a real cost tradeoff against paying for an
+  always-on instance. Not picked here.
+- **Whether to enable `FMH_TRAINING_DATA_DIR` (the review queue) in a
+  public deployment.** Real unlabeled review candidates would start
+  accumulating from real visitor uploads, not just the demo clip (which
+  is explicitly excluded) — a real data-collection decision with real
+  privacy/consent surface area for a public-facing app, not just a
+  feature flag. Left off (unset) by default; enabling it for a demo
+  deployment is a real choice worth making deliberately, not a default
+  this doc sets on your behalf.
+- **TLS/custom domain.** Not addressed here — most of the hosting
+  options above provide this by default (a managed TLS cert on their own
+  subdomain), but a custom domain is a real DNS/cert decision left open.
 
 ## How the manifest works
 

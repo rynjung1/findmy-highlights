@@ -1,2 +1,9 @@
 node_modules/
 dist/
+
+# Local env overrides (e.g. VITE_API_BASE_URL for testing against a
+# non-default backend) -- see README's Deployment section. Vite loads
+# these automatically; none are required for normal local dev.
+.env
+.env.local
+.env.*.local

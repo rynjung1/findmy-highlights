@@ -29,6 +29,7 @@ from pathlib import Path
 import cv2
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -38,8 +39,9 @@ from pipeline.manifest import (VALID_STATUS, load_manifest, save_manifest,
                                set_status)
 from pipeline.multifile import order_infos, probe_file, resolve_order
 from pipeline.review import review_priority_key
+from pipeline.run import DEFAULT_CACHE_DIR
 
-from backend import jobs, storage
+from backend import demo, jobs, storage
 from backend.pipeline_runner import run_detect_then_export_job, run_export_job
 
 # Tier 1 review queue (see pipeline/review.py): off by default, and only
@@ -64,6 +66,22 @@ from backend.pipeline_runner import run_detect_then_export_job, run_export_job
 # time a terminal is opened.
 load_dotenv()
 DEFAULT_TRAINING_DATA_DIR = os.environ.get("FMH_TRAINING_DATA_DIR")
+
+# CORS: unset (default) means no cross-origin access is granted at all --
+# safe for the local dev setup (frontend/vite.config.js proxies same-origin,
+# so dev never needed CORS in the first place) but a real deployment with
+# the frontend on a different domain (e.g. a static host) MUST set this
+# explicitly, comma-separated, e.g.
+# "https://findmy-highlights.vercel.app,https://findmy-highlights.example.com".
+# Deliberately not defaulted to "*" -- this API accepts file uploads and
+# serves back real user video, a wildcard origin would let any third-party
+# page make authenticated-by-cookie-free-but-still-real requests against a
+# visitor's own running job.
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("FMH_CORS_ORIGINS", "")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
 VALID_REVIEW_LABELS = ("downtime", "real_action")
 # Every real review id this app ever writes is "<prefix>_<uuid4 hex>" (see
 # pipeline.review.CANDIDATE_KIND_TO_ID_PREFIX) -- an allowlist match
@@ -146,6 +164,11 @@ def create_app(uploads_root=None, run_in_background=None,
         yield
 
     app = FastAPI(title="Find My Highlights", lifespan=_lifespan)
+    origins = _cors_origins()
+    if origins:
+        app.add_middleware(
+            CORSMiddleware, allow_origins=origins, allow_credentials=False,
+            allow_methods=["*"], allow_headers=["*"])
     app.state.uploads_root = (Path(uploads_root) if uploads_root is not None
                               else storage.DEFAULT_UPLOADS_ROOT)
     app.state.run_in_background = run_in_background or _default_run_in_background
@@ -213,6 +236,45 @@ def create_app(uploads_root=None, run_in_background=None,
             names.append(f.filename)
         (bdir / "files.json").write_text(json.dumps({"files": names}))
         return {"batch_id": batch_id, "files": names}
+
+    @app.post("/demo/run")
+    def run_demo():
+        """Creates a fresh batch from the bundled demo clip
+        (backend/demo.py), already calibrated, and immediately triggers
+        real detect-then-export processing on it -- one call, no upload,
+        no manual calibration step. Real pipeline the whole way through
+        (see backend/demo.py's module docstring for what's actually
+        pre-computed vs. run live); the response shape matches a normal
+        /batches/{id}/process trigger plus the new batch_id, so the
+        frontend can drive it with the exact same polling/rendering path
+        a real upload uses.
+
+        Respects the same single-job-at-a-time rule as a real upload
+        (see module docstring) -- a demo run while something else is
+        already processing gets the same 409 a second real upload would.
+        Never opts into the Tier 1 review queue regardless of the
+        server's own FMH_TRAINING_DATA_DIR setting: this is the same
+        fixed clip every single time, so repeat demo runs would only
+        ever mine exact duplicate candidates, not real new label data.
+        """
+        active = jobs.find_active_job(app.state.uploads_root)
+        if active:
+            raise HTTPException(
+                409, f"another job is already running: "
+                     f"batch_id={active['batch_id']} job_id={active['job_id']}")
+
+        batch_id = storage.new_batch_id()
+        bdir = storage.batch_dir(app.state.uploads_root, batch_id)
+        bdir.mkdir(parents=True, exist_ok=True)
+        demo.seed_demo_batch(bdir, DEFAULT_CACHE_DIR)
+        (bdir / "files.json").write_text(
+            json.dumps({"files": [demo.DEMO_VIDEO_NAME]}))
+
+        job = jobs.create_job(bdir, batch_id, "detect", status="pending")
+        app.state.run_in_background(
+            run_detect_then_export_job, bdir, job,
+            [str(bdir / demo.DEMO_VIDEO_NAME)], None)
+        return {"batch_id": batch_id, **job}
 
     @app.get("/batches/{batch_id}/preview.jpg")
     def get_preview(batch_id: str):

@@ -30,6 +30,7 @@ Task 2 pose+audio writeup for those numbers, not this module's own
 existence.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,7 +38,12 @@ import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL_PATH = ROOT / ".cache" / "models" / "pose_landmarker_full.task"
+# Overridable via FMH_POSE_MODEL_PATH (same convention as
+# pipeline.run.DEFAULT_CACHE_DIR) -- this file has no auto-download (see
+# README's Setup step 6), so a deployment that wants the Tier 1
+# review-queue instrumentation must mount it at this path explicitly.
+DEFAULT_MODEL_PATH = Path(os.environ.get(
+    "FMH_POSE_MODEL_PATH", str(ROOT / ".cache" / "models" / "pose_landmarker_full.task")))
 
 # BlazePose GHUM 3D topology (see the model card): landmark 15 = left
 # wrist, 16 = right wrist.

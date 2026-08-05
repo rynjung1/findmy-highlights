@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { uploadBatch } from '../api'
+import { runDemo, uploadBatch } from '../api'
 
 // Mirrors backend/app.py's ALLOWED_VIDEO_EXTENSIONS -- this is the fast
 // client-side rejection (immediate, before any bytes leave the
@@ -12,12 +12,30 @@ function isVideoFile(file) {
   return ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))
 }
 
-export default function UploadStep({ onUploaded }) {
+export default function UploadStep({ onUploaded, onDemoStarted }) {
   const fileInputRef = useRef(null)
   const [files, setFiles] = useState([])
   const [error, setError] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+  const [demoStarting, setDemoStarting] = useState(false)
+  const [demoError, setDemoError] = useState(null)
+
+  async function handleTryDemo() {
+    setDemoStarting(true)
+    setDemoError(null)
+    try {
+      const { batch_id } = await runDemo()
+      onDemoStarted(batch_id)
+    } catch (err) {
+      // The one real user-facing failure mode here is a 409 (another
+      // job -- a real upload or someone else's demo run -- already in
+      // progress; see backend/app.py's single-job-at-a-time rule), so
+      // the message is shown as-is rather than a generic fallback.
+      setDemoError(err.message)
+      setDemoStarting(false)
+    }
+  }
 
   function pickFiles(fileList) {
     const picked = Array.from(fileList)
@@ -49,7 +67,22 @@ export default function UploadStep({ onUploaded }) {
   }
 
   return (
-    <div className="content-grid">
+    <>
+      <div className="card demo-card">
+        <h2 style={{ marginTop: 0 }}>New here? Try it in one click</h2>
+        <p className="muted">
+          Runs a real ~45-second sample clip through the full pipeline --
+          detection, highlight extraction, and export -- so you can see a
+          finished result before uploading your own footage. Takes well
+          under a minute.
+        </p>
+        {demoError && <p className="alert alert-danger">{demoError}</p>}
+        <button onClick={handleTryDemo} disabled={demoStarting || uploading}>
+          {demoStarting ? 'Starting demo...' : 'Try the demo'}
+        </button>
+      </div>
+
+      <div className="content-grid">
       <div className="card">
         <h2 style={{ marginTop: 0 }}>Upload game recording(s)</h2>
         <div
@@ -131,6 +164,7 @@ export default function UploadStep({ onUploaded }) {
           </li>
         </ul>
       </div>
-    </div>
+      </div>
+    </>
   )
 }
