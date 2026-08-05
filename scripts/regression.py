@@ -62,8 +62,8 @@ from pipeline.motion import compute_motion
 from pipeline.segments import (SegmentConfig, apply_hard_cuts,
                                hard_cut_overlaps_required, scores_to_segments,
                                smooth_scores, segment_covers, total_duration)
-from pipeline.fusion import (FusionConfig, apply_veto, fuse, scale_boost_factor,
-                             vetoed_overlapping_required, PlateZone)
+from pipeline.fusion import (FusionConfig, apply_veto, fuse, occupancy_near_times,
+                             scale_boost_factor, vetoed_overlapping_required, PlateZone)
 
 ROOT = Path(__file__).resolve().parent.parent
 GROUND_TRUTH_DIR = ROOT / "tests" / "ground_truth"
@@ -141,8 +141,18 @@ def main() -> None:
             boost = scale_boost_factor(det.times, det.boxes, motion.frame_size,
                                        zone, seg_cfg.reference_plate_box_width_px)
         enter_scores = motion.scores * (boost ** 2)
+        # mirrors pipeline.run.process_video's enter-side occupancy
+        # debounce -- kept in sync deliberately, same reason as the scale
+        # boost above.
+        occupancy_near = None
+        if zone is not None:
+            occ_det_enter = compute_occupancy(det.times, det.boxes, zone,
+                                              FusionConfig().stationary_v)
+            occupancy_near = occupancy_near_times(
+                motion.times, det.times, occ_det_enter, seg_cfg.enter_occupancy_window_s)
         raw = scores_to_segments(motion.times, enter_scores, seg_cfg,
-                                 sustain_scores=motion.scores)
+                                 sustain_scores=motion.scores,
+                                 occupancy_near=occupancy_near)
         raw_kept, vetoed = apply_veto(raw, fused)
         if boost > 1.0:
             print(f"    scale boost: {boost:.3f}x (linear), "

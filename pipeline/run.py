@@ -17,8 +17,9 @@ from pathlib import Path
 from pipeline.atbat import AtBatConfig, atbat_start_times
 from pipeline.calibration import resolve_base_zones
 from pipeline.detection import DetectionConfig, detect_persons
-from pipeline.fusion import (apply_veto, compute_occupancy, compute_zone_velocity,
-                             fuse, scale_boost_factor)
+from pipeline.fusion import (FusionConfig, apply_veto, compute_occupancy,
+                             compute_zone_velocity, fuse, occupancy_near_times,
+                             scale_boost_factor)
 from pipeline.motion import compute_motion
 from pipeline.refine import RefineConfig, refine_segments
 from pipeline.segments import (SegmentConfig, apply_hard_cuts, scores_to_segments,
@@ -112,10 +113,28 @@ def process_video(video: str, zone, motion_only: bool = False,
         boost = scale_boost_factor(det.times, det.boxes, motion.frame_size,
                                    zone, seg_cfg.reference_plate_box_width_px)
     enter_scores = motion.scores * (boost ** 2)
+    # Enter-side occupancy debounce (see SegmentConfig.enter_debounce_s):
+    # a candidate enter crossing with no real occupancy evidence within
+    # enter_occupancy_window_s must sustain briefly before being trusted,
+    # rather than opening on its first sample. A debounce, not a veto --
+    # it only ever delays the DECISION to trust a crossing, backdating to
+    # the crossing's own true first instant once confirmed, so no real
+    # content is ever lost (see scripts/enter_occupancy_gate_investigation.py
+    # for the real 9-clip zero-regression validation and the real
+    # full_game.mkv effectiveness numbers this shipped against). None
+    # whenever zone is None, identical to every prior behavior (no
+    # occupancy signal available to debounce against).
+    occupancy_near = None
+    if zone is not None:
+        occ_det_enter = compute_occupancy(det.times, det.boxes, zone,
+                                          FusionConfig().stationary_v)
+        occupancy_near = occupancy_near_times(
+            motion.times, det.times, occ_det_enter, seg_cfg.enter_occupancy_window_s)
     # motion alone owns segment open AND raw exit (Stage 3 replaced the
     # Stage 2 score-sustain with the explicit play-extension below)
     raw = scores_to_segments(motion.times, enter_scores, seg_cfg,
-                             sustain_scores=motion.scores)
+                             sustain_scores=motion.scores,
+                             occupancy_near=occupancy_near)
     kept, vetoed = apply_veto(raw, fused)
 
     sm = smooth_scores(motion.times, motion.scores, seg_cfg.smooth_window_s)

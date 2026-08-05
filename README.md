@@ -712,11 +712,10 @@ Implemented as `pipeline.fusion.occupancy_near_times()` (windowed
 occupancy lookup, O(n log n) via searchsorted) and two new
 `SegmentConfig` fields (`enter_debounce_s`, `enter_occupancy_window_s`)
 plus an `occupancy_near` parameter on `scores_to_segments` (`None` by
-default — every existing caller, including `pipeline.run.process_video`,
-is byte-for-byte unaffected; `find_boundary_crossings` deliberately left
-untouched, a separate, review-queue-only concern). 10 new unit tests,
-including one proving the "zero content lost" backdating property
-directly. **Not wired into `process_video` — investigation only.**
+default, so `find_boundary_crossings` — deliberately left untouched, a
+separate, review-queue-only concern — and any future caller that omits
+it stays byte-for-byte unaffected). 10 new unit tests, including one
+proving the "zero content lost" backdating property directly.
 
 *Real simulation, `scripts/enter_occupancy_gate_investigation.py`,
 mirroring `scripts/regression.py`'s exact real recall/continuity checks
@@ -748,12 +747,24 @@ motion without a visible batter (ambient milling that lasts real
 seconds, not a brief blip), a genuinely different failure mode a
 debounce can't touch by design, not a tuning gap to push further on.
 
-**Verdict: a real, safe, zero-cost mechanism that fixes a real but
-modest slice of the problem — worth keeping in the codebase as validated
-investigation infrastructure, not (yet) worth shipping into
-`process_video` for what it currently buys.** Fixing 2 of 11 real
-disagreements doesn't meaningfully move the 68.8% enter-side
-disagreement rate on its own. Real next step, if pursued: a
+**Shipped: wired into `pipeline.run.process_video` (the enter-side raw
+`scores_to_segments` call now passes `occupancy_near`, computed the same
+way the investigation script validated — a fresh `compute_occupancy` at
+`FusionConfig().stationary_v`, windowed via `occupancy_near_times` at
+`enter_occupancy_window_s`) and into `scripts/regression.py`, kept in
+sync with `process_video` for the same reason its scale-boost mirror
+already is: this script must measure the pipeline that actually ships,
+not a stale reimplementation.** Re-ran the full test suite (456 passed)
+and the full `scripts/regression.py` gate — the real ship gate, not the
+lighter investigation-script bar — against the now-integrated code:
+`ALL PASS`, kept-before-hard-cut total 600.90s, byte-identical to the
+investigation script's own pre-ship number, confirming the real
+integration introduces no drift from what was validated.
+
+A real, safe, zero-cost mechanism that fixes a real but modest slice of
+the problem: fixing 2 of 11 real disagreements doesn't meaningfully move
+the 68.8% enter-side disagreement rate on its own. Real next step, if
+pursued: a
 sustained-motion-without-occupancy signal (closer to a proper veto, but
 one that specifically distinguishes "sustained ambient milling" from "a
 sustained real play the system just isn't recognizing" — the same
