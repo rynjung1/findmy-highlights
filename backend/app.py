@@ -237,6 +237,14 @@ def create_app(uploads_root=None, run_in_background=None,
         (bdir / "files.json").write_text(json.dumps({"files": names}))
         return {"batch_id": batch_id, "files": names}
 
+    @app.get("/health")
+    def health():
+        """Liveness check for a hosting platform's healthcheck (e.g.
+        Railway's `deploy.healthcheckPath`, see railway.json) --
+        deliberately cheap (no filesystem/model access), just confirms
+        the process is up and serving requests."""
+        return {"status": "ok"}
+
     @app.post("/demo/run")
     def run_demo():
         """Creates a fresh batch from the bundled demo clip

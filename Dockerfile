@@ -77,5 +77,16 @@ VOLUME ["/data"]
 RUN useradd -m -u 1000 fmh && chown -R fmh:fmh /app /data
 USER fmh
 
+# Shell form (not exec/JSON form) deliberately -- ${PORT:-8420} needs a
+# shell to expand it. Railway (and most PaaS hosts) inject a real PORT
+# env var at runtime and route traffic to whatever port the app actually
+# binds, NOT to EXPOSE's value (which is documentation/legacy Docker
+# networking only) -- verified directly against Railway's own docs
+# before writing this, not assumed. The :-8420 fallback keeps a plain
+# local `docker run -p 8420:8420` (no PORT set) working exactly as
+# before. `exec` is real, not decorative: without it the shell stays PID
+# 1 and uvicorn never receives SIGTERM directly, so a redeploy/restart
+# has to wait out a hard-kill timeout instead of shutting down cleanly
+# -- caught by Docker's own build-time linter, not assumed correct.
 EXPOSE 8420
-CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8420"]
+CMD exec uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8420}

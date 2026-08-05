@@ -131,6 +131,19 @@ def process_video_calls(monkeypatch):
     return calls
 
 
+# ---- health ----
+
+def test_health_returns_ok(tmp_path):
+    # deliberately cheap (see backend/app.py) -- a hosting platform's
+    # healthcheck (e.g. railway.json's deploy.healthcheckPath) hits this,
+    # not a real endpoint that touches the filesystem or a model.
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        res = client.get("/health")
+        assert res.status_code == 200
+        assert res.json() == {"status": "ok"}
+
+
 # ---- upload ----
 
 def test_upload_creates_batch_with_files_on_disk(tmp_path):

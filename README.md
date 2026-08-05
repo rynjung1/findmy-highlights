@@ -2325,33 +2325,93 @@ into the review queue regardless of `FMH_TRAINING_DATA_DIR` (see
 `backend/app.py`'s `/demo/run`) — the same fixed clip every time would
 only ever mine exact duplicate candidates.
 
-### Open decisions — real choices this doc won't make silently
+### Decisions made
 
-- **Hosting provider for the backend.** The Docker image is portable
-  (Fly.io, Render, Railway, a plain VPS, ECS/Cloud Run, etc. all work —
-  none of this project's own code assumes a specific one), but cost,
-  cold-start behavior, and persistent-volume support differ meaningfully
-  between them. Not picked here.
-- **Frontend static host.** Vercel and Netlify were both named as
-  candidates; either works identically from this project's side (a
-  plain static build pointed at `VITE_API_BASE_URL`). Not picked here.
-- **Keeping the backend warm vs. scale-to-zero.** A cold container adds
-  the ~10-20s Docker/process startup itself on top of the pipeline's own
-  work (not measured here, since the local runs above started from an
-  already-running container) — real for a live demo where a visitor's
-  first click matters, a real cost tradeoff against paying for an
-  always-on instance. Not picked here.
-- **Whether to enable `FMH_TRAINING_DATA_DIR` (the review queue) in a
-  public deployment.** Real unlabeled review candidates would start
-  accumulating from real visitor uploads, not just the demo clip (which
-  is explicitly excluded) — a real data-collection decision with real
-  privacy/consent surface area for a public-facing app, not just a
-  feature flag. Left off (unset) by default; enabling it for a demo
-  deployment is a real choice worth making deliberately, not a default
-  this doc sets on your behalf.
-- **TLS/custom domain.** Not addressed here — most of the hosting
-  options above provide this by default (a managed TLS cert on their own
-  subdomain), but a custom domain is a real DNS/cert decision left open.
+- **Backend: Railway.** **Frontend: Vercel.** **Backend stays warm, no
+  scale-to-zero** (Railway calls this "Serverless" — confirmed directly
+  against Railway's own docs that it's an opt-in feature you must
+  explicitly enable, so simply never turning it on is sufficient; no
+  config needed either way). **Review queue disabled on the public
+  deployment** (`FMH_TRAINING_DATA_DIR` unset on Railway; keep it set
+  locally, same `.env` as always). **Default TLS/subdomain from each
+  host, no custom domain.**
+
+### Railway (backend)
+
+`railway.json` (repo root) sets `build.builder: DOCKERFILE` explicitly,
+`deploy.healthcheckPath: /health` (a new, deliberately cheap endpoint —
+no filesystem/model access, just confirms the process is serving), and
+an `ON_FAILURE` restart policy. Real things verified locally before
+trusting this against Railway specifically (checked directly against
+Railway's own docs, not assumed from generic Docker knowledge):
+
+- **Railway injects a `PORT` env var and routes traffic to whatever port
+  the app actually binds — not to the Dockerfile's `EXPOSE` value.** The
+  `Dockerfile`'s `CMD` now reads `${PORT:-8420}` (shell form, needed for
+  the variable expansion; `:-8420` keeps a plain local `docker run -p
+  8420:8420` with no `PORT` set working exactly as before). Verified
+  directly: ran the built image with `-e PORT=3000 -p 8425:3000` and
+  confirmed it bound 3000, not 8420.
+- **Signal handling, a real bug caught by Docker's own build-time
+  linter, not cosmetic.** Shell-form `CMD` alone leaves the shell as PID
+  1, so the app never receives `SIGTERM` directly — a redeploy or
+  restart has to wait out a hard-kill timeout instead of shutting down
+  cleanly. Fixed with `CMD exec uvicorn ...` (`exec` replaces the shell
+  process with uvicorn itself). Verified, not assumed: timed `docker
+  stop` before and after — **0.5s** after the fix (a plain `docker stop`
+  with no `exec` typically eats the full ~10s grace period waiting for
+  `SIGKILL`).
+- **Persistent volumes are dashboard/CLI-only on Railway — confirmed
+  directly against Railway's own docs — not something `railway.json`
+  can declare.** After creating the service, add a volume (Command
+  Palette or right-click the project canvas) and mount it at `/data`
+  (the same path the image's own `FMH_UPLOADS_ROOT`/
+  `FMH_DETECTION_CACHE_DIR` defaults already point to) — this is the one
+  manual dashboard step this repo can't do for you.
+- Re-verified the full real demo flow under Railway-like conditions
+  specifically (custom `PORT` + a mounted volume together, not just
+  each in isolation): **8s** end to end.
+
+**Setup, once you have a Railway account:** New Project → Deploy from
+GitHub repo → Railway auto-detects the root `Dockerfile` and
+`railway.json`. Add a volume mounted at `/data` (see above). Set
+`FMH_CORS_ORIGINS` to the real Vercel URL once that exists (a chicken-
+and-egg step — deploy the backend first, get its public URL, then set
+`VITE_API_BASE_URL` for the Vercel build, then come back and set
+`FMH_CORS_ORIGINS` to the Vercel URL). Leave `FMH_TRAINING_DATA_DIR`
+unset. Do not enable Serverless mode.
+
+### Vercel (frontend)
+
+No `vercel.json` added — Vercel's built-in Vite framework preset
+auto-detects this project correctly (a `vite.config.js` + `vite` in
+`package.json`, exactly this repo's setup) with no config file needed,
+and since dashboard behavior can't be exercised without a real account,
+adding config here that couldn't be verified end to end seemed worse
+than documenting the exact dashboard values directly:
+
+- **Root Directory:** `frontend` (this is a subdirectory of the repo,
+  not the repo root — the one setting that actually matters here).
+- **Framework Preset:** Vite (auto-detected once Root Directory is set).
+- **Build Command:** `npm run build` (default, verified locally).
+- **Output Directory:** `dist` (default, verified locally — `npm run
+  build` produces `frontend/dist/`, confirmed served correctly with
+  `npm run preview`).
+- **Environment Variable:** `VITE_API_BASE_URL` = the real Railway
+  backend URL. Build-time, not runtime (Vite's own
+  `import.meta.env.VITE_*` substitution — see this doc's Frontend
+  section above) — must be set before/at the build, not added after the
+  fact and expected to take effect without a rebuild.
+
+### Still genuinely open
+
+- **TLS/custom domain:** intentionally deferred (decided: use each
+  host's default subdomain for now).
+- **Whether to ever enable the review queue on the public deployment
+  later:** intentionally deferred (decided: off for now) — if that
+  changes, it's `FMH_TRAINING_DATA_DIR=training_data` on Railway plus
+  mounting `pose_landmarker_full.task` onto the volume if the pose
+  signal is wanted too (see the env var table above).
 
 ## How the manifest works
 
