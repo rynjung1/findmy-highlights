@@ -2327,59 +2327,175 @@ only ever mine exact duplicate candidates.
 
 ### Decisions made
 
-- **Backend: Railway.** **Frontend: Vercel.** **Backend stays warm, no
-  scale-to-zero** (Railway calls this "Serverless" — confirmed directly
-  against Railway's own docs that it's an opt-in feature you must
-  explicitly enable, so simply never turning it on is sufficient; no
-  config needed either way). **Review queue disabled on the public
-  deployment** (`FMH_TRAINING_DATA_DIR` unset on Railway; keep it set
-  locally, same `.env` as always). **Default TLS/subdomain from each
-  host, no custom domain.**
+- **Backend: GCP Compute Engine (a plain VM running the Docker image
+  directly, not GKE/Cloud Run).** **Frontend: Vercel.** **Backend stays
+  warm** — a Compute Engine VM is always-on by construction (nothing to
+  configure; there's no scale-to-zero mode to accidentally leave on).
+  **Review queue disabled on the public deployment**
+  (`FMH_TRAINING_DATA_DIR` unset on the VM; keep it set locally, same
+  `.env` as always). **No custom domain purchase** — see the TLS note
+  below for what that decision actually implies once the backend moved
+  off a PaaS host.
 
-### Railway (backend)
+### GCP Compute Engine (backend)
 
-`railway.json` (repo root) sets `build.builder: DOCKERFILE` explicitly,
-`deploy.healthcheckPath: /health` (a new, deliberately cheap endpoint —
-no filesystem/model access, just confirms the process is serving), and
-an `ON_FAILURE` restart policy. Real things verified locally before
-trusting this against Railway specifically (checked directly against
-Railway's own docs, not assumed from generic Docker knowledge):
+Switching from Railway to a raw Compute Engine VM removes every
+Railway-specific assumption the Dockerfile had — re-verified directly,
+not just reasoned about: rebuilt the image and ran it with **no `PORT`
+env var set at all** (confirmed via `docker exec ... env`, no `PORT`
+present) and it still served correctly on 8420. The `${PORT:-8420}`
+fallback in `CMD` is harmless and kept (works for either case with zero
+changes), but nothing here requires it anymore. `railway.json` removed
+from the repo — it was Railway-specific config-as-code with no GCP
+equivalent, and leaving it in place would have been misleading dead
+config for a target no longer in use.
 
-- **Railway injects a `PORT` env var and routes traffic to whatever port
-  the app actually binds — not to the Dockerfile's `EXPOSE` value.** The
-  `Dockerfile`'s `CMD` now reads `${PORT:-8420}` (shell form, needed for
-  the variable expansion; `:-8420` keeps a plain local `docker run -p
-  8420:8420` with no `PORT` set working exactly as before). Verified
-  directly: ran the built image with `-e PORT=3000 -p 8425:3000` and
-  confirmed it bound 3000, not 8420.
-- **Signal handling, a real bug caught by Docker's own build-time
-  linter, not cosmetic.** Shell-form `CMD` alone leaves the shell as PID
-  1, so the app never receives `SIGTERM` directly — a redeploy or
-  restart has to wait out a hard-kill timeout instead of shutting down
-  cleanly. Fixed with `CMD exec uvicorn ...` (`exec` replaces the shell
-  process with uvicorn itself). Verified, not assumed: timed `docker
-  stop` before and after — **0.5s** after the fix (a plain `docker stop`
-  with no `exec` typically eats the full ~10s grace period waiting for
-  `SIGKILL`).
-- **Persistent volumes are dashboard/CLI-only on Railway — confirmed
-  directly against Railway's own docs — not something `railway.json`
-  can declare.** After creating the service, add a volume (Command
-  Palette or right-click the project canvas) and mount it at `/data`
-  (the same path the image's own `FMH_UPLOADS_ROOT`/
-  `FMH_DETECTION_CACHE_DIR` defaults already point to) — this is the one
-  manual dashboard step this repo can't do for you.
-- Re-verified the full real demo flow under Railway-like conditions
-  specifically (custom `PORT` + a mounted volume together, not just
-  each in isolation): **8s** end to end.
+**A real, load-bearing gap the platform switch introduces, not a minor
+detail:** Railway and Vercel both provide automatic managed TLS on their
+own subdomains. A bare Compute Engine VM provides neither — it's just an
+IP address. Vercel always serves the frontend over HTTPS, and a browser
+will block an HTTPS page from calling a plain-HTTP backend (mixed-
+content blocking) — so **without TLS on the GCP side, the deployed app
+would not actually work**, not just "be insecure." This doesn't require
+buying a custom domain, though: a free IP-to-hostname service
+([sslip.io](https://sslip.io), e.g. `34-123-45-67.sslip.io` for external
+IP `34.123.45.67`, no signup) plus [Caddy](https://caddyserver.com) as a
+reverse proxy (automatic Let's Encrypt certs, ~5 lines of config) gets
+real TLS with zero domain purchase, consistent with "no custom domain
+needed right now."
 
-**Setup, once you have a Railway account:** New Project → Deploy from
-GitHub repo → Railway auto-detects the root `Dockerfile` and
-`railway.json`. Add a volume mounted at `/data` (see above). Set
-`FMH_CORS_ORIGINS` to the real Vercel URL once that exists (a chicken-
-and-egg step — deploy the backend first, get its public URL, then set
-`VITE_API_BASE_URL` for the Vercel build, then come back and set
-`FMH_CORS_ORIGINS` to the Vercel URL). Leave `FMH_TRAINING_DATA_DIR`
-unset. Do not enable Serverless mode.
+**1. Create the VM:**
+
+```sh
+gcloud compute instances create fmh-backend \
+  --machine-type=e2-medium \
+  --image-family=debian-12 \
+  --image-project=debian-cloud \
+  --zone=us-central1-a \
+  --tags=fmh-backend \
+  --boot-disk-size=20GB
+```
+
+**2. Firewall — open only what's needed, targeted by the instance tag
+above (not applied VPC-wide):**
+
+```sh
+# app port (or skip this and use only 80/443 once Caddy is in front of it)
+gcloud compute firewall-rules create fmh-allow-app \
+  --direction=INGRESS --action=ALLOW --rules=tcp:8420 \
+  --source-ranges=0.0.0.0/0 --target-tags=fmh-backend
+
+# HTTP/HTTPS, needed for Caddy's Let's Encrypt handshake + real traffic
+gcloud compute firewall-rules create fmh-allow-web \
+  --direction=INGRESS --action=ALLOW --rules=tcp:80,tcp:443 \
+  --source-ranges=0.0.0.0/0 --target-tags=fmh-backend
+```
+
+(SSH on 22 is open by default in a new GCP project's default network via
+its pre-existing `default-allow-ssh` rule — not something this repo
+needs to create.)
+
+**3. Persistent disk for real user data** (uploads, manifests,
+`output.mp4`, the detection cache — the same things `FMH_UPLOADS_ROOT`/
+`FMH_DETECTION_CACHE_DIR` already point at):
+
+```sh
+gcloud compute disks create fmh-data --size=50 --zone=us-central1-a --type=pd-balanced
+gcloud compute instances attach-disk fmh-backend \
+  --disk=fmh-data --device-name=fmh-data --zone=us-central1-a
+```
+
+Then, SSH'd into the VM (`gcloud compute ssh fmh-backend --zone=us-central1-a`):
+
+```sh
+sudo mkfs.ext4 -F /dev/disk/by-id/google-fmh-data
+sudo mkdir -p /mnt/data
+sudo mount /dev/disk/by-id/google-fmh-data /mnt/data
+echo '/dev/disk/by-id/google-fmh-data /mnt/data ext4 defaults,nofail 0 2' | sudo tee -a /etc/fstab
+```
+
+**4. Install Docker on the VM** (Debian 12 doesn't ship it):
+
+```sh
+curl -fsSL https://get.docker.com | sudo sh
+```
+
+**5. Run the container**, `/data` mapped onto the real persistent disk
+from step 3:
+
+```sh
+sudo docker run -d --name fmh-backend --restart unless-stopped \
+  -p 8420:8420 -v /mnt/data:/data \
+  -e FMH_CORS_ORIGINS="https://your-vercel-app.vercel.app" \
+  ghcr.io/your-org/findmy-highlights-backend:latest
+```
+
+(`--restart unless-stopped` is the real Docker-level equivalent of
+"stays warm" on a bare VM — no platform-level always-on setting exists
+here the way it did on Railway, this is the actual mechanism.) Building
+the image directly on the VM instead of pulling from a registry works
+identically — `git clone`, then `docker build` — if a registry isn't
+set up yet.
+
+**6. TLS via Caddy**, once the VM has an external IP (`gcloud compute
+instances describe fmh-backend --zone=us-central1-a --format='get(networkInterfaces[0].accessConfigs[0].natIP)'`):
+
+```sh
+sudo docker run -d --name fmh-caddy --restart unless-stopped \
+  -p 80:80 -p 443:443 \
+  -v caddy-data:/data -v caddy-config:/config \
+  caddy caddy reverse-proxy --from your-vm-ip.sslip.io --to localhost:8420
+```
+
+Then `FMH_CORS_ORIGINS` and `VITE_API_BASE_URL` both use
+`https://your-vm-ip.sslip.io`, not the raw IP or port 8420 directly.
+
+### Real memory measurement and instance sizing
+
+Measured directly, not estimated from parameter counts (same discipline
+as every other real number in this project) — peak RSS with RF-DETR,
+X-CLIP, and MediaPipe pose all loaded **and run through real inference**
+on the demo clip, in one process:
+
+```
+after real RF-DETR inference (full clip):        0.948 GB
+after real X-CLIP inference:                      1.508 GB
+after real MediaPipe pose inference:              1.595 GB
+```
+
+Two real numbers, not one, because they answer different questions:
+**the actual default public deployment** (review queue off, per the
+decision above) only ever loads RF-DETR — real peak **~0.95-1 GB**,
+consistent with this doc's existing "~1GB RSS" figure elsewhere. **The
+worst case, if the review queue were ever turned on** (X-CLIP + pose
+join RF-DETR in the same process) — real measured peak **1.6 GB**. X-CLIP's
+own real inference step, not just loading it, was the largest single
+contributor (+560 MB) — a model that "loads small" isn't the same as one
+that "runs small."
+
+**Recommendation: `e2-medium` (2 vCPU, 4 GB RAM).** Comfortable real
+margin over both numbers above (2.5-4x headroom, room for OS/Docker
+daemon overhead plus a safety buffer against OOM, not a bare-minimum
+fit) — `e2-small` (2 GB) would leave uncomfortably little headroom
+against the 1.6 GB worst case once OS overhead is added, even though
+it'd likely be fine for the RF-DETR-only default. Machine type spec:
+**2 vCPU, 4 GB memory** (confirmed against GCP's own machine-type
+documentation).
+
+**Cost — honest caveat: could not independently re-verify live current
+pricing just now** (`cloud.google.com/compute/vm-instances/pricing`
+repeatedly returned truncated/404 responses to automated fetching in
+this session) — the following are well-established approximate
+figures, not freshly confirmed, and should be checked against
+[the real-time calculator](https://cloud.google.com/products/calculator)
+before committing:
+
+| Item | Approx. cost (us-central1, on-demand) |
+|---|---|
+| `e2-medium` (2 vCPU, 4GB) | ~$0.034/hr ≈ **~$25/month** always-on |
+| `e2-small` (2 vCPU, 2GB), if review queue stays permanently off | ~$0.021/hr ≈ ~$15/month |
+| 50GB `pd-balanced` disk | ~$0.10/GB-month ≈ ~$5/month |
+| **Total, `e2-medium` + 50GB disk** | **~$30/month**, always-on |
 
 ### Vercel (frontend)
 
@@ -2397,21 +2513,26 @@ than documenting the exact dashboard values directly:
 - **Output Directory:** `dist` (default, verified locally — `npm run
   build` produces `frontend/dist/`, confirmed served correctly with
   `npm run preview`).
-- **Environment Variable:** `VITE_API_BASE_URL` = the real Railway
-  backend URL. Build-time, not runtime (Vite's own
+- **Environment Variable:** `VITE_API_BASE_URL` = the real GCP backend
+  URL (the `https://your-vm-ip.sslip.io`-style Caddy-fronted URL, not
+  the raw IP or port 8420 directly — see the TLS note above for why).
+  Build-time, not runtime (Vite's own
   `import.meta.env.VITE_*` substitution — see this doc's Frontend
   section above) — must be set before/at the build, not added after the
   fact and expected to take effect without a rebuild.
 
 ### Still genuinely open
 
-- **TLS/custom domain:** intentionally deferred (decided: use each
-  host's default subdomain for now).
+- **Custom domain:** decided against for now — TLS itself is handled
+  (Caddy + a free `sslip.io` hostname, see above), a purchased domain
+  would only replace that hostname, not add a capability that's missing.
 - **Whether to ever enable the review queue on the public deployment
   later:** intentionally deferred (decided: off for now) — if that
-  changes, it's `FMH_TRAINING_DATA_DIR=training_data` on Railway plus
-  mounting `pose_landmarker_full.task` onto the volume if the pose
-  signal is wanted too (see the env var table above).
+  changes, it's `FMH_TRAINING_DATA_DIR=training_data` set on the GCP VM
+  (`docker run -e ...`) plus mounting `pose_landmarker_full.task` onto
+  `/mnt/data` if the pose signal is wanted too (see the env var table
+  above) — and re-checking instance sizing against this doc's real 1.6GB
+  worst-case measurement, since `e2-medium`'s margin would shrink.
 
 ## How the manifest works
 

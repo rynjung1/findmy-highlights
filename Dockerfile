@@ -78,15 +78,17 @@ RUN useradd -m -u 1000 fmh && chown -R fmh:fmh /app /data
 USER fmh
 
 # Shell form (not exec/JSON form) deliberately -- ${PORT:-8420} needs a
-# shell to expand it. Railway (and most PaaS hosts) inject a real PORT
-# env var at runtime and route traffic to whatever port the app actually
-# binds, NOT to EXPOSE's value (which is documentation/legacy Docker
-# networking only) -- verified directly against Railway's own docs
-# before writing this, not assumed. The :-8420 fallback keeps a plain
-# local `docker run -p 8420:8420` (no PORT set) working exactly as
-# before. `exec` is real, not decorative: without it the shell stays PID
-# 1 and uvicorn never receives SIGTERM directly, so a redeploy/restart
-# has to wait out a hard-kill timeout instead of shutting down cleanly
-# -- caught by Docker's own build-time linter, not assumed correct.
+# shell to expand it. Not required by this project's actual deployment
+# target (a GCP Compute Engine VM chooses its own port at `docker run`
+# time, there's no platform-injected PORT to respect) -- kept anyway
+# since it's harmless, general-purpose, and costs nothing: PORT unset
+# (the real GCP case, and plain local `docker run -p 8420:8420`) falls
+# through to 8420 exactly as before; PORT set (e.g. a future PaaS-style
+# host) is honored automatically with no Dockerfile change needed.
+# `exec` is real, not decorative: without it the shell stays PID 1 and
+# uvicorn never receives SIGTERM directly, so a restart has to wait out
+# a hard-kill timeout instead of shutting down cleanly -- caught by
+# Docker's own build-time linter, verified by timing `docker stop`
+# before/after (see README's Deployment section).
 EXPOSE 8420
 CMD exec uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8420}
