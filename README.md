@@ -814,6 +814,96 @@ API vision call, a larger blind label set) before any implementation
 decision, but a genuinely promising direction where four prior signal
 families were not.
 
+**Free, local, open-weight VLM feasibility check — real license, real
+size, real compute test on this exact machine, before any implementation
+decision.** The Claude-vision result above used a manual agent instance,
+not a scriptable pipeline component, and (separately) the user didn't
+want ongoing paid-API billing risk for something still investigation-
+only. Checked three small vision-language models directly against their
+primary HuggingFace model cards (same standard as `pipeline.xclip`'s own
+MIT confirmation): **moondream2** (2B params, 3.85 GB, Apache 2.0, no
+commercial restriction), **Qwen2-VL-2B-Instruct** (2B params, 4.43 GB
+across 2 safetensors shards, Apache 2.0, no commercial restriction), and
+**SmolVLM-Instruct** (2B params, 4.49 GB for the weights actually needed
+by `from_pretrained` — the repo's listed 29.53 GB total includes unrelated
+alternate-format exports — Apache 2.0, no commercial restriction). All
+three cleared licensing cleanly.
+
+Real hardware check first, before downloading anything: this machine
+(Apple M4, 16 GB unified memory, MPS available) had only **~12.7 GB free
+disk** total across its APFS container — a real, tight constraint that
+rules out most 7B-class VLMs unpinned/unquantized regardless of license.
+Picked Qwen2-VL-2B-Instruct for the real compute test specifically
+because its architecture natively supports multi-image/video input,
+closer to what the blind-agent test actually did (reasoning jointly over
+4 temporally-ordered frames) than a single-image-oriented model.
+
+**Real, honest failure caught and fixed, not glossed over:** the
+documented `device_map="mps"` loading path hung at 0% progress for 18+
+minutes under this machine's actual real memory pressure at the time (14
+of 16 GB already in use by ordinary running applications — Discord,
+~15 Chrome tabs, VS Code, the Claude desktop app — a real, non-
+hypothetical condition, not a synthetic worst case). Root-caused to
+`accelerate`'s device-map dispatch machinery, not the model itself;
+switched to a leaner load-to-CPU-then-`.to("mps")` path
+(`scripts/local_vlm_feasibility_check.py`), which resolved it
+completely.
+
+**A second real reproducibility failure, caught the same way:** an
+initial scratchpad run scored 7/9 on the target set; the committed,
+reusable version of the script scored a *different* 6/9 on an identical
+prompt/model. Investigated rather than picking whichever number looked
+better: the model's shipped `generation_config.json` defaults to
+`do_sample=True` (with `top_k=1`, which should be greedy-equivalent in
+theory) — forced `do_sample=False` explicitly and re-ran twice, getting
+bit-identical results both times, ruling out generation randomness as
+the cause. The real cause was upstream: the scratchpad script saved
+frames to disk as JPEG (quality 90) before re-reading them, while the
+committed script passes frames directly from the decoded video in
+memory — that minor recompression was enough to flip one borderline
+call. A real, mildly concerning robustness finding in its own right
+(this small model's classification isn't fully stable to minor,
+semantically-invisible image encoding differences), not just a testing
+artifact to shrug off.
+
+**Real, final, reproducible numbers (`scripts/local_vlm_feasibility_check.py`,
+`do_sample=False`, confirmed bit-identical across two independent runs):**
+model+processor load 9.8–11.9s, mean inference 16.8–18.6s/clip (14.6–20.6s
+range) on the same 4-frame input the blind Claude-vision test used, peak
+measured CPU-side RSS 5.83 GB in an earlier run (MPS-resident GPU memory
+isn't captured by this measurement, so this likely understates the real
+total footprint). Accuracy: **6/9 on the exact 9 target
+presence-without-action disagreement cases** (vs. Claude's blind 8/9),
+**4/7 on the 7-clip sanity check** (matching Claude's 4/7), **10/16
+overall** (vs. Claude's 12/16) — a real, meaningful improvement over the
+~0/9-by-construction baseline every other signal scored, but a real,
+honest gap from the full frontier model, not the near-parity an earlier,
+non-reproducible run suggested. Two further real caveats: (1) despite an
+explicit prompt request for "one sentence of visual justification,"
+every response came back as a bare classification word with no
+reasoning text — a real gap in interpretability/auditability versus
+Claude's inspectable reasoning, which was part of the original
+motivation for trying a reasoning-based approach in the first place; (2)
+it missed `bc_ed7054ea5521`, the single clearest, most unambiguous
+real_action clip in the entire set (full stance → swing → dropped-bat →
+run sequence) — a real reliability concern distinct from the
+genuinely-hard boundary cases both systems struggle with (both missed
+`bc_90606259a06d`, the same clip flagged ambiguous by every method
+that's touched it tonight).
+
+**Verdict: a real, licensed, free, locally-feasible candidate that beats
+every non-reasoning signal tried tonight but falls real, measurable
+ground short of the frontier-model result it's trying to replicate —
+promising enough to keep investigating, not close enough to treat as a
+drop-in replacement.** n=16 is small; the reproducibility bug this
+investigation caught and fixed is itself a reason for real caution about
+trusting any single run of a small local model without the same
+determinism discipline applied here. The accuracy gap, the missed-easy-
+case failure, and the bare-label output all need addressing before this
+could replace or augment the additive instrumentation pattern
+(`pipeline.pose`/`pipeline.audio`/`pipeline.xclip`) that already exists
+for exactly this kind of signal. Investigation only.
+
 **Pose + audio conjunction: investigated for real, at real scale, and
 closed as not clearing the bar — the third and fourth candidate
 signals from the same overnight investigation that produced the Tier 2
