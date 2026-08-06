@@ -1,0 +1,38 @@
+{
+  "id": "hc_f9fd50d965b5",
+  "created_at": "2026-08-05T03:54:44.770512+00:00",
+  "source": {
+    "video_path": "/Users/ryanjung/Desktop/findmy-highlights/uploads/d46f312fa057/full_game.mkv",
+    "source_file": "full_game.mkv",
+    "batch_id": "d46f312fa057"
+  },
+  "window": {
+    "start_s": 150.23289530067132,
+    "end_s": 150.27560348521638
+  },
+  "candidate_type": "hard_cut_dip",
+  "pipeline_decision": "cut",
+  "margin": -0.457291815454937,
+  "features_at_label_time": {
+    "peak_score": 0.0006010034121572971,
+    "quiet_thresh": 0.002,
+    "score_margin": 0.001398996587842703,
+    "duration_s": 0.04270818454506298,
+    "min_raw_dip_s": 0.5,
+    "duration_margin": -0.457291815454937,
+    "audio": {
+      "peak_amplitude": 0.6859231600689472,
+      "peak_t": 149.63,
+      "rise_time_s": 0.014999999999986358
+    },
+    "xclip": {
+      "p_swinging": 0.21820306777954102,
+      "pos_prompt": "a baseball player swinging a bat",
+      "neg_prompt": "baseball players standing idle"
+    }
+  },
+  "config_hash": "d41e1f40a3c05a9b",
+  "label": "downtime",
+  "labeled_at": "2026-08-06T14:40:48.537075+00:00",
+  "note": null
+}

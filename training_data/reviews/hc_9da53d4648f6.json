@@ -1,0 +1,43 @@
+{
+  "id": "hc_9da53d4648f6",
+  "created_at": "2026-08-05T03:54:44.770512+00:00",
+  "source": {
+    "video_path": "/Users/ryanjung/Desktop/findmy-highlights/uploads/d46f312fa057/full_game.mkv",
+    "source_file": "full_game.mkv",
+    "batch_id": "d46f312fa057"
+  },
+  "window": {
+    "start_s": 328.32745322096844,
+    "end_s": 328.3701614055135
+  },
+  "candidate_type": "hard_cut_dip",
+  "pipeline_decision": "cut",
+  "margin": -0.457291815454937,
+  "features_at_label_time": {
+    "peak_score": 0.0005922932177782059,
+    "quiet_thresh": 0.002,
+    "score_margin": 0.0014077067822217942,
+    "duration_s": 0.04270818454506298,
+    "min_raw_dip_s": 0.5,
+    "duration_margin": -0.457291815454937,
+    "pose": {
+      "peak_displacement_px": 89.85303750083249,
+      "min_visibility": 0.04050099104642868,
+      "n_frames_with_pose": 144
+    },
+    "audio": {
+      "peak_amplitude": 0.11224708251109411,
+      "peak_t": 328.455,
+      "rise_time_s": 0.03999999999996362
+    },
+    "xclip": {
+      "p_swinging": 0.5961677432060242,
+      "pos_prompt": "a baseball player swinging a bat",
+      "neg_prompt": "baseball players standing idle"
+    }
+  },
+  "config_hash": "d41e1f40a3c05a9b",
+  "label": "downtime",
+  "labeled_at": "2026-08-06T14:39:49.083271+00:00",
+  "note": null
+}
