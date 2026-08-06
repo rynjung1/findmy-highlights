@@ -1657,6 +1657,54 @@ to the user, same as every other UI change tonight -- this write-up
 covers what was verified at the build/type level, not a substitute for
 that pass.
 
+**Multi-feature review-queue model: a real, statistically significant
+signal that still fails the recall-risk check -- reported honestly as a
+real no, not stretched into a maybe.** The review queue reached 149
+labeled records (39 real_action / 110 downtime); once the single n=1
+`control` sample is excluded as unmodelable, 148 real labeled records
+remain (39/109). `scripts/multi_feature_review_model.py` (new real
+dependency: `scikit-learn`, added specifically for this -- not wired
+into the shipped pipeline) combines the three independent signals this
+project has already investigated alone and found real-but-modest each
+time -- pose peak wrist displacement (missing for a real 45/148, given
+an explicit missingness indicator rather than dropped), audio onset
+amplitude/rise-time, and X-CLIP `p_swinging` -- into one small,
+standardized logistic regression.
+
+Real LOO-CV AUC: **0.690**. Real permutation test (1000 permutations,
+each a full fresh LOO-CV on shuffled labels, not a cheaper
+approximation): the real AUC beat all 1000 null values, **p=0.0010** --
+a real, statistically significant combined signal, not noise.
+
+**But two honest disqualifiers, not glossed over:**
+1. **Accuracy at a real 0.5 decision threshold (72.3%) does not beat
+   the naive majority-class baseline (73.6%)** -- the same honest-
+   calibration check used throughout this project. A statistically real
+   AUC (good ranking/discrimination across all thresholds) is not the
+   same thing as a practically useful classifier at an actual operating
+   threshold, and this result is a real instance of that gap, not just
+   a theoretical caveat.
+2. **Recall-risk check against the six fragile clips' required real
+   events: 3 of 6 would be misclassified as downtime**
+   (`clip_base1`/e1 p=0.453, `clip_base4`/e1 p=0.357, `clip_foul1`/e1
+   p=0.384 -- all below the 0.5 threshold; `clip_base2`/e1,
+   `clip_base3`/e1, `clip_whiff1`/e1 correctly scored above it). A
+   lower decision threshold (~0.35) would flip all three to correct --
+   but choosing that threshold only because it happens to fix exactly
+   these six known clips is circular, not real validation; it wasn't
+   done, and doing so wouldn't count as clearing this bar even if it
+   had been.
+
+**Verdict: real signal, real significance, real disqualification.**
+This is not "not enough data" or "try again later" -- it's a genuine
+multi-feature combination that measurably beats chance and still isn't
+safe, on the same real events this project has used to reject every
+prior enter-side/gating attempt. Not wired into anything. The path this
+doesn't close off: a model that's allowed to say "unsure" and defer to
+the existing pipeline decision (rather than being forced to output
+real_action/downtime at a fixed threshold) is a real, different
+question from the one asked and tested here.
+
 ## Architecture overview
 
 Built so far:
