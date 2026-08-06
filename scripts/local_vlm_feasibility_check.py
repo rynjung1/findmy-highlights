@@ -22,10 +22,32 @@ machinery, not the model itself) -- this script loads to CPU with
 low_cpu_mem_usage=True first, then does a plain `.to(device)` transfer,
 which is fast and reliable.
 
+Two prompt modes (--prompt-mode), a real, diagnosed choice, not a
+cosmetic option -- see scripts/debug the bare-label issue in README's
+writeup:
+  - "original": label first, then a requested justification sentence.
+    Real finding: the model emits EOS right after the label word every
+    time (verified directly: 5 of a 150-token budget used, real EOS
+    token present) -- it satisfies the first-stated instruction and
+    stops, never producing the justification. Fast (~10s/record).
+  - "reasoning_first": describe what's happening, THEN state the label
+    based on that description -- forces real reasoning tokens before
+    the model can stop. Confirmed this actually produces substantive,
+    specific reasoning (not filler). Real, honest tradeoff found: on at
+    least one real record (a downtime instant with no batter visible at
+    all) this prompt caused the model to hallucinate a full swing
+    narrative not supported by the actual frames, flipping a previously
+    -correct prediction to wrong -- interpretability and accuracy are
+    not the same axis, and this is measured across the full dataset
+    below, not just asserted. Much slower (~20-80s/record, real
+    variance observed, not fully explained by token count alone).
+
 Usage:
-    python scripts/local_vlm_feasibility_check.py
+    python scripts/local_vlm_feasibility_check.py --prompt-mode original
+    python scripts/local_vlm_feasibility_check.py --prompt-mode reasoning_first
 """
 
+import argparse
 import json
 import sys
 import time
@@ -41,17 +63,35 @@ REVIEWS_DIR = ROOT / "training_data" / "reviews"
 MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 N_FRAMES = 4
 
-PROMPT = (
-    "These 4 frames are shown in temporal order, spanning about 3 seconds "
-    "of real baseball footage. Is a batter actively engaged in an at-bat/"
-    "swing sequence (loading, swinging, making contact, or immediate "
-    "post-contact follow-through/running) in this clip, or is this "
-    "\"downtime\" (no batter actively swinging -- e.g. empty plate, "
-    "someone walking with a bat, a batter just standing static in the box "
-    "with no swing motion across all 4 frames, players walking between "
-    "positions)? Answer with ACTIVE_SWING or DOWNTIME on the first line, "
-    "then one sentence of visual justification."
-)
+PROMPTS = {
+    "original": (
+        "These 4 frames are shown in temporal order, spanning about 3 seconds "
+        "of real baseball footage. Is a batter actively engaged in an at-bat/"
+        "swing sequence (loading, swinging, making contact, or immediate "
+        "post-contact follow-through/running) in this clip, or is this "
+        "\"downtime\" (no batter actively swinging -- e.g. empty plate, "
+        "someone walking with a bat, a batter just standing static in the box "
+        "with no swing motion across all 4 frames, players walking between "
+        "positions)? Answer with ACTIVE_SWING or DOWNTIME on the first line, "
+        "then one sentence of visual justification."
+    ),
+    "reasoning_first": (
+        "These 4 frames are shown in temporal order, spanning about 3 seconds "
+        "of real baseball footage. Describe in one to two sentences what the "
+        "person near home plate is doing across these 4 frames (body "
+        "position, bat position, any motion you can infer from the "
+        "sequence) -- if no one is at the plate, or the plate is empty, say "
+        "so explicitly rather than describing a swing. Then, on a new final "
+        "line, based only on that description, write EXACTLY one of these "
+        "two words and nothing else on that line: ACTIVE_SWING (a batter is "
+        "loading, swinging, making contact, or in immediate post-contact "
+        "follow-through/running) or DOWNTIME (empty plate, someone walking "
+        "with a bat, a batter standing static with no swing motion, players "
+        "walking between positions). The final line must be exactly "
+        "\"ACTIVE_SWING\" or exactly \"DOWNTIME\" -- not a sentence "
+        "containing that phrase."
+    ),
+}
 
 
 def extract_frames(clip_path, n_frames=N_FRAMES):
@@ -75,21 +115,35 @@ def extract_frames(clip_path, n_frames=N_FRAMES):
     return frames
 
 
-def load_enter_labeled_records():
+def load_all_labeled_records():
+    """Every real labeled review-queue record regardless of
+    candidate_type -- the full real dataset, not just the original
+    16-example enter-type boundary_crossing subset."""
     records = []
-    for f in sorted(REVIEWS_DIR.glob("bc_*.json")):
+    for f in sorted(REVIEWS_DIR.glob("*.json")):
         d = json.loads(f.read_text())
-        if d.get("label") is not None and d.get("pipeline_decision") == "enter":
+        if d.get("label") is not None:
             records.append(d)
     return records
 
 
+def classify(text: str) -> str:
+    return "ACTIVE_SWING" if "ACTIVE_SWING" in text.upper() else "DOWNTIME"
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--prompt-mode", choices=list(PROMPTS.keys()), default="original")
+    ap.add_argument("--max-new-tokens", type=int, default=150)
+    ap.add_argument("--limit", type=int, default=None, help="cap number of records (debug)")
+    ap.add_argument("--out", type=str, default=None, help="write full JSON results here")
+    args = ap.parse_args()
+
     import torch
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    print(f"using device: {device}")
+    print(f"using device: {device}, prompt-mode: {args.prompt_mode}")
 
     t0 = time.time()
     model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -98,12 +152,16 @@ def main():
     processor = AutoProcessor.from_pretrained(MODEL_ID)
     print(f"model+processor load: {time.time() - t0:.1f}s")
 
-    records = load_enter_labeled_records()
-    print(f"{len(records)} real labeled enter-type boundary_crossing records\n")
+    records = load_all_labeled_records()
+    if args.limit:
+        records = records[:args.limit]
+    print(f"{len(records)} real labeled records\n")
 
+    prompt = PROMPTS[args.prompt_mode]
+    results = []
     correct = 0
     infer_times = []
-    for d in records:
+    for i, d in enumerate(records):
         clip_path = REVIEWS_DIR / f"{d['id']}.mp4"
         if not clip_path.exists():
             print(f"[skip] {d['id']}: clip missing")
@@ -112,35 +170,40 @@ def main():
         messages = [{
             "role": "user",
             "content": [{"type": "image", "image": img} for img in images]
-                       + [{"type": "text", "text": PROMPT}],
+                       + [{"type": "text", "text": prompt}],
         }]
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=[text], images=images, return_tensors="pt").to(device)
 
         t0 = time.time()
         with torch.no_grad():
-            # the shipped generation_config.json defaults to do_sample=True
-            # -- forced False here for reproducible, deterministic
-            # classification output (verified this actually matters: an
-            # earlier do_sample=True run and this run disagreed on one
-            # record before this fix).
-            out_ids = model.generate(**inputs, max_new_tokens=80, do_sample=False)
+            out_ids = model.generate(**inputs, max_new_tokens=args.max_new_tokens, do_sample=False)
         t_infer = time.time() - t0
         infer_times.append(t_infer)
 
         trimmed = out_ids[:, inputs["input_ids"].shape[1]:]
         response = processor.batch_decode(trimmed, skip_special_tokens=True)[0].strip()
-        predicted = "ACTIVE_SWING" if "ACTIVE_SWING" in response.upper() else "DOWNTIME"
+        predicted = classify(response)
         should_be = "ACTIVE_SWING" if d["label"] == "real_action" else "DOWNTIME"
         ok = predicted == should_be
         correct += ok
-        print(f"{d['id']}: label={d['label']:<12} predicted={predicted:<12} "
-             f"{'CORRECT' if ok else 'WRONG'}  ({t_infer:.1f}s)  {response}")
+        results.append({
+            "id": d["id"], "candidate_type": d["candidate_type"], "label": d["label"],
+            "predicted": predicted, "correct": ok, "infer_s": t_infer, "response": response,
+        })
+        print(f"[{i+1}/{len(records)}] {d['id']} ({d['candidate_type']}): "
+             f"label={d['label']:<12} predicted={predicted:<12} "
+             f"{'OK' if ok else 'WRONG'}  ({t_infer:.1f}s)")
 
-    print(f"\n{correct}/{len(records)} correct")
+    n = len(results)
+    print(f"\n{correct}/{n} correct ({100*correct/n:.1f}%)")
     if infer_times:
         print(f"mean inference time: {sum(infer_times)/len(infer_times):.1f}s "
              f"(min {min(infer_times):.1f}s, max {max(infer_times):.1f}s)")
+
+    if args.out:
+        Path(args.out).write_text(json.dumps(results, indent=2))
+        print(f"wrote {args.out}")
 
 
 if __name__ == "__main__":

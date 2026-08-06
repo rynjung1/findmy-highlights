@@ -1705,6 +1705,85 @@ the existing pipeline decision (rather than being forced to output
 real_action/downtime at a fixed threshold) is a real, different
 question from the one asked and tested here.
 
+**Local VLM revisited at real scale: two real bugs caught in this
+project's own evaluation code, and a final result that closes this
+avenue for now, honestly, not stretched.** Picking back up
+`scripts/local_vlm_feasibility_check.py` (Qwen2-VL-2B-Instruct,
+Apache-2.0) at the user's request, to test it against the full 149-record
+real labeled dataset instead of the original 16-example subset:
+
+1. **Real disk crisis found before anything else could run.** Free disk
+   had dropped to **711MB** (not increased, despite an earlier
+   `~/.cache/huggingface` clear) -- traced to Docker Desktop's own VM
+   backing file (`Docker.raw`, 4.5GB) and, more precisely, 6.18GB of
+   Docker build cache plus other real projects' images/volumes
+   (`payout-warehouse`, `mini-bfcm`, `clean-clone`, `readme-test` --
+   confirmed none of these were this project's own artifacts before
+   touching anything). `docker builder prune` (100% safe, pure
+   rebuildable cache) plus clearing `npm`/`pip`/Homebrew caches (also
+   100% safe, official-command, zero-data-loss operations) recovered
+   711MB -> **~9-11GB** real free space. Docker's other images/volumes
+   deliberately left untouched -- not this project's data to delete.
+
+2. **Real accuracy on the full 149-record dataset, existing (`original`)
+   prompt: 107/149 correct (71.8%) -- below the majority-class baseline
+   (73.8%).** Recall on real_action (the safety-critical direction):
+   **56.4% (22/39)** -- misses nearly half of all real plays when forced
+   into a binary call. The same disqualifying shape as the multi-feature
+   model above: real-looking but doesn't clear the honest bar.
+
+3. **The bare-label bug, real root cause found, not guessed:** verified
+   directly (150-token budget, only 5 tokens ever used, real EOS token
+   present every time) that the model satisfies "state the label" and
+   emits end-of-sequence immediately, never reaching "then justify" --
+   an instruction-following limitation, not a token-budget problem.
+   Reordering the prompt (describe first, label last) produced real,
+   specific, frame-by-frame reasoning -- confirmed on real examples, not
+   assumed. **But a second, honest problem surfaced in that reasoning**:
+   on a real downtime instant with no batter visible at all, the model
+   confabulated a full swing narrative not supported by the actual
+   frames, flipping a previously-correct prediction to wrong --
+   interpretability and accuracy are not the same axis, demonstrated
+   directly, not just asserted as a caveat.
+
+4. **A real bug in this project's OWN evaluation code, caught before
+   trusting the result -- the same discipline every real number tonight
+   has been held to.** The reasoning-first prompt's free-form conclusion
+   ("...the person is in the active swing phase") never contained the
+   literal token `ACTIVE_SWING` the classifier searched for, so every
+   reasoning-first response was silently scored DOWNTIME regardless of
+   the model's actual conclusion -- caught by manually reading the raw
+   responses, not by a passing test. Fixed by demanding the exact
+   literal token on its own final line.
+
+5. **The fix looked like a real win on the 6 named recall-risk clips
+   (`clip_base1`/e1, `clip_base4`/e1, `clip_foul1`/e1, `clip_60`/e5,
+   `clip_540`/e4, `clip_whiff1`/e1) -- 0/6 with the original prompt
+   (visually verified against the real extracted frames first, to rule
+   out an extraction bug: these are genuine live-play frames, pitcher
+   winding up, ball in flight, runners moving -- not empty/ambiguous
+   footage), 6/6 with the fixed prompt. That looked like a genuine
+   capability recovery. It wasn't.** Re-running the FIXED prompt against
+   the full 149-record dataset (not just the 6 hand-picked clips) --
+   exactly the "understand it on real, larger data before trusting a
+   small win" check the user asked for -- found the model predicting
+   `ACTIVE_SWING` on **all 149 of 149** records: FN=0, but TN=0 too.
+   Accuracy 26.2%, precisely what a trivial always-predict-positive rule
+   gives at this dataset's real 39/149 real_action rate. **The 6/6 was a
+   degenerate constant-output collapse, not real discrimination** -- it
+   would have looked like a clean win on the 6 safety-critical clips
+   alone, which is exactly why the full-dataset re-check mattered enough
+   to run before believing it.
+
+**Verdict: neither prompt configuration shows real, trustworthy
+discriminative ability on the real, full dataset -- one scores below
+the majority baseline, the other degenerates to a constant classifier.**
+Per the user's own explicit condition for escalating ("only if the
+existing model still shows real promise") -- it doesn't, so a larger
+local model was not tried. Disk space is no longer the blocker (as
+established in step 1); the model's own real accuracy is. Not wired
+into anything.
+
 ## Architecture overview
 
 Built so far:
