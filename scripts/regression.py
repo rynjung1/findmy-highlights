@@ -44,6 +44,15 @@ Hard FAILURE conditions (exit 1):
      "exclusion" means, this failing indicates an actual bug in
      apply_hard_cuts' filtering, not an accepted risk -- unlike the
      unconditional/production numbers reported (not gated) below.
+  6. The real STITCHED output (pipeline.stitch.run_stitch, against the
+     exact unconditional post-hard-cut segments production ships) fails
+     a strict decode (pipeline.stitch.strict_decode_errors). This is the
+     gate that should have caught the real, shipped corruption bug (see
+     pipeline/stitch.py's module docstring, fourth real bug): recall/
+     continuity checks above only ever looked at segment BOUNDARIES, never
+     at whether the real stitched file that boundary produces is actually
+     playable end to end. Every reference clip's real kept segments now
+     get genuinely stitched and strictly decoded, not just planned.
 
 Usage:
     python scripts/regression.py [--clips-dir reference_clips] [--motion-only]
@@ -52,6 +61,7 @@ Usage:
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -59,11 +69,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.motion import compute_motion
+from pipeline.manifest import build_manifest
 from pipeline.segments import (SegmentConfig, apply_hard_cuts,
                                hard_cut_overlaps_required, scores_to_segments,
                                smooth_scores, segment_covers, total_duration)
 from pipeline.fusion import (FusionConfig, apply_veto, fuse, occupancy_near_times,
                              scale_boost_factor, vetoed_overlapping_required, PlateZone)
+from pipeline.stitch import run_stitch, strict_decode_errors
 
 ROOT = Path(__file__).resolve().parent.parent
 GROUND_TRUTH_DIR = ROOT / "tests" / "ground_truth"
@@ -289,6 +301,33 @@ def main() -> None:
             failures.append(f"{truth['clip']}: EXCLUSION BUG -- hard-cut "
                             f"window ({a:.2f},{b:.2f}) overlaps required "
                             f"{eid} even with protected_windows set")
+
+        # failure 6: the real stitched output (exactly what production
+        # ships -- kept_unconditional, the same post-hard-cut segments
+        # the export job actually stitches) must strictly decode clean.
+        # This is the real ship gate that was missing entirely -- every
+        # check above only ever looks at segment boundaries, never at
+        # whether the file that boundary produces actually plays (see
+        # pipeline/stitch.py's module docstring, fourth real bug, and
+        # this script's own module docstring for the full story).
+        if kept_unconditional:
+            stitch_manifest = build_manifest(
+                truth["clip"], motion.duration, kept_unconditional,
+                hard_cut_windows=cuts_unconditional)
+            with tempfile.TemporaryDirectory(prefix="fmh_regression_stitch_") as work:
+                out_path = Path(work) / "output.mp4"
+                run_stitch(stitch_manifest, clips_dir, out_path,
+                          work_dir=Path(work) / "extract")
+                decode_errors = strict_decode_errors(out_path)
+            if decode_errors:
+                print(f"    STITCH DECODE: {len(decode_errors)} real "
+                     f"error(s), e.g. {decode_errors[0]!r}")
+                failures.append(
+                    f"{truth['clip']}: real stitched output fails strict "
+                    f"decode ({len(decode_errors)} error(s), e.g. "
+                    f"{decode_errors[0]!r})")
+            else:
+                print(f"    STITCH DECODE: clean (0 real errors)")
 
     print()
     if not args.motion_only and grand_kept_before > 0:

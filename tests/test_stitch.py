@@ -24,7 +24,8 @@ from pipeline.stitch import (SpanJob, SpanPlacement, VideoParams,
                              compute_output_offsets, get_keyframe_times,
                              merge_overlapping_spans, needs_reencode,
                              plan_stitch, predicted_seek_start,
-                             probe_duration, probe_video_params, run_stitch)
+                             probe_duration, probe_video_params, run_stitch,
+                             strict_decode_errors)
 
 
 def vp(path="a.mp4", codec="h264", w=1920, h=1080, fps=30.0, rotation=0,
@@ -372,19 +373,28 @@ def test_plan_stitch_hard_cut_boundary_survives_the_plan(tmp_path):
         (3.873, 43.892), (47.250, 80.010)]
 
 
-def test_plan_stitch_forces_reencode_on_the_job_after_a_risky_hard_cut_boundary(tmp_path):
+def test_plan_stitch_reencodes_the_whole_plan_after_a_risky_hard_cut_boundary(tmp_path):
+    # regression test for a real bug (see pipeline/stitch.py's module
+    # docstring): forcing only the ONE job after a risky hard-cut
+    # boundary to re-encode, while its neighbors stay stream-copied on
+    # the source's own codec, produced a plan the final concat's blind
+    # `-c copy` corrupted (confirmed on two real batches: a real Opus/AAC
+    # audio-codec mix, strict-decode errors, a truncated video stream).
+    # The whole plan must promote to re-encode instead, so every span
+    # shares one codec.
     m = build_manifest("g.mp4", 90.0, [(3.873, 43.892), (47.250, 80.010)],
                        hard_cut_windows=[(43.892, 47.250)])
     keyframes = [4.266 + 6.006 * n for n in range(20)]
     plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p), start_offset=4.266,
                                                         w=1920, h=1080, fps=30.0),
                        keyframe_prober=lambda p: keyframes)
-    first, second = plan.jobs
-    assert first.force_reencode is False
-    assert second.force_reencode is True
-    assert second.own_target == (1920, 1080, 30.0)
-    # the overall plan still stream-copies -- only this one job is forced
-    assert plan.reencode is False
+    assert plan.reencode is True
+    assert plan.target == (1920, 1080, 30.0)
+    assert "hard-cut boundary" in plan.reencode_reason
+    # both original spans present, unmerged (frame-exact re-encode needs
+    # no keyframe-snap merging)
+    assert [(j.start_s, j.end_s) for j in plan.jobs] == [
+        (3.873, 43.892), (47.250, 80.010)]
 
 
 def test_plan_stitch_does_not_force_reencode_when_hard_cut_gap_has_no_real_overlap_risk(tmp_path):
@@ -682,12 +692,14 @@ def test_run_stitch_reports_reencode_reason(tmp_path):
     assert "resolution" in result.reencode_reason
 
 
-def test_run_stitch_reencodes_only_the_forced_job_at_a_risky_hard_cut_boundary(tmp_path):
-    # end-to-end through run_stitch with a fake runner: the plan overall
-    # stream-copies (single file, no mismatch), but the job right after a
-    # risky hard-cut boundary must be individually re-encoded -- checked
-    # by inspecting the actual ffmpeg commands issued, the same way every
-    # other build_extract_cmd behavior in this file is verified
+def test_run_stitch_reencodes_the_whole_plan_at_a_risky_hard_cut_boundary(tmp_path):
+    # end-to-end through run_stitch with a fake runner: a risky hard-cut
+    # boundary must promote the WHOLE plan to re-encode -- both jobs,
+    # not just the one after the boundary (see the whole-plan-reencode
+    # regression test in test_plan_stitch_* above for the real corrupted-
+    # output bug this closes) -- checked by inspecting the actual ffmpeg
+    # commands issued, the same way every other build_extract_cmd
+    # behavior in this file is verified
     m = build_manifest("g.mp4", 90.0, [(3.873, 43.892), (47.250, 80.010)],
                        hard_cut_windows=[(43.892, 47.250)])
     keyframes = [4.266 + 6.006 * n for n in range(20)]
@@ -703,12 +715,13 @@ def test_run_stitch_reencodes_only_the_forced_job_at_a_risky_hard_cut_boundary(t
                         keyframe_prober=lambda p: keyframes,
                         runner=fake_runner, duration_prober=lambda p: 36.286)
 
-    assert result.reencoded is False  # the overall plan is still stream-copy
+    assert result.reencoded is True
     extract_cmds = calls[:2]
     first_cmd, second_cmd = extract_cmds
-    assert "copy" in first_cmd
-    assert "libx264" in second_cmd  # the forced job, individually re-encoded
-    assert "-vf" in second_cmd
+    assert "copy" not in first_cmd
+    assert "libx264" in first_cmd
+    assert "libx264" in second_cmd
+    assert "-vf" in first_cmd and "-vf" in second_cmd
 
 
 def test_run_stitch_raises_on_no_kept_segments(tmp_path):
@@ -738,6 +751,21 @@ def write_tiny_video(path, seconds=5, fps=10, w=64, h=48, gop=5):
         ["ffmpeg", "-v", "error", "-f", "lavfi",
          "-i", f"testsrc=size={w}x{h}:rate={fps}:duration={seconds}",
          "-g", str(gop), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-y", str(path)], check=True)
+
+
+def write_tiny_video_with_opus_audio(path, seconds=5, fps=10, w=64, h=48, gop=5):
+    # same real shape as write_tiny_video, plus a real Opus audio track --
+    # the exact real codec clip_300.mkv/full_game.mkv both carry, and the
+    # one a force-reencoded span's AAC audio silently ended up mixed with
+    # in the real corrupted output (see the whole-plan-reencode regression
+    # test below).
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi",
+         "-i", f"testsrc=size={w}x{h}:rate={fps}:duration={seconds}",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         "-g", str(gop), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-c:a", "libopus",
          "-y", str(path)], check=True)
 
 
@@ -1013,3 +1041,41 @@ def test_no_duplicate_frames_across_a_real_close_splice_boundary(tmp_path):
     assert dups == [], (
         f"found {len(dups)} exact-duplicate frame pair(s) near the real "
         f"splice boundary: {dups[:10]} -- real footage is playing twice")
+
+
+def test_mixed_codec_hard_cut_boundary_produces_a_strictly_clean_decode(tmp_path):
+    """Real end-to-end reproduction of the fourth real stitch bug (see
+    pipeline/stitch.py's module docstring): a real Opus-audio source with
+    a hard-cut boundary short enough to carry real keyframe-snap overlap
+    risk. Before the whole-plan-reencode fix, this produced a plan with
+    one stream-copied span (real Opus audio) concatenated with one
+    force-reencoded span (AAC audio) -- confirmed on two real production
+    batches (clip_300.mkv, full_game.mkv) to corrupt the final output: a
+    strict decode threw thousands of real "Error parsing the packet
+    header" failures, not just cosmetic warnings. This is the same real
+    strict_decode_errors() check that found those two corrupted batches,
+    run here against a tiny synthetic repro so this class of bug can
+    never ship silently again."""
+    video = tmp_path / "src.mp4"
+    write_tiny_video_with_opus_audio(video, seconds=5, fps=10, gop=5)  # 0.5s GOP
+
+    # gap of 0.2s (< the 0.5s GOP) between two kept spans, marked as a
+    # hard-cut window -- the exact shape that carries real keyframe-snap
+    # overlap risk and used to force only the second span to re-encode
+    m = build_manifest("src.mp4", 5.0, [(0.6, 1.4), (1.6, 3.0)],
+                       hard_cut_windows=[(1.4, 1.6)])
+    out = tmp_path / "out.mp4"
+    result = run_stitch(m, tmp_path, out, work_dir=tmp_path / "work")
+
+    # confirms this repro actually exercises the whole-plan-reencode path
+    # at all -- if this ever goes False, the repro stopped reproducing
+    # the real risky-boundary scenario and the assertion below would be
+    # vacuous
+    assert result.reencoded is True
+
+    errors = strict_decode_errors(out)
+    assert errors == [], (
+        f"strict decode found {len(errors)} real error line(s), e.g. "
+        f"{errors[:5]} -- the output mixes incompatible codecs across a "
+        f"span boundary, the exact real corruption found on two "
+        f"production batches")

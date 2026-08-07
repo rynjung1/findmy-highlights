@@ -45,12 +45,16 @@ Queue frontend, multi-base calibration, and zone-velocity tightening are all
 shipped, tested, and exercised against real footage through a real running
 server — not just in-process test clients.
 
-- **Tests:** `pytest tests/` runs 465 unit/integration tests; `pytest tests/
+- **Tests:** `pytest tests/` runs 466 unit/integration tests; `pytest tests/
   -m e2e` runs 6 tests that invoke real model inference.
 - **Safety gate:** `scripts/regression.py` requires zero missed required
   events across all 9 hand-annotated reference clips before anything ships —
   every threshold, padding, and cutting change in this project's history was
-  validated against this gate first.
+  validated against this gate first. Also strictly decodes each clip's real
+  stitched output end to end (not just checking segment boundaries) — added
+  after a real shipped stitching bug (see the investigation log) went
+  undetected because nothing previously checked whether the actual rendered
+  file was playable.
 - **Dead time cut, real footage:** on a real 67.5-minute game recording
   (`full_game.mkv`), the shipped pipeline keeps 53.19 min / cuts 14.31 min
   (~21% of the recording removed) with 9/9 reference-clip recall and

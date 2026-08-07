@@ -1792,6 +1792,79 @@ local model was not tried. Disk space is no longer the blocker (as
 established in step 1); the model's own real accuracy is. Not wired
 into anything.
 
+**A real, user-reported truncated export, root-caused to a genuine
+stitching bug silently shipping since Aug 2, fixed, and closed with a
+permanent regression gate that should have caught it in the first
+place.** A real manual browser pass (base calibration + clip_300)
+reported an exported video stopping after ~4s. Investigated per the
+user's own explicit order, not guessed at:
+
+1. **Real batch ID found (`705e659881e7`), real manifest pulled, real
+   `ffprobe` run on the real `output.mp4`.** The file was NOT truncated
+   to ~4s -- video stream 145.9s, audio/container 166.8s, a real internal
+   split, not a short file.
+2. **Manifest kept segments were completely healthy** -- 12 kept
+   segments, normal boundaries, no collapse. Compared directly against
+   the most recent pre-base-calibration `clip_300` run (Aug 1,
+   `12adc76dbaf6`): same segment boundaries, essentially identical.
+3. **Base calibration checked directly, not assumed -- ruled out.** Real
+   root cause: `clip_300.mkv`'s native audio is Opus. The stitcher's
+   `force_reencode` mechanism (added by commit `6cdf859`, Aug 2, for an
+   unrelated hard-cut-boundary fix -- see `pipeline/stitch.py`'s module
+   docstring) re-encodes just the one span after a risky hard-cut
+   boundary to AAC, while every other span in the same plan stays a pure
+   stream-copy on the source's own Opus audio. The final concat's blind
+   `-c copy` mixes both into one file. Confirmed this predates base
+   calibration entirely: the Aug 1 comparison run predates commit
+   `6cdf859`, so it never had `force_reencode` at all (git-confirmed --
+   every line of that mechanism is a `+` in that commit) and was pure
+   stream-copy end to end, hence clean. Base calibration shipping the
+   same day was coincidental timing, not a cause.
+4. A strict full decode (`ffmpeg -v warning -i out.mp4 -f null -`)
+   confirmed real, repeated decode failures ("Error parsing the packet
+   header", "Invalid data found when processing input"), not just
+   ffprobe-level curiosities -- exactly the kind of file a browser's
+   stricter decoder stops on partway through, consistent with the
+   reported ~4s symptom (right at the first stream-copy -> re-encode
+   transition).
+
+**Blast-radius audit, done BEFORE fixing anything:** every real batch
+processed since `6cdf859` landed (Aug 2, 15:46:47) -- only two exist,
+both real production runs, not synthetic. Strict-decode-checked both:
+- `705e659881e7` (`clip_300.mkv`, Aug 6): corrupted, 7,220 real decode
+  errors, video 145.9s vs. audio/container 166.8s.
+- `d46f312fa057` (`full_game.mkv`, Aug 5): corrupted, far worse --
+  133,006 real decode errors, video 3250.3s vs. audio/container 3406.6s
+  (**156s of video missing**). **Needs re-export.**
+
+**Fix:** `pipeline.stitch.plan_stitch` now promotes the WHOLE plan to
+the re-encode path (reusing the already-validated multi-file-mismatch
+mechanism) whenever ANY span would need forcing, instead of forcing just
+that one span -- every span in a plan now shares one codec, always,
+never a silent mix. Real, not just a fake-runner check: a new end-to-end
+test (`test_mixed_codec_hard_cut_boundary_produces_a_strictly_clean_decode`)
+generates a real tiny clip with real Opus audio and a real risky
+hard-cut boundary, runs the real `run_stitch`, and strictly decodes the
+real output -- verified this test genuinely fails pre-fix (manually
+reverted `pipeline/stitch.py` to the pre-`6cdf859`-successor commit,
+reran: `reencoded=False`, 2 real decode errors) and passes post-fix.
+
+**Permanent regression gate added, exactly where the user said this
+should have lived all along:** `scripts/regression.py` now actually
+stitches every reference clip's real `kept_unconditional` segments
+(the exact ones production ships) via real `run_stitch`, and strictly
+decodes the real result -- a new hard failure condition (#6), gated
+like every other real correctness check in that script. Every existing
+check there only ever looked at segment BOUNDARIES; this is the first
+one that confirms the real stitched FILE is actually playable end to
+end. All 9 reference clips: clean, 0 real decode errors, `ALL PASS`.
+
+Full test suite: 466 passed (up from 465 -- one new real end-to-end
+stitch test). Not yet done: re-exporting the two real corrupted
+batches (`705e659881e7`, `d46f312fa057`) -- flagged to the user, not
+done silently, since re-exporting overwrites their existing
+`output.mp4`.
+
 
 ## Architecture overview
 

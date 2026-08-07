@@ -127,6 +127,38 @@ Verified with real frame-by-frame comparison across every splice
 boundary in all 9 reference clips plus full_game.mkv, using the corrected
 verification method — see README's Known Limitations for the exact
 numbers.
+
+**A fourth real bug, silently shipping since the hard-cut-boundary fix
+above, found via a real user-reported truncated export.** The fix that
+individually force-reencodes just the one job after a risky hard-cut
+boundary (previously: only that job's own force_reencode/own_target,
+plan.reencode staying False) never accounted for what that means for
+the FINAL CONCAT: a force-reencoded job always targets libx264/AAC
+regardless of the source's own codec, so a plan mixing that job with
+genuinely stream-copied ones (which keep the source's OWN codec) can
+concat spans with different audio codecs into one file. `build_concat_cmd`
+still blindly `-c copy`s everything. Confirmed on two real batches
+(clip_300.mkv and full_game.mkv, both processed after this mechanism
+shipped): the source's real Opus audio, stream-copied verbatim in the
+unforced spans, sat in the same output alongside AAC audio from the
+forced span(s) — a strict decode (`ffmpeg -v warning -i out.mp4 -f null
+-`) throws real, repeated errors ("Error parsing the packet header",
+"Invalid data found when processing input") starting at the first such
+boundary, and the video stream's own reported duration comes out short
+of the real total (measured: 145.9s vs. a real 166.8s on clip_300;
+3250.3s vs. a real 3406.6s -- 156s missing -- on full_game.mkv). This
+is exactly the kind of file a browser's stricter decoder stops on
+partway through, not just an ffprobe-only curiosity.
+
+Fixed by promoting the WHOLE plan to the re-encode path (reusing the
+already-validated multi-file-mismatch mechanism, not a second bespoke
+one) whenever ANY span would need forcing -- every span in a plan now
+either all stream-copy (uniform source codec, safe to concat) or all
+re-encode to one common target (uniform libx264/AAC, also safe to
+concat), never a silent mix of both. Costs a little more re-encoding
+time on the spans that would otherwise have stream-copied; correctness
+over speed here is the same tradeoff this project's priority rule
+already makes everywhere else.
 """
 
 import bisect
@@ -266,6 +298,38 @@ def probe_video_params(path) -> VideoParams:
         path=str(path), codec_name=info.get("codec_name", ""),
         width=int(info.get("width", 0)), height=int(info.get("height", 0)),
         fps=fps, rotation=rotation, start_offset=start_offset)
+
+
+def strict_decode_errors(path) -> list:
+    """Fully decode `path` (`ffmpeg -v warning -i ... -f null -`, no output
+    file written) and return every real decode-failure line, or [] if
+    clean -- the exact real check that found the fourth stitch bug (see
+    this module's docstring): a plan mixing stream-copy spans (the
+    source's own codec) with force-reencoded spans (always libx264/AAC)
+    used to make the final concat's blind `-c copy` produce a file whose
+    audio track silently mixes two real codecs. Confirmed directly: a
+    genuinely clean stitched file decodes with zero of these lines; a
+    corrupted one throws real, repeated ones starting at the first
+    mismatched-codec boundary, not just cosmetic warnings.
+
+    Deliberately narrow: only lines matching known real DECODE FAILURE
+    patterns count ("error parsing the packet header", "invalid data
+    found when processing input", "error submitting packet to decoder")
+    -- NOT "non-monotonically increasing dts" on its own, which ffmpeg
+    already auto-corrects (an isolated one showed up even on a real,
+    confirmed-clean file during this bug's own investigation) and is not
+    on its own evidence of real corruption. A caller that wants the raw
+    stderr for context can still re-run the same command directly."""
+    FAILURE_MARKERS = (
+        "error parsing the packet header",
+        "invalid data found when processing input",
+        "error submitting packet to decoder",
+    )
+    result = subprocess.run(
+        ["ffmpeg", "-v", "warning", "-i", str(path), "-f", "null", "-"],
+        capture_output=True, text=True)
+    return [line for line in result.stderr.splitlines()
+           if any(marker in line.lower() for marker in FAILURE_MARKERS)]
 
 
 def probe_duration(path) -> float:
@@ -471,13 +535,16 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
     pipeline.manifest.hard_cut_boundary_starts_by_file) are never bridged
     back together, even when the gap is shorter than the source's GOP --
     the same short gap merge_overlapping_spans otherwise treats as safe
-    to re-join. When a protected boundary does carry real overlap risk,
-    the span on the far side of it is extracted via a real per-file
-    re-encode instead of stream-copy (frame-exact start, no keyframe-snap
-    slack) rather than giving up the cut -- see merge_overlapping_spans'
-    docstring for the full reasoning, and README's origin-aware merge fix
-    writeup for the bug this closes (every hard-cut window was, until
-    this fix, still fully present in the real output)."""
+    to re-join. When a protected boundary carries real overlap risk, that
+    is treated as a real per-span re-encode NEED -- but per this module's
+    docstring (see the fourth real bug, found via a real user-reported
+    truncated export), a single job re-encoding to libx264/AAC while its
+    neighbors stay stream-copied on the SOURCE's own codec produces a
+    plan the final concat's blind `-c copy` can't safely join. So any
+    such need promotes the WHOLE plan to the re-encode path (the same,
+    already-validated mechanism the multi-file codec-mismatch case
+    already uses) rather than forcing just that one job -- every span
+    in the resulting plan shares one codec, always."""
     from pipeline.manifest import (hard_cut_boundary_starts_by_file,
                                    kept_spans_by_file)
 
@@ -489,14 +556,44 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
 
     source_dir = Path(source_dir)
     infos = [prober(source_dir / f["source_file"]) for f in contributing]
-    reencode, reason = needs_reencode(infos)
-    target = choose_target_params(infos) if reencode else None
+    mismatch_reencode, mismatch_reason = needs_reencode(infos)
     # one probe per contributing file, keyed by source_file so every span
     # from that file gets the SAME offset -- see build_extract_cmd
     offset_by_file = {f["source_file"]: info.start_offset
                       for f, info in zip(contributing, infos)}
-    info_by_file = {f["source_file"]: info
-                    for f, info in zip(contributing, infos)}
+
+    # Detection pass: even when codecs already agree across files
+    # (mismatch_reencode=False), a hard-cut boundary can still carry real
+    # keyframe-snap overlap risk for one span -- which, per this
+    # function's own docstring, must promote the WHOLE plan to re-encode
+    # rather than forcing just that span. Only run when it could possibly
+    # matter (mismatch_reencode already means everyone re-encodes) --
+    # each result is kept so the job-building pass below doesn't have to
+    # re-probe keyframes a second time when nothing ends up forced.
+    merged_spans_by_file = {}
+    any_forced = False
+    if not mismatch_reencode:
+        for f in by_file:
+            if not f["spans"]:
+                continue
+            src_path = source_dir / f["source_file"]
+            start_offset = offset_by_file.get(f["source_file"], 0.0)
+            keyframes = keyframe_prober(src_path)
+            protected = hard_cut_boundaries.get(f["source_file_index"], set())
+            forced_starts = set()
+            merged_spans_by_file[f["source_file_index"]] = merge_overlapping_spans(
+                f["spans"], start_offset, keyframes, protected_starts=protected,
+                forced_reencode_out=forced_starts)
+            if forced_starts:
+                any_forced = True
+
+    reencode = mismatch_reencode or any_forced
+    reason = mismatch_reason if mismatch_reencode else (
+        "a hard-cut boundary needs frame-exact re-encoding for at least "
+        "one span, which requires re-encoding the whole plan so every "
+        "span shares one codec (see module docstring)" if any_forced
+        else None)
+    target = choose_target_params(infos) if reencode else None
 
     jobs = []
     seq = 0
@@ -505,26 +602,21 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
             continue
         src_path = source_dir / f["source_file"]
         start_offset = offset_by_file.get(f["source_file"], 0.0)
-        spans = f["spans"]
-        forced_reencode_starts = set()
-        if not reencode:
-            keyframes = keyframe_prober(src_path)
-            protected = hard_cut_boundaries.get(f["source_file_index"], set())
-            spans = merge_overlapping_spans(
-                spans, start_offset, keyframes, protected_starts=protected,
-                forced_reencode_out=forced_reencode_starts)
-        own_info = info_by_file.get(f["source_file"])
-        own_target = ((own_info.width, own_info.height, own_info.fps)
-                      if own_info is not None else None)
+        if reencode:
+            # frame-exact re-encode needs no keyframe-snap merging at all
+            # -- the ORIGINAL unmerged spans, not the detection pass's
+            # stream-copy-oriented merge (see this function's docstring
+            # on why merge_overlapping_spans is only meaningful on the
+            # stream-copy path).
+            spans = f["spans"]
+        else:
+            spans = merged_spans_by_file.get(f["source_file_index"], f["spans"])
         for start_s, end_s in spans:
             seq += 1
-            forced = start_s in forced_reencode_starts
             jobs.append(SpanJob(
                 source_path=str(src_path), start_s=start_s, end_s=end_s,
                 clip_name=f"span_{seq:04d}.mp4", start_offset=start_offset,
-                source_file_index=f["source_file_index"],
-                force_reencode=forced,
-                own_target=own_target if forced else None))
+                source_file_index=f["source_file_index"]))
 
     return StitchPlan(jobs=jobs, reencode=reencode, reencode_reason=reason,
                       target=target)
