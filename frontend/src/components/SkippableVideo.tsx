@@ -4,6 +4,16 @@ import type { Segment } from '../types'
 const TOAST_VISIBLE_MS = 2000
 const TOAST_FADE_MS = 300
 
+// A seek doesn't land bit-exactly on the requested time -- the browser
+// snaps to the nearest available frame/sample, which can be a hair short
+// of the target. Without this tolerance, the timeupdate right after
+// landing can still read as "inside the window" and re-trigger the same
+// seek before the previous one ever stabilizes to a playing state --
+// confirmed live as an unbounded reseek storm (81 repeated seeks at one
+// boundary, 42 at another) that eventually left the video paused with no
+// user action able to explain it.
+const SKIP_ARRIVAL_EPSILON_S = 0.05
+
 interface SkipWindow {
   start: number
   end: number
@@ -96,12 +106,22 @@ export default function SkippableVideo({ src, segments, style, ...videoProps }: 
 
   function handleTimeUpdate(e: React.SyntheticEvent<HTMLVideoElement>) {
     const t = e.currentTarget.currentTime
-    const hit = skipWindows.find((w) => t >= w.start && t < w.end)
+    // Boundary tolerance: a window whose end we've already (near-)arrived
+    // at no longer counts as "inside" it, even if frame-snap left us a
+    // hair short of the exact end value.
+    const hit = skipWindows.find((w) => t >= w.start && t < w.end - SKIP_ARRIVAL_EPSILON_S)
     if (autoSkip) {
       if (hit && videoRef.current) {
-        const seconds = Math.max(1, Math.round(hit.end - hit.start))
-        videoRef.current.currentTime = hit.end
-        showToast(`Skipped ${seconds}s of quiet time`)
+        // Re-entrancy guard: don't reissue the same seek if we're already
+        // at (or within tolerance of) its target -- stops handleTimeUpdate
+        // from re-triggering an identical seek on every tick before the
+        // previous one has stabilized.
+        const alreadyAtTarget = Math.abs(videoRef.current.currentTime - hit.end) < SKIP_ARRIVAL_EPSILON_S
+        if (!alreadyAtTarget) {
+          const seconds = Math.max(1, Math.round(hit.end - hit.start))
+          videoRef.current.currentTime = hit.end
+          showToast(`Skipped ${seconds}s of quiet time`)
+        }
       }
       setActiveSkip(null)
     } else {
