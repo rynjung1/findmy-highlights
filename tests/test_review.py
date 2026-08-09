@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from conftest import reference_clips_dir
 from pipeline.review import (ReviewConfig, boundary_crossing_candidates,
                              generate_review_candidates,
                              hard_cut_dip_candidates, review_priority_key,
@@ -671,7 +672,7 @@ def test_review_priority_key_control_samples_still_sort_last_within_fallback():
 # ---- real ffmpeg smoke test ----
 
 def test_extract_review_clip_real_ffmpeg(tmp_path):
-    ref = Path(__file__).resolve().parent.parent / "reference_clips" / "clip_60.mkv"
+    ref = reference_clips_dir() / "clip_60.mkv"
     if not ref.exists():
         pytest.skip("reference_clips/clip_60.mkv not available")
     t = np.arange(0, 5, 0.1)

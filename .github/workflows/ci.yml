@@ -20,6 +20,8 @@ jobs:
           venv/bin/pip install -r requirements.txt
 
       - name: Run test suite
+        env:
+          FMH_REFERENCE_CLIPS_DIR: /Users/ryanjung/Desktop/findmy-highlights/reference_clips
         run: venv/bin/python -m pytest
 
       - name: Run detection regression

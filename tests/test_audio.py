@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from conftest import reference_clips_dir
 from pipeline.audio import AudioConfig, envelope, onset_features, onset_rise_time
 
 
@@ -111,7 +112,7 @@ def test_onset_features_uses_and_populates_cache():
 # study (README's Task 2 pose+audio writeup), not a unit test.
 
 def test_onset_features_real_smoke():
-    ref = Path(__file__).resolve().parent.parent / "reference_clips" / "clip_base3.mkv"
+    ref = reference_clips_dir() / "clip_base3.mkv"
     if not ref.exists():
         pytest.skip("reference_clips/clip_base3.mkv not available")
 

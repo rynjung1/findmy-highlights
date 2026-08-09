@@ -16,6 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from conftest import reference_clips_dir
 from pipeline.manifest import (apply_output_offsets, build_manifest,
                                build_multi_file_manifest)
 from pipeline.stitch import (SpanJob, SpanPlacement, VideoParams,
@@ -886,7 +887,7 @@ def test_probe_video_params_reads_real_nonzero_start_offset():
     field didn't break parsing of the others, and that a real file's
     genuinely nonzero start_time is read correctly, not silently
     defaulted to 0.0."""
-    clip = Path(__file__).parent.parent / "reference_clips" / "clip_540.mkv"
+    clip = reference_clips_dir() / "clip_540.mkv"
     if not clip.exists():
         pytest.skip("reference clip not available for start_offset probe check")
 
@@ -915,7 +916,7 @@ def test_stream_copy_span_from_zero_not_shortened_by_real_stream_start_offset(tm
     clip isn't present rather than pretending a fake substitute proves
     the same thing (same pattern as tests/test_veto_e2e.py's real-clip
     dependency)."""
-    clip = Path(__file__).parent.parent / "reference_clips" / "clip_540.mkv"
+    clip = reference_clips_dir() / "clip_540.mkv"
     if not clip.exists():
         pytest.skip("reference clip not available for real start-offset check")
 
@@ -1012,7 +1013,7 @@ def test_no_duplicate_frames_across_a_real_close_splice_boundary(tmp_path):
     frame-hash comparison against the real file before this fix existed.
     This confirms it's fixed: zero duplicate frames anywhere across the
     real splice boundary, checked directly on the real rendered output."""
-    clip = Path(__file__).parent.parent / "reference_clips" / "clip_300.mkv"
+    clip = reference_clips_dir() / "clip_300.mkv"
     if not clip.exists():
         pytest.skip("reference clip not available for real splice-duplication check")
 
