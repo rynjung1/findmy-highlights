@@ -71,11 +71,22 @@ export interface Manifest {
   segments: Segment[]
 }
 
+export interface BaseZone {
+  xy: [number, number]
+  radius_px: number
+}
+
+// Keys match pipeline.calibration.BASE_NAMES exactly -- "second"/"third"
+// are independently optional, same as "first" (a camera angle that only
+// shows one base is the expected common case, not partial data).
+export type BaseName = 'first' | 'second' | 'third'
+
 export interface Calibration {
   frame_size: [number, number]
   plate_xy: [number, number]
   zone_radius_px: number
   created_from: string
+  bases?: Partial<Record<BaseName, BaseZone>>
 }
 
 export interface UploadResponse {

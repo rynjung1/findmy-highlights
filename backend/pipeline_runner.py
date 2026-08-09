@@ -9,7 +9,7 @@ pipeline logic lives in pipeline/, never duplicated in a caller.
 
 from pathlib import Path
 
-from pipeline.calibration import resolve_zone
+from pipeline.calibration import resolve_calibrated_scale_px, resolve_zone
 from pipeline.manifest import (apply_output_offsets, build_manifest,
                                build_multi_file_manifest, load_manifest,
                                save_manifest)
@@ -44,12 +44,14 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list,
         files_for_manifest = []
         for path in ordered_paths:
             zone = resolve_zone(path)
+            calibrated_scale_px = resolve_calibrated_scale_px(path)
             segments, vetoed, duration, motion, hard_cut_windows = process_video(
                 path, zone, motion_only=False, cache_dir=DEFAULT_CACHE_DIR,
                 warn=lambda msg: job["warnings"].append(msg),
                 on_stage=lambda s, p=path: on_stage(s, p),
                 training_data_dir=training_data_dir,
-                training_data_source_info={"batch_id": job["batch_id"]})
+                training_data_source_info={"batch_id": job["batch_id"]},
+                calibrated_scale_px=calibrated_scale_px)
 
             sm = smooth_scores(motion.times, motion.scores,
                                SegmentConfig().smooth_window_s)

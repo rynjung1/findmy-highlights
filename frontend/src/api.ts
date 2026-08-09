@@ -16,6 +16,7 @@
 // FMH_CORS_ORIGINS must then be set to the frontend's origin for these
 // cross-origin requests to actually succeed.
 import type {
+  BaseName,
   Calibration,
   DemoRunResponse,
   Job,
@@ -70,14 +71,31 @@ export async function getCalibration(batchId: string): Promise<Calibration | nul
   return res.json()
 }
 
+export interface CalibrationPoint {
+  x: number
+  y: number
+}
+
+// `bases`, if given, is independently optional per base name (a camera
+// angle that only shows first base submits only that one) -- mirrors
+// backend/app.py's own <name>_x/<name>_y form fields exactly, one per
+// marked base, so an unmarked base simply never appears in the form
+// body rather than being sent as null/0.
 export async function setCalibrationCoords(
   batchId: string,
-  x: number,
-  y: number,
+  plate: CalibrationPoint,
+  bases?: Partial<Record<BaseName, CalibrationPoint>>,
 ): Promise<Calibration> {
   const form = new FormData()
-  form.append('x', String(x))
-  form.append('y', String(y))
+  form.append('x', String(plate.x))
+  form.append('y', String(plate.y))
+  if (bases) {
+    for (const [name, point] of Object.entries(bases)) {
+      if (!point) continue
+      form.append(`${name}_x`, String(point.x))
+      form.append(`${name}_y`, String(point.y))
+    }
+  }
   const res = await request(`/batches/${batchId}/calibration`, {
     method: 'POST',
     body: form,

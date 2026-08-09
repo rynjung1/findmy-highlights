@@ -12,11 +12,20 @@ the common path.
 """
 
 import json
+import math
 from pathlib import Path
 
 import cv2
 
 from pipeline.fusion import PlateZone
+
+# Standard fastpitch softball diamond: home-to-first, first-to-second,
+# second-to-third, and third-to-home are all this many feet (a square,
+# not the MLB baseball 90ft path). This project's actual field
+# dimensions were never independently confirmed against the footage --
+# flagged here, not silently assumed elsewhere, since every real-world
+# distance/scale computation in this module depends on it.
+BASE_PATH_FT = 60.0
 
 # ~one batter-height around the plate at typical backstop-mounted framing
 DEFAULT_RADIUS_FRACTION = 0.26
@@ -91,6 +100,40 @@ def resolve_base_zones(video_path, calib_dir=None) -> dict:
         zones[name] = PlateZone(center_xy=tuple(spec["xy"]),
                                 radius_px=spec["radius_px"])
     return zones
+
+
+def resolve_calibrated_scale_px(video_path, calib_dir=None) -> float | None:
+    """Pixel distance between home and first base for this video's
+    calibration -- a real, camera-geometry-anchored scale measurement
+    (the real-world segment it spans is exactly BASE_PATH_FT), for
+    pipeline.fusion.calibrated_scale_boost_factor to use in place of
+    scale_boost_factor's box-width proxy.
+
+    None whenever `first` isn't marked (home-only calibration -- true for
+    every batch except ones that went through the multi-base UI), which
+    is the deliberate signal to fall back to the box-width proxy: this
+    function makes no guess, same "no signal means behave as before"
+    convention scale_boost_factor's own box-width path already follows.
+
+    Specifically home-to-first, not home-to-third or a base-to-base
+    segment: a real check across 3 independent human calibration passes
+    on the same physical camera setup found home-to-third reads ~862px
+    for the same real BASE_PATH_FT that home-to-first reads ~420px for
+    (this camera's viewing angle foreshortens the two directions very
+    differently) -- mixing segments without a matching, separately derived
+    reference constant per segment would silently corrupt the ratio.
+    first is what the multi-base UI always marks alongside home,
+    so this covers every real case without needing that complexity."""
+    candidate = _find_calibration_file(video_path, calib_dir)
+    if candidate is None:
+        return None
+    c = json.loads(candidate.read_text())
+    bases = c.get("bases", {})
+    if "first" not in bases or "plate_xy" not in c:
+        return None
+    hx, hy = c["plate_xy"]
+    fx, fy = bases["first"]["xy"]
+    return math.hypot(fx - hx, fy - hy)
 
 
 def probe_frame_size(video_path) -> tuple:

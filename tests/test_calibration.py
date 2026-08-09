@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.calibration import (build_calibration, resolve_base_zones,
-                                  resolve_zone)
+                                  resolve_calibrated_scale_px, resolve_zone)
 
 
 def write_calib(path, x, y, r, bases=None):
@@ -158,3 +158,67 @@ def test_build_calibration_rejects_unknown_base_name():
     with pytest.raises(ValueError):
         build_calibration((1920, 1080), (100.0, 200.0),
                           bases={"home_plate_typo": (1, 2)})
+
+
+# ---- resolve_calibrated_scale_px (calibrated-distance scale boost) ----
+
+def test_calibrated_scale_px_none_when_no_calibration_file_at_all(tmp_path):
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"")
+    assert resolve_calibrated_scale_px(str(video)) is None
+
+
+def test_calibrated_scale_px_none_for_home_only_calibration(tmp_path):
+    # a pre-Stage-10 file, no "bases" key at all -- must fall back, not guess
+    write_calib(tmp_path / "calibration.json", 100, 200, 50)
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"")
+    assert resolve_calibrated_scale_px(str(video)) is None
+
+
+def test_calibrated_scale_px_none_when_bases_present_but_first_missing(tmp_path):
+    # second/third marked, first not -- still None, per the function's own
+    # "first is what the multi-base UI always marks alongside home" contract
+    write_calib(tmp_path / "calibration.json", 100, 200, 50, bases={
+        "second": {"xy": [960, 400], "radius_px": 70},
+        "third": {"xy": [400, 600], "radius_px": 80},
+    })
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"")
+    assert resolve_calibrated_scale_px(str(video)) is None
+
+
+def test_calibrated_scale_px_home_and_first_only_returns_hypot_distance(tmp_path):
+    write_calib(tmp_path / "calibration.json", 0, 0, 50,
+               bases={"first": {"xy": [3, 4], "radius_px": 80}})
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"")
+    assert resolve_calibrated_scale_px(str(video)) == 5.0  # 3-4-5 triangle
+
+
+def test_calibrated_scale_px_ignores_second_and_third_uses_only_first(tmp_path):
+    # all 4 points present -- result must be identical to the home+first-only
+    # case above, home-to-third and home-to-second are NOT interchangeable
+    # measurements (see the function's own docstring on why mixing segments
+    # would silently corrupt the ratio)
+    write_calib(tmp_path / "calibration.json", 0, 0, 50, bases={
+        "first": {"xy": [3, 4], "radius_px": 80},
+        "second": {"xy": [960, 400], "radius_px": 70},
+        "third": {"xy": [400, 600], "radius_px": 80},
+    })
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"")
+    assert resolve_calibrated_scale_px(str(video)) == 5.0
+
+
+def test_calibrated_scale_px_known_good_regression_case(tmp_path):
+    # real values from the multi-base calibration smoke test (2026-08-08):
+    # plate (960, 850), first (1400, 700) -> 464.86557...px, confirmed
+    # against a direct hypot() calculation at the time
+    import pytest
+    write_calib(tmp_path / "calibration.json", 960, 850, 40,
+               bases={"first": {"xy": [1400, 700], "radius_px": 35}})
+    video = tmp_path / "clip.mkv"
+    video.write_bytes(b"")
+    scale = resolve_calibrated_scale_px(str(video))
+    assert scale == pytest.approx(464.86557196677836)

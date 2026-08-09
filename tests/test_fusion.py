@@ -9,10 +9,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.fusion import (FusionConfig, PlateZone, apply_veto,
-                             boxes_to_grid_mask, compute_occupancy, fuse,
-                             occupancy_near_times, robust_box_width,
-                             scale_boost_factor, vetoed_overlapping_required,
-                             FusedResult)
+                             boxes_to_grid_mask, calibrated_scale_boost_factor,
+                             compute_occupancy, fuse, occupancy_near_times,
+                             robust_box_width, scale_boost_factor,
+                             vetoed_overlapping_required, FusedResult)
 
 # Geometry used throughout: 1920x1080 source, 480x270 analysis, no border,
 # 16x9 grid -> each grid cell is 120x120 source px.
@@ -372,6 +372,55 @@ def test_scale_boost_is_noop_with_no_reliable_width_signal():
     boxes = [[centered_box(1147, 840, w=100)] for _ in range(2)]
     f = scale_boost_factor(list(range(2)), boxes, FRAME, ZONE, reference_width_px=200)
     assert f == 1.0
+
+
+# ---- calibrated_scale_boost_factor (real-distance replacement for the
+# box-width proxy above -- same max(1.0, reference/batch) shape, driven by
+# pipeline.calibration.resolve_calibrated_scale_px instead of box width) ----
+
+def test_calibrated_scale_boost_is_noop_at_reference_distance():
+    # batch == reference -> factor is exactly 1.0, same as the box-width case
+    f = calibrated_scale_boost_factor(batch_scale_px=421.4, reference_scale_px=421.4)
+    assert f == 1.0
+
+
+def test_calibrated_scale_boost_is_noop_when_batch_is_closer_than_reference():
+    # batch BIGGER than reference (closer camera) -> never reduce below 1.0
+    f = calibrated_scale_boost_factor(batch_scale_px=800.0, reference_scale_px=400.0)
+    assert f == 1.0
+
+
+def test_calibrated_scale_boost_raises_factor_when_batch_is_farther():
+    # batch HALF the reference -> boost factor is exactly 2.0 (linear; caller
+    # squares it before applying to a motion score, same as scale_boost_factor)
+    f = calibrated_scale_boost_factor(batch_scale_px=200.0, reference_scale_px=400.0)
+    assert f == 2.0
+
+
+def test_calibrated_scale_boost_matches_box_width_shape_at_matching_ratios():
+    # same batch/reference ratio (100/200 == 0.5) as
+    # test_scale_boost_raises_factor_when_batch_is_farther above -> both
+    # boost implementations must agree on the shape, not just coincidentally
+    # on one number
+    calibrated = calibrated_scale_boost_factor(batch_scale_px=100.0, reference_scale_px=200.0)
+    boxes = [[centered_box(1147, 840, w=100)] for _ in range(6)]
+    box_width = scale_boost_factor(list(range(6)), boxes, FRAME, ZONE, reference_width_px=200)
+    assert calibrated == box_width == 2.0
+
+
+def test_calibrated_scale_boost_falls_back_to_noop_when_batch_scale_is_none():
+    # None is resolve_calibrated_scale_px's real "no first-base calibration"
+    # signal (see pipeline/calibration.py) -- the caller (pipeline.run.
+    # process_video) is documented to fall back to scale_boost_factor
+    # itself in that case, but this function must still be a safe no-op on
+    # its own rather than raising or guessing
+    f = calibrated_scale_boost_factor(batch_scale_px=None, reference_scale_px=421.4)
+    assert f == 1.0
+
+
+def test_calibrated_scale_boost_falls_back_to_noop_when_batch_scale_is_zero_or_negative():
+    assert calibrated_scale_boost_factor(batch_scale_px=0.0, reference_scale_px=421.4) == 1.0
+    assert calibrated_scale_boost_factor(batch_scale_px=-5.0, reference_scale_px=421.4) == 1.0
 
 
 # ---- occupancy_near_times (enter-side debounce investigation) ----

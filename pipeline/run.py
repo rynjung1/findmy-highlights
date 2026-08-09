@@ -18,9 +18,9 @@ from pathlib import Path
 from pipeline.atbat import AtBatConfig, atbat_start_times
 from pipeline.calibration import resolve_base_zones
 from pipeline.detection import DetectionConfig, detect_persons
-from pipeline.fusion import (FusionConfig, apply_veto, compute_occupancy,
-                             compute_zone_velocity, fuse, occupancy_near_times,
-                             scale_boost_factor)
+from pipeline.fusion import (FusionConfig, apply_veto, calibrated_scale_boost_factor,
+                             compute_occupancy, compute_zone_velocity, fuse,
+                             occupancy_near_times, scale_boost_factor)
 from pipeline.motion import compute_motion
 from pipeline.refine import RefineConfig, refine_segments
 from pipeline.segments import (SegmentConfig, apply_hard_cuts, scores_to_segments,
@@ -40,7 +40,7 @@ DEFAULT_CACHE_DIR = Path(os.environ.get("FMH_DETECTION_CACHE_DIR", str(ROOT / ".
 def process_video(video: str, zone, motion_only: bool = False,
                   cache_dir=None, warn=None, on_stage=None,
                   training_data_dir=None, training_data_source_info=None,
-                  review_cfg=None):
+                  review_cfg=None, calibrated_scale_px=None):
     """Run the full pipeline on one video. `zone` is a PlateZone or None
     (already resolved by the caller — this function does no calibration
     lookup of its own, keeping single- and multi-file callers consistent).
@@ -50,6 +50,14 @@ def process_video(video: str, zone, motion_only: bool = False,
     that stage of work starts (added for the backend's progress
     reporting — the CLI scripts don't pass one, so their behavior is
     unchanged).
+
+    `calibrated_scale_px`, if given (pipeline.calibration.
+    resolve_calibrated_scale_px's result — already resolved by the
+    caller, same division of responsibility as `zone`), enables the
+    enter-side scale boost's real-calibrated-distance path instead of
+    its box-width proxy. Defaults to None: every existing caller that
+    doesn't pass this gets the exact same box-width-based behavior as
+    before this parameter existed.
 
     `training_data_dir`, if given, opts this run into the Tier 1 review
     queue (pipeline.review.generate_review_candidates): a handful of the
@@ -114,9 +122,20 @@ def process_video(video: str, zone, motion_only: bool = False,
     # for the full derivation and safety proof; scale_boost_factor()
     # itself returns exactly 1.0 (no-op) when zone is None or too few
     # reliable near-plate detections exist to trust a reading.
+    #
+    # Prefers a real calibrated distance (calibrated_scale_boost_factor)
+    # over the box-width proxy whenever the caller resolved one --
+    # confirmed lower-noise on real data before shipping (see
+    # SegmentConfig.reference_calibrated_scale_px). Falls back to the
+    # box-width path exactly as before for every batch without first-base
+    # calibration (calibrated_scale_px is None), which is every batch
+    # that predates the multi-base calibration UI.
     seg_cfg = SegmentConfig()
     boost = 1.0
-    if zone is not None:
+    if calibrated_scale_px is not None:
+        boost = calibrated_scale_boost_factor(calibrated_scale_px,
+                                              seg_cfg.reference_calibrated_scale_px)
+    elif zone is not None:
         boost = scale_boost_factor(det.times, det.boxes, motion.frame_size,
                                    zone, seg_cfg.reference_plate_box_width_px)
     enter_scores = motion.scores * (boost ** 2)

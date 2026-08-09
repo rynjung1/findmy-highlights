@@ -135,9 +135,10 @@ def main() -> None:
             continue
 
         from pipeline.atbat import AtBatConfig, atbat_start_times
-        from pipeline.calibration import resolve_base_zones
+        from pipeline.calibration import resolve_base_zones, resolve_calibrated_scale_px
         from pipeline.detection import DetectionConfig, detect_persons
-        from pipeline.fusion import compute_occupancy, compute_zone_velocity
+        from pipeline.fusion import (calibrated_scale_boost_factor, compute_occupancy,
+                                     compute_zone_velocity)
         from pipeline.refine import RefineConfig, refine_segments
         from pipeline.settle import SettleConfig
         det = detect_persons(str(clip_path), DetectionConfig(),
@@ -148,8 +149,17 @@ def main() -> None:
         # mirrors pipeline.run.process_video's enter-side scale boost --
         # kept in sync deliberately so this script measures the SAME
         # pipeline that actually ships, not a stale reimplementation.
+        # Prefers real calibrated distance over the box-width proxy
+        # whenever this clip has first-base calibration -- None today for
+        # every clip in reference_clips/ (no first-base calibration
+        # exists there yet), so this falls back to the box-width path
+        # exactly as before.
+        calibrated_scale_px = resolve_calibrated_scale_px(clip_path, calib_dir=clips_dir)
         boost = 1.0
-        if zone is not None:
+        if calibrated_scale_px is not None:
+            boost = calibrated_scale_boost_factor(calibrated_scale_px,
+                                                  seg_cfg.reference_calibrated_scale_px)
+        elif zone is not None:
             boost = scale_boost_factor(det.times, det.boxes, motion.frame_size,
                                        zone, seg_cfg.reference_plate_box_width_px)
         enter_scores = motion.scores * (boost ** 2)

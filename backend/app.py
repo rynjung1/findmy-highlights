@@ -310,7 +310,16 @@ def create_app(uploads_root=None, run_in_background=None,
                         calibration_file: UploadFile | None = File(None),
                         x: float | None = Form(None),
                         y: float | None = Form(None),
-                        radius: float | None = Form(None)):
+                        radius: float | None = Form(None),
+                        first_x: float | None = Form(None),
+                        first_y: float | None = Form(None),
+                        first_radius: float | None = Form(None),
+                        second_x: float | None = Form(None),
+                        second_y: float | None = Form(None),
+                        second_radius: float | None = Form(None),
+                        third_x: float | None = Form(None),
+                        third_y: float | None = Form(None),
+                        third_radius: float | None = Form(None)):
         """Sets the plate zone for every file in this batch (one
         calibration.json covers the whole batch, same shared-by-default
         rule pipeline.calibration.resolve_zone already applies). Two
@@ -321,6 +330,20 @@ def create_app(uploads_root=None, run_in_background=None,
         first video (the API equivalent of `calibrate.py --set x,y` —
         there's no in-browser interactive click flow here, that's
         Stage 7/8's job to build against this endpoint).
+
+        Bases (pipeline.calibration.build_calibration's `bases` param,
+        Stage 10 infrastructure that had never been surfaced through any
+        real tool -- not the CLI, not this endpoint, not the frontend --
+        until now; see README) are independently optional, both from the
+        plate and from each other, matching resolve_base_zones()'s own
+        "partial calibration is the expected common case" contract: a
+        camera angle that only shows first base can submit only
+        first_x/first_y. <name>_radius is optional per base and defaults
+        to DEFAULT_BASE_RADIUS_PX (see that constant's docstring for why
+        that's NOT the plate's radius). Only meaningful alongside the
+        x/y coordinate path -- the calibration_file upload path already
+        passes any `bases` key in the uploaded JSON through unvalidated
+        and unchanged, since it always has.
 
         /process now requires this to have been called first, unless the
         caller explicitly passes allow_uncalibrated=true — see
@@ -341,11 +364,19 @@ def create_app(uploads_root=None, run_in_background=None,
                      f"already {existing_detect['status']} — calibration "
                      f"must be set before triggering processing")
 
+        base_fields = {
+            "first": (first_x, first_y, first_radius),
+            "second": (second_x, second_y, second_radius),
+            "third": (third_x, third_y, third_radius),
+        }
+        any_base_field_set = any(
+            v is not None for fields in base_fields.values() for v in fields)
+
         if calibration_file is not None:
-            if x is not None or y is not None or radius is not None:
+            if x is not None or y is not None or radius is not None or any_base_field_set:
                 raise HTTPException(
                     400, "provide either calibration_file or x/y "
-                         "coordinates, not both")
+                         "coordinates (plate and/or base), not both")
             try:
                 calibration = json.loads(calibration_file.file.read())
             except json.JSONDecodeError:
@@ -388,8 +419,24 @@ def create_app(uploads_root=None, run_in_background=None,
                 400, f"plate coordinates ({x}, {y}) are outside this "
                      f"video's frame ({w}x{h})")
 
+        bases = {}
+        for name, (bx, by, br) in base_fields.items():
+            if bx is None and by is None and br is None:
+                continue  # this base not being set at all is the common case
+            if bx is None or by is None:
+                raise HTTPException(
+                    400, f"{name} base requires both {name}_x and {name}_y")
+            if not (0 <= bx <= w) or not (0 <= by <= h):
+                raise HTTPException(
+                    400, f"{name} base coordinates ({bx}, {by}) are "
+                         f"outside this video's frame ({w}x{h})")
+            if br is not None and br <= 0:
+                raise HTTPException(
+                    400, f"{name}_radius must be positive, got {br}")
+            bases[name] = (bx, by, br) if br is not None else (bx, by)
+
         calibration = build_calibration(frame_size, (x, y), radius,
-                                        created_from=names[0])
+                                        created_from=names[0], bases=bases)
         save_calibration(dest, calibration)
         return calibration
 

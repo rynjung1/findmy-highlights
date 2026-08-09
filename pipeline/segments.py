@@ -59,6 +59,21 @@ class SegmentConfig:
     # NOT shipped -- see README's Known Limitations for why that's a
     # structural dead end, not a tuning gap.
     reference_plate_box_width_px: float = 121.4
+    # Reference calibrated home-to-first pixel distance, for
+    # pipeline.fusion.calibrated_scale_boost_factor -- used in place of
+    # reference_plate_box_width_px above when a batch has real first-base
+    # calibration (pipeline.calibration.resolve_calibrated_scale_px
+    # returns non-None), falling back to the box-width path otherwise.
+    # Mean of 3 independent human calibration clicks on clip_300.mkv (the
+    # same physical camera setup as clip_60/540 and every other reference
+    # clip -- verified by frame comparison, not assumed): 425.7, 420.1,
+    # 418.5px (~1.7% spread) -> 421.4. Confirmed lower-noise than the
+    # box-width proxy before shipping: robust_box_width computed on 3
+    # clips from that SAME verified-identical camera setup spread ~5-10%
+    # (117.0-128.8px), driven by which player's real body happens to be
+    # at the plate, not by camera geometry -- a confound calibrated
+    # distance doesn't have. See pipeline.fusion.calibrated_scale_boost_factor.
+    reference_calibrated_scale_px: float = 421.4
     # exit_thresh: re-measured and raised twice now.
     #
     # First pass (0.003 -> 0.0045, v2 segments.py retune): several required

@@ -337,6 +337,35 @@ def scale_boost_factor(det_times, det_boxes, frame_size, zone: PlateZone,
     return max(1.0, reference_width_px / w_batch)
 
 
+def calibrated_scale_boost_factor(batch_scale_px: float | None,
+                                  reference_scale_px: float) -> float:
+    """Same max(1.0, reference/batch) shape as scale_boost_factor, but
+    driven by a real calibrated distance (pipeline.calibration.
+    resolve_calibrated_scale_px -- pixel distance between home and first
+    base, a known real BASE_PATH_FT apart) instead of the box-width
+    proxy. Callers must SQUARE this before multiplying a motion score,
+    same requirement as scale_boost_factor, for the same reason (motion
+    score scales with subject AREA, not linear distance).
+
+    This is a genuinely lower-noise measurement, confirmed against real
+    data before shipping: 3 independent human calibration clicks on the
+    SAME physical camera setup gave home-to-first pixel distances of
+    418.5/420.1/425.7px (~1.7% spread), while robust_box_width computed
+    on 3 clips from that SAME verified-identical setup gave 117.0/121.5/
+    128.8px (~5-10% spread) -- box width is confounded by which
+    player's real body happens to be at the plate, not just camera
+    geometry, a noise source calibrated distance doesn't have at all
+    since it measures fixed field markers instead of people.
+
+    Returns exactly 1.0 whenever batch_scale_px is None (no first-base
+    calibration -- the caller should have already fallen back to
+    scale_boost_factor in that case; this is a defensive no-op, not the
+    primary gate) or <= 0."""
+    if batch_scale_px is None or batch_scale_px <= 0:
+        return 1.0
+    return max(1.0, reference_scale_px / batch_scale_px)
+
+
 def compute_all_occupancy(det_times, det_boxes, zones: dict,
                           stationary_v: float,
                           require_stationary_entry: bool = False) -> dict:

@@ -76,7 +76,7 @@ def fake_process_video_factory(segments_by_file=None, default_segments=((1.0, 3.
 
     def fake(path, zone, motion_only=False, cache_dir=None, warn=None,
             on_stage=None, training_data_dir=None,
-            training_data_source_info=None):
+            training_data_source_info=None, calibrated_scale_px=None):
         if calls is not None:
             calls.append((Path(path).name, zone))
         if on_stage:
@@ -359,6 +359,158 @@ def test_set_calibration_with_explicit_radius(tmp_path):
                         data={"x": "10", "y": "10", "radius": "5"})
         assert r.status_code == 200
         assert r.json()["zone_radius_px"] == 5.0
+
+
+def test_set_calibration_coordinates_with_no_bases_omits_bases_key(tmp_path):
+    """Explicit regression guard for the base-calibration extension:
+    submitting only home plate (no base fields at all) must produce
+    byte-for-byte the same shape as before bases existed -- no "bases"
+    key at all, not an empty dict."""
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "32", "y": "24"})
+        assert r.status_code == 200
+        assert "bases" not in r.json()
+
+
+def test_set_calibration_with_one_base(tmp_path):
+    """Partial base calibration -- only first base marked -- is the
+    expected common case (a camera angle that doesn't show every base),
+    not an error."""
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)  # 64x48
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "32", "y": "24",
+                              "first_x": "50", "first_y": "10"})
+        assert r.status_code == 200
+        cal = r.json()
+        assert set(cal["bases"].keys()) == {"first"}
+        assert cal["bases"]["first"]["xy"] == [50.0, 10.0]
+        # no explicit radius given -> DEFAULT_BASE_RADIUS_PX, not the
+        # plate's own radius
+        from pipeline.calibration import DEFAULT_BASE_RADIUS_PX
+        assert cal["bases"]["first"]["radius_px"] == DEFAULT_BASE_RADIUS_PX
+
+
+def test_set_calibration_with_all_bases(tmp_path):
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)  # 64x48
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration", data={
+            "x": "32", "y": "24",
+            "first_x": "50", "first_y": "10", "first_radius": "3",
+            "second_x": "32", "second_y": "5", "second_radius": "4",
+            "third_x": "10", "third_y": "10", "third_radius": "5",
+        })
+        assert r.status_code == 200
+        cal = r.json()
+        assert set(cal["bases"].keys()) == {"first", "second", "third"}
+        assert cal["bases"]["first"] == {"xy": [50.0, 10.0], "radius_px": 3.0}
+        assert cal["bases"]["second"] == {"xy": [32.0, 5.0], "radius_px": 4.0}
+        assert cal["bases"]["third"] == {"xy": [10.0, 10.0], "radius_px": 5.0}
+
+        got = client.get(f"/batches/{batch_id}/calibration")
+        assert got.json() == cal
+
+
+def test_set_calibration_base_missing_half_coordinate_400(tmp_path):
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "32", "y": "24", "first_x": "50"})
+        assert r.status_code == 400
+        assert "first" in r.json()["detail"]
+
+
+def test_set_calibration_base_out_of_bounds_400(tmp_path):
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)  # 64x48
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "32", "y": "24",
+                              "second_x": "9999", "second_y": "10"})
+        assert r.status_code == 400
+        assert "outside this video's frame" in r.json()["detail"]
+
+
+def test_set_calibration_base_negative_radius_400(tmp_path):
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration",
+                        data={"x": "32", "y": "24", "third_x": "10",
+                              "third_y": "10", "third_radius": "-1"})
+        assert r.status_code == 400
+
+
+def test_set_calibration_base_fields_with_file_upload_400(tmp_path):
+    """Same rule as plate x/y: base fields and calibration_file are
+    mutually exclusive -- the file-upload path already carries any real
+    `bases` key in the uploaded JSON through unchanged, so combining
+    both is ambiguous, not additive."""
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"x")])
+        r = client.post(
+            f"/batches/{batch_id}/calibration",
+            data={"first_x": "1", "first_y": "1"},
+            files={"calibration_file": ("c.json", "{}", "application/json")})
+        assert r.status_code == 400
+
+
+def test_resolve_base_zones_reads_back_what_was_submitted(tmp_path):
+    """Real end-to-end check, not just a shape assertion on the HTTP
+    response: write via the real endpoint, then read back through
+    pipeline.calibration.resolve_base_zones() -- the exact function the
+    real base-occupancy pipeline (scripts/validate_base_occupancy.py,
+    Stage 11) calls -- against the batch's own real file, confirming the
+    two ends of this feature actually agree on where things are."""
+    from pipeline.calibration import resolve_base_zones
+
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    write_clip(clip, seconds=1, fps=5)  # 64x48
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+        r = client.post(f"/batches/{batch_id}/calibration", data={
+            "x": "32", "y": "24",
+            "first_x": "50", "first_y": "10", "first_radius": "3",
+            "third_x": "10", "third_y": "10",
+        })
+        assert r.status_code == 200
+
+    bdir = storage.batch_dir(tmp_path / "uploads", batch_id)
+    zones = resolve_base_zones(bdir / "clip.mp4", calib_dir=bdir)
+
+    assert set(zones.keys()) == {"first", "third"}  # second never submitted
+    assert zones["first"].center_xy == (50.0, 10.0)
+    assert zones["first"].radius_px == 3.0
+    from pipeline.calibration import DEFAULT_BASE_RADIUS_PX
+    assert zones["third"].center_xy == (10.0, 10.0)
+    assert zones["third"].radius_px == DEFAULT_BASE_RADIUS_PX
 
 
 def test_set_calibration_by_uploading_existing_file(tmp_path):
@@ -1318,7 +1470,8 @@ def test_process_threads_training_data_dir_into_process_video(tmp_path, monkeypa
     seen = []
 
     def fake(path, zone, motion_only=False, cache_dir=None, warn=None,
-            on_stage=None, training_data_dir=None, training_data_source_info=None):
+            on_stage=None, training_data_dir=None, training_data_source_info=None,
+            calibrated_scale_px=None):
         seen.append((training_data_dir, training_data_source_info))
         import numpy as np
 
