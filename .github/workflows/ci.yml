@@ -1,0 +1,26 @@
+name: CI
+
+# push only -- this repo is public and the runner below is self-hosted, so
+# a pull_request trigger (including same-repo PRs) would let a workflow
+# file from an untrusted branch execute on this machine. push is the only
+# trigger that requires write access to this repo.
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up venv
+        run: |
+          python3.11 -m venv venv
+          venv/bin/pip install --upgrade pip
+          venv/bin/pip install -r requirements.txt
+
+      - name: Run test suite
+        run: venv/bin/python -m pytest
+
+      - name: Run detection regression
+        run: venv/bin/python scripts/regression.py --clips-dir /Users/ryanjung/Desktop/findmy-highlights/reference_clips
