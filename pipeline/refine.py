@@ -200,8 +200,36 @@ class RefineConfig:
     # pipeline change, including ones (like the enter boost) that don't
     # touch padding at all. Confirmed via scripts/regression.py, ALL PASS,
     # both previously-failing continuity checks explicitly re-verified.
+    # post_pad_s raised again, 1.85 -> 2.4 (docs/INVESTIGATION_LOG.md,
+    # 2026-08-09 "clip_540's e4 real-margin investigation"): found while
+    # calibrating real basepath data for clip_540 -- with the OLD
+    # box-width scale-boost proxy, clip_540 happened to read a real (if
+    # noisy) 1.039x enter-side boost that was ACCIDENTALLY enough to keep
+    # e4's segment contiguous through a genuine ~5.6s quiet stretch (the
+    # batter settling into the box before the pitch, per
+    # tests/ground_truth/clip_540.json's own note -- not spurious noise).
+    # A more accurate calibrated-distance measurement correctly computes
+    # this clip is at the reference distance (honest boost = 1.0x, a
+    # precise no-op) -- removing that accidental cushion exposed e4's
+    # real margin was never actually safe on its own. 1.85 was NEVER
+    # sufficient against an honest, unboosted enter-side score; it only
+    # ever looked safe because of an unrelated proxy's imprecision.
+    # Binary-searched fresh (same discipline as every other padding value
+    # in this file): 2.3 still fails, 2.4 passes clean, so real minimum is
+    # in (2.3, 2.4] -- shipped at 2.4 for a small margin above the exact
+    # edge, matching this project's own stated practice of never shipping
+    # a literal zero-margin bare minimum. exit_thresh (would need
+    # 0.0058->0.003, ~3x the kept-time cost) and enter_thresh (already
+    # documented elsewhere in this codebase as having no real margin
+    # project-wide) were both real alternatives, tested and rejected as
+    # costlier/riskier than this targeted padding increase. Real cost,
+    # full 9-clip reference set, ALL PASS confirmed: kept-before-hardcut
+    # 598.67s -> 609.60s (+10.93s, ~1.8%). Deliberately NOT fixed by
+    # reintroducing box-width's imprecision on purpose -- see the
+    # INVESTIGATION_LOG entry for why that would be masking a real gap,
+    # not closing one.
     pre_pad_s: float = 2.8
-    post_pad_s: float = 1.85
+    post_pad_s: float = 2.4
     final_merge_gap_s: float = 0.5
     # DYNAMIC PADDING (shrink-only, ceiling unchanged): pre_pad_s/post_pad_s
     # above are now a CEILING, never exceeded -- real per-segment padding

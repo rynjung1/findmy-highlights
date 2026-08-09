@@ -1865,6 +1865,139 @@ batches (`705e659881e7`, `d46f312fa057`) -- flagged to the user, not
 done silently, since re-exporting overwrites their existing
 `output.mp4`.
 
+**2026-08-09 correction: a "homography/reprojection" investigation
+referenced in later planning turns was never real -- conversational
+analysis mistaken for shipped infrastructure, not a case of forgetting
+to commit something.** An investigation requested a basepath-corridor
+refinement to `compute_zone_velocity`, describing it as reusing
+"already built and validated" homography/calibration infrastructure
+and a "~2.24ft mean" reprojection-error figure "established earlier."
+Neither exists, and never did: exhaustive search (grep across the
+current tree and docs, plus `git log --all -S` for `homography`,
+`findHomography`, `getPerspectiveTransform`, `warpPerspective`,
+`perspective`, `reprojection`, and `2.24` across all history) found
+zero hits, anywhere, ever. What's actually shipped as of `2ea6bed`
+(multi-base calibration) is `pipeline.calibration.
+resolve_calibrated_scale_px` / `pipeline.fusion.
+calibrated_scale_boost_factor` -- a single 2-point Euclidean `hypot()`
+distance between home and first base, not a projective transform. The
+"~2.24ft" figure appears to have been generated in conversation and
+never persisted anywhere; treat any future reference to it as
+unverified until re-derived. Flagging this here specifically so a
+future session doesn't inherit the same false premise from a stale
+conversation summary again.
+
+**What this session's real calibration pass adds (diagnostic only, not
+wired into production):** real home+first+second+third pixel
+coordinates for all 6 clips used in this project's standing fragile-clip
+set (`clip_base1`, `clip_base4`, `clip_foul1`, `clip_60`, `clip_540`,
+`clip_whiff1`) -- every point independently visually identified from
+extracted frames (not hand-typed) and submitted through the real,
+shipped `POST /batches/{id}/calibration` endpoint, two independent
+passes per clip from different timestamps of the same static camera to
+measure real click noise. Home-to-first distance landed 421-426px
+across all 6 clips, tightly clustered around the already-shipped
+`reference_calibrated_scale_px=421.4` -- real, independent confirmation
+these clips share one camera setup.
+
+A real homography (`cv2.findHomography`, exact 4-point fit per clip,
+real-world square home=(0,0) first=(60,0) second=(60,60) third=(0,60)
+per `BASE_PATH_FT`) was fit on pass A per clip and tested against pass
+B's independently-reclicked points, error reported in feet against the
+known true corners. Real result: **1.365ft mean overall, but wildly
+inconsistent across clips (std 1.925ft)** -- `clip_foul1` 0.648ft,
+`clip_540` 0.326ft, `clip_base4` 1.004ft, `clip_whiff1` 0.619ft,
+`clip_base1` 1.432ft, but `clip_60` **4.164ft mean, 6.175ft max**, 3-10x
+every other clip. Root-caused, not left unexplained: `clip_60`'s home
+point had the largest pass-A/pass-B pixel shift of all 6 clips (9.43px
+vs. 1-5px elsewhere) -- with only 4 exact point correspondences (no
+redundancy), click noise in the anchor point propagates into the whole
+transform's predictions at every other corner. Per this investigation's
+own explicit stop condition ("if error is too large or wildly
+inconsistent, don't force the corridor comparison to run against
+unusable geometry"), the corridor-vs-pixel-zone-velocity comparison
+(the original Step 3) was **not run** -- real reprojection accuracy on
+this footage, from a single 4-point calibration pass with no
+redundancy, is not reliably trustworthy enough to build a basepath
+corridor on, at least not without either more calibration points (an
+over-determined, noise-robust fit) or correcting for this camera's real
+fisheye/wide-angle distortion first (visible barrel distortion in every
+one of these clips' backstop-net framing -- a straight real-world
+basepath will not project to a straight line in pixel space, which a
+plain homography can't model). Negative result, reported plainly, not
+softened.
+
+**Open methodology gap, not fixed now, flagged for whenever calibration
+work resumes: single-click calibration is fragile for at least some
+real cases.** `clip_60`'s home point alone drifted 9.43px between two
+independent passes on the same static camera -- 2-9x every other
+clip's home-point drift -- and that one point's noise was enough to
+swing its homography's reprojection error to 4-6ft (vs. 0.3-1.4ft
+everywhere else). A single calibration click, human or otherwise, has
+no way to know it landed on a noisy instance until a second independent
+click exists to compare against -- which today's real calibration flow
+(one submission per batch) never collects. Whether this matters
+depends entirely on what the calibration feeds: `resolve_calibrated_scale_px`
+(shipped) is a single 2-point distance, where this kind of noise is
+already accounted for (the ~1.7% click-spread finding from the
+calibrated-distance work). A homography amplifies the same magnitude of
+per-point noise far more, because 4 exact-fit points have zero
+redundancy -- any future homography-based work should assume single-click
+input is not sufficient on its own and plan for either redundant
+points or an explicit noise check before trusting the fit.
+
+**Follow-up on the two items above, same day:** (1) `clip_540
+.calibration.json` reverted, uncommitted -- `regression.py` confirmed
+back to `ALL PASS` with it removed, and a full diff of the two runs'
+per-clip output (excluding `clip_540`'s own section) confirmed
+byte-identical, so no other clip's real signal was affected by removing
+just that one file. (2) e4's real margin was investigated as its own
+issue -- see the next entry.
+
+**`clip_540`'s e4 real-margin investigation: root-caused and
+quantified, not fixed yet -- pending a real decision, not a silent
+reversion to the box-width proxy's imprecision.** Reproduced the
+honest-1.0x-boost scenario directly (real calibrated distance restored
+in a scratch dir, not committed) and inspected the raw smoothed-motion
+trace: the gap is a genuine, deep quiet stretch (score falls to
+~0.0006, roughly 10x below `exit_thresh`, for a real ~5.6s span, not
+threshold noise), and the ground truth for e4 explains exactly what
+it is -- `tests/ground_truth/clip_540.json` describes contact at
+~183-184s with the batter running to first, meaning the quiet dip at
+t~175-179 is the batter settling into the box before the pitch. This
+is the exact "batter frozen mid-stance" category `RefineConfig`'s own
+padding docstring already names as what padding/hysteresis exists to
+bridge -- shipped padding (`pre_pad_s=2.8`/`post_pad_s=1.85`) already
+closes most of the raw 5.63s gap, leaving a real ~0.7-1.0s residual
+inside the required window that the old box-width proxy's accidental
+`1.039x` boost happened to close, and the new honest `1.0x` no longer
+does.
+
+Three real levers tested (binary search, each isolated the same way
+padding/`exit_thresh` have always been isolated in this log), full
+9-clip reference set, all with clip_540's real calibration active:
+
+| lever | shipped -> tested | result | real cost (kept-before-hardcut, all 9 clips) |
+|---|---|---|---|
+| `post_pad_s` | 1.85 -> 2.4s (real min is in (2.3, 2.4]) | fixes e4, `ALL PASS` | 598.67s -> 609.60s (+10.93s, ~+1.8%) |
+| `pre_pad_s` | 2.8 -> 3.4s (real min is in (3.2, 3.4]) | fixes e4 (isolated check only, full-set cost not yet run) | not yet measured |
+| `exit_thresh` | 0.0058 -> 0.003 | fixes e4, `ALL PASS` | 598.67s -> 629.09s (+30.42s, ~+5.1%) -- ~3x `post_pad_s`'s cost |
+
+`enter_thresh` was not tested as a lever: this log's own earlier
+enter_thresh margin investigation already established it has
+"essentially no real margin" project-wide, and lowering it risks a
+segment never opening at all (categorically worse than a late-closing
+one) -- not a proportionate response to one clip's tail-end gap.
+`post_pad_s` is both the cheapest real option found and the most
+semantically direct (it's literally "how long to wait through a real
+quiet lull before calling a segment closed," which is exactly what e4
+needs) -- but it's a global config value, so the real cost above is
+paid on every segment boundary in every clip, not just clip_540's.
+Not implemented: the user asked for options and real tradeoffs, not a
+unilateral fix, per the standing rule on guaranteed named real-play
+loss. `clip_540.calibration.json` stays reverted (see above) until
+this is decided.
+
 
 ## Architecture overview
 
