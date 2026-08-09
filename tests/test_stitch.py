@@ -407,7 +407,7 @@ def test_plan_stitch_does_not_force_reencode_when_hard_cut_gap_has_no_real_overl
     plan = plan_stitch(m, tmp_path, prober=lambda p: vp(path=str(p), start_offset=4.266),
                        keyframe_prober=lambda p: keyframes)
     assert [(j.start_s, j.end_s) for j in plan.jobs] == [(3.873, 40.0), (60.0, 80.0)]
-    assert all(j.force_reencode is False for j in plan.jobs)
+    assert plan.reencode is False
 
 
 def test_plan_stitch_merges_overlapping_spans_on_copy_path_not_reencode(tmp_path):

@@ -204,22 +204,18 @@ class SpanJob:
     # source_path. Defaults to 0 so every existing caller/test that
     # constructs a SpanJob directly (single-file, index 0) is unaffected.
     source_file_index: int = 0
-    # True when this job sits on the far side of a hard-cut boundary
-    # (see pipeline.manifest.hard_cut_boundary_starts_by_file) that
-    # merge_overlapping_spans found real overlap risk at -- rather than
-    # bridge the cut away (the original bug), this job gets extracted via
-    # a real per-file re-encode (frame-exact -ss, no keyframe-snap-back)
-    # even though the overall plan otherwise stream-copies. Every other
-    # span in the same plan is unaffected. Defaults to False so every
-    # existing caller/test is unaffected.
-    force_reencode: bool = False
-    # (width, height, fps) of THIS job's own source file, used only when
-    # force_reencode=True on an otherwise stream-copy plan -- a single-
-    # file passthrough re-encode needs a valid target for
-    # build_extract_cmd, but there's no cross-file normalization to do
-    # (see choose_target_params, which is for the whole-plan re-encode
-    # case). None unless force_reencode is True.
-    own_target: tuple | None = None
+    # Removed (2026-08-08): a per-job force_reencode/own_target pair used
+    # to exist here for forcing just one risky span to re-encode. That
+    # was the root cause of the fourth real stitch bug (cd345c9, see this
+    # module's docstring) -- a per-span override that doesn't also
+    # promote the whole plan lets a force-reencoded job's libx264/AAC
+    # output sit next to genuinely stream-copied spans in the same
+    # concat, mixing codecs. The fix replaced per-job forcing with a
+    # whole-plan promotion (any_forced -> StitchPlan.reencode in
+    # plan_stitch); every span in a plan is now uniformly one codec or
+    # the other, never mixed. Do not re-add a per-job override here
+    # without also making it unconditionally promote plan.reencode --
+    # that's the exact shape of the original bug.
 
 
 @dataclass
@@ -771,18 +767,11 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
         keyframes_by_path = {}
         for job in plan.jobs:
             out = work_dir / job.clip_name
-            # a job can be individually forced to re-encode (a hard-cut
-            # boundary with real overlap risk, see plan_stitch) even when
-            # the overall plan otherwise stream-copies -- own_target is
-            # this job's own file's native params, since there's no
-            # cross-file normalization to do for a single-file passthrough
-            job_reencode = plan.reencode or job.force_reencode
-            job_target = plan.target if plan.reencode else job.own_target
-            cmd = build_extract_cmd(job, out, job_reencode, job_target)
+            cmd = build_extract_cmd(job, out, plan.reencode, plan.target)
             runner(cmd)
             clip_paths.append(out)
 
-            if job_reencode:
+            if plan.reencode:
                 # every frame is actually decoded and re-encoded starting
                 # at the requested time -- no keyframe-snap slack
                 snapped_source_local_start = job.start_s
