@@ -1998,6 +1998,126 @@ unilateral fix, per the standing rule on guaranteed named real-play
 loss. `clip_540.calibration.json` stays reverted (see above) until
 this is decided.
 
+**2026-08-10: a second fabricated-data incident risk pattern confirmed
+this session, in two separate forms, both caught before anything was
+built on them -- reinforcing standing practice, not a one-off.** (1)
+Uncommitted `reference_clips/*.calibration.json` files (modified
+`clip_base1`/`clip_base4`, new `clip_60`/`clip_foul1`/`clip_whiff1`)
+carried a `created_from` field citing "the two-pass reprojection-error
+methodology" in this very doc -- plausible-sounding, but `git log --all`
+showed zero history for the three new files and the geometry didn't even
+match the real over-determined methodology being asked for. Reverted
+before use (git-clean on the tracked two, deleted the untracked three),
+confirmed via a clean `pytest` + `regression.py` baseline. (2) Separately,
+a request referenced "tonight's paid-VLM test," "27 known enter-side
+disagreements," and a "0.31%-margin band" -- none of which trace to
+anything in this repo (`docs/INVESTIGATION_LOG.md` names a real but
+different 16/11/9-record set from a prior session; `ANTHROPIC_API_KEY` is
+not configured anywhere; zero files anywhere in the repo had been
+modified in the preceding 6 hours). Flagged plainly instead of
+inventing a matching case set; the user confirmed and the work was
+rescoped against real, live-rederived data instead (see below). Both
+caught the same way: check the specific claim against real repo state
+(`git log`, `git diff`, file existence, live re-derivation) before
+acting on it, not against how plausible it reads.
+
+**Over-determined calibration for corridor geometry -- CLOSED, real
+negative result, two distinct root causes found.** Following up the
+single-pass homography result above (1.365ft mean, `clip_60` a 4.164ft/
+6.175ft outlier blamed on one noisy click), 30 real independent
+calibration passes were collected this session -- 5 per clip, each a
+fresh visual read from a different real timestamp, submitted through the
+real `POST /batches/{id}/calibration` endpoint (a same-origin diagnostic
+page, `scripts/calibration_multipass_diagnostic.html`, plus an additive
+`?at_seconds=` override on `GET /batches/{id}/preview.jpg` -- both real,
+tested, and safe to delete later; not linked from the production
+frontend) -- across all 6 target clips (`clip_base1`, `clip_base4`,
+`clip_foul1`, `clip_60`, `clip_540`, `clip_whiff1`). A least-squares
+homography (`cv2.findHomography`, `method=0`, over all redundant
+correspondences per clip) was fit per clip, with leave-one-pass-out
+cross-validation for a real, held-out reprojection-error estimate.
+
+**Redundancy did not fix it -- the overall picture got worse, not
+better: 2.331ft mean / 17.174ft max across all 6 clips, vs. 1.365ft mean
+single-pass.** Two real, distinct root causes, not one:
+
+1. **A universal problem in every one of the 6 clips, not just
+   `clip_60`.** Second base's reprojection error is 3-9x every other
+   point's, in every single clip (e.g. `clip_base4`: plate 0.115ft,
+   first 1.534ft, third 2.173ft, second **3.263ft**) -- confirmed
+   in-sample, not just LOO, so it isn't a generalization artifact.
+   Second base is the farthest, most obliquely-angled corner from this
+   backstop-mounted camera -- consistent with the barrel/fisheye
+   distortion already flagged above ("a plain homography can't model")
+   -- and it caps how good *any* clip's fit can get, regardless of click
+   count.
+2. **`clip_60` specifically has real camera drift mid-clip, confirmed
+   with real pixel evidence, not inferred from clicks alone.**
+   `cv2.phaseCorrelate` on the actual preview frames showed `clip_base1`
+   essentially frozen between timestamps 23s apart (shift <1px, high
+   confidence), while `clip_60` showed a real, internally-consistent
+   ~15-20px scene shift between every pair of sampled timestamps (the
+   directly-measured 50s->90s shift matched what chaining the other two
+   measurements predicted, ruling out correlation noise). Fitting only
+   on the temporally-converged later passes (90-170s) and testing
+   in-sample gave errors comparable to the *good* clips (plate/first/
+   third 0.13-1.0ft); testing that same fit against the scattered early
+   passes (15s/50s) gave 6-7ft mean / 13-15ft max. Averaging
+   temporally-inconsistent frames into one homography doesn't reduce
+   noise, it blends two different camera geometries, which is worse than
+   either alone.
+
+**"More redundant clicks" is now a fully tested, honestly negative
+result -- don't revisit without addressing distortion correction or a
+per-window/per-segment homography first.** A basepath corridor is
+realistically a few feet wide; second base alone carries 3-9ft
+systematic error in every clip before `clip_60`'s drift problem even
+enters the picture. The corridor-vs-pixel-zone comparison (the original
+Step 3, still not run) stays not-run -- real reprojection accuracy is
+not there, and this session closes the "just add redundancy" branch of
+trying to get it there.
+
+**Local open-weight VLM re-test on current hard cases -- small positive
+signal, not conclusive.** The real target category from the
+`sustained_ambient_xclip_check.py` "presence without action" finding
+above has shrunk since that entry was written: live re-derivation
+against today's larger labeled dataset (34 real labeled enter-type
+records now, not 16) found 25 current disagreements (not 11) but only
+**3** confirmed "sustained ambient, no batter visible" cases (not 9) --
+`bc_121f61ed3d15`, `bc_9bcbb8332ff4`, `bc_eaeb1bcef9e4`. The other 22
+disagreements from the old 11 now fall into a different bucket
+("occupancy present somewhere in the wide window"), already explained a
+different way; the debounce/occupancy work already absorbed most of the
+category this test targets. Re-ran `scripts/local_vlm_feasibility_check.py`
+(Qwen2-VL-2B-Instruct, `--prompt-mode original` -- `reasoning_first` is
+the mode already documented above to collapse into an always-
+`ACTIVE_SWING` constant classifier at full scale) against just these 3:
+**3/3 correct.** Because all 3 share one ground-truth label, a trivial
+always-DOWNTIME classifier would also score 3/3 here -- checked directly
+against 4 real_action-labeled clips from the same dataset, which scored
+3/4 with genuine `ACTIVE_SWING` predictions, ruling out that collapse.
+**n=3 is too small to reopen the real full-scale "insufficient"
+conclusion** (71.8% accuracy / 56.4% real_action recall on the full
+149-record set, unchanged) -- treat this as one encouraging data point
+on a category that's gotten thinner and more marginal since it was
+first identified, not as new evidence the local model works. Local
+compute only, zero API cost, nothing wired into `pipeline/` or
+`backend/`.
+
+**Paid-VLM cost-bounded verification -- still scoped, not yet run, no
+change from prior status.** Blocked on Anthropic account billing (no
+`ANTHROPIC_API_KEY` configured; user does not want to add funds right
+now) -- a real, standing blocker, not a technical one. No fresh
+feasibility math was done this session (a request referencing specific
+numbers here didn't trace to anything real, per the fabricated-data note
+above). No scripted paid-VLM check currently exists in this repo
+(confirmed by search) -- if one existed in an earlier session it hasn't
+persisted, matching this thread's own prior warning not to assume it
+does. If revisited: the case set and thresholds need to be re-derived
+fresh from real repo data at that time, the same way the local-VLM
+target category above had to be re-derived fresh rather than trusted
+from a stale count.
+
 
 ## Architecture overview
 
