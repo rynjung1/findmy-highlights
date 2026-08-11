@@ -1,0 +1,40 @@
+{
+  "id": "bc_279356051547",
+  "created_at": "2026-08-07T18:14:36.436537+00:00",
+  "source": {
+    "video_path": "/Users/ryanjung/Desktop/findmy-highlights/uploads/fb07ea71f4b3/clip_300.mkv",
+    "source_file": "clip_300.mkv",
+    "batch_id": "fb07ea71f4b3"
+  },
+  "window": {
+    "start_s": 164.85216397657476,
+    "end_s": 164.85216397657476
+  },
+  "candidate_type": "boundary_crossing",
+  "pipeline_decision": "enter",
+  "margin": 3.933209045366842e-05,
+  "features_at_label_time": {
+    "score": 0.0060393320904536685,
+    "threshold": 0.006,
+    "kind": "enter",
+    "pose": {
+      "peak_displacement_px": 19.825679758432322,
+      "min_visibility": 0.10775025188922882,
+      "n_frames_with_pose": 144
+    },
+    "audio": {
+      "peak_amplitude": 0.14098990617288712,
+      "peak_t": 165.09,
+      "rise_time_s": 0.03499999999999659
+    },
+    "xclip": {
+      "p_swinging": 0.8004319071769714,
+      "pos_prompt": "a baseball player swinging a bat",
+      "neg_prompt": "baseball players standing idle"
+    }
+  },
+  "config_hash": "d41e1f40a3c05a9b",
+  "label": null,
+  "labeled_at": null,
+  "note": null
+}
