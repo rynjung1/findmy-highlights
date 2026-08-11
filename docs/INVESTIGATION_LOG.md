@@ -2118,6 +2118,86 @@ fresh from real repo data at that time, the same way the local-VLM
 target category above had to be re-derived fresh rather than trusted
 from a stale count.
 
+**Same night, follow-up: local VLM re-tested against the FULL current
+disagreement set (all candidate types), not just the legacy 3-case
+category above -- confirms the same "insufficient" picture, closes the
+avenue for good.** The 3-case result above only covered one narrow
+category (enter-type, sustained-ambient). Queried
+`training_data/reviews/` for every current real disagreement (pipeline's
+final decision vs. human label) across all three candidate types present
+(`boundary_crossing`, `hard_cut_dip`, `control`), re-derived live against
+the real shipped pipeline the same way as above.
+
+**A real methodology bug caught before trusting the number, same
+discipline as everything else tonight.** The first pass gave 105/149
+(70.5%) disagreements -- implausible against a pipeline that passes
+`regression.py`'s `ALL PASS` gate. Root cause: the reconstruction
+(adapted from `sustained_ambient_xclip_check.py`, which only ever checks
+enter-type records) never called `apply_hard_cuts()`, the real final
+step `pipeline.run.process_video` always applies (`pipeline/run.py:209`)
+-- without it, `hard_cut_dip` candidates never actually get excised from
+the reconstructed "final kept" set, which alone inflated that one
+category from a real 36/88 to a false 70/88. Fixed and re-run. Corrected
+real count: **78 of 149 labeled records (52.3%)** --
+`boundary_crossing`/enter 24, `boundary_crossing`/exit 17, `control`/kept
+1, `hard_cut_dip`/cut 36. A >50% disagreement rate against a shipped,
+tested pipeline sounds alarming in isolation but isn't: `pipeline.
+review`'s own selection rule is "lowest margin first, most borderline"
+(see module docstring) -- this queue is deliberately built from the
+hardest cases, not a representative sample.
+
+**Local VLM (`Qwen2-VL-2B-Instruct`, `--prompt-mode original`, same
+4-frame/640px setup) against all 78: 56/78 correct (71.8%) -- no
+category clears a usable bar:**
+
+| category | accuracy |
+|---|---|
+| `boundary_crossing`/enter | 18/24 (75.0%) |
+| `boundary_crossing`/exit | 12/17 (70.6%) |
+| `hard_cut_dip`/cut | 25/36 (69.4%) |
+| `control`/kept | 1/1 (n=1, not meaningful) |
+| by ground truth: downtime | 39/51 (76.5%) |
+| by ground truth: real_action | 17/27 (63.0%) |
+
+Every category with a meaningful n clusters within ~6 points of the
+overall 71.8% -- no standout.
+
+**Bidirectional sanity check, and a real, slightly counterintuitive
+finding: the model's accuracy doesn't track case difficulty at all.** A
+10-case stratified sample from the 71 records the pipeline already gets
+*right* (the "easy" cases) scored only **4/10 (40%)** -- worse than the
+71.8% on the hard disagreement set. Both `ACTIVE_SWING` and `DOWNTIME`
+predictions appear, both correct and wrong, ruling out a degenerate
+constant-output collapse the same way the 3-case test's bidirectional
+check did. But the direction of the gap is real evidence against an
+easy-sample-inflation explanation too: if anything the "hard" set scored
+better than the "easy" one. The honest read is that this model's ~40-75%
+accuracy band on this task is closer to noise around a middling
+capability ceiling than a signal that tracks anything about how
+borderline a given case is.
+
+**Final verdict: the local-VLM avenue is CLOSED for good, confirmed
+across every current disagreement category, not just at the original
+full scale.** The one earlier positive signal (3/3 on the legacy
+enter-type sustained-ambient category, 9-case-turned-3-case) stands as
+real, not contradicted by this broader test -- but it's isolated to that
+one now-thin, now-marginal category and does not generalize to
+`boundary_crossing`/exit or `hard_cut_dip`, which make up the bulk of
+today's real disagreement set. Don't revisit the local-VLM path again on
+this project's current label set without either a materially different
+model/prompting approach or new labeled data that changes the picture.
+
+**As of tonight, every free/local downtime-reduction avenue has been
+tested and closed honestly: sliding-window classification, joint audio+
+visual fusion, over-determined calibration for corridor geometry, and
+now the local open-weight VLM across its full real hard-case surface.**
+The two paths that remain real are a paid-VLM cost-bounded check
+(blocked on Anthropic account billing, not a technical blocker) and lens-
+distortion correction for the corridor-geometry homography (a real
+engineering task, not yet scoped). Both require real cost -- money or
+engineer time -- to pursue further. Nothing more is available to try for
+free right now.
+
 
 ## Architecture overview
 
