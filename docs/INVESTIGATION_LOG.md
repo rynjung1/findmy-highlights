@@ -2198,6 +2198,72 @@ engineering task, not yet scoped). Both require real cost -- money or
 engineer time -- to pursue further. Nothing more is available to try for
 free right now.
 
+**Same night, a new thread opened and closed: practice-swing/warm-up
+footage getting kept as live segments -- real repro, real generalization
+test, honest negative result on the main hypothesis.** User-reported real
+repro: `clip_300.mkv` 0-20s, currently kept by the shipped pipeline.
+Investigated from real frames first, not theory.
+
+**1. Real repro confirmed by direct frame inspection.** Pulled frames
+across 0-20s and looked: no pitcher windup/delivery, no ball, no catcher,
+and -- the clearest tell -- **multiple people holding bats simultaneously
+in different spots** (one bundling 2-3 bats together, a recognizable
+warm-up technique), people milling near the backstop rather than in
+fielding positions. Real pre-game batting-practice activity, not a live
+at-bat.
+
+**2. Real signal check: raw motion/enter_score doesn't distinguish it**
+(comparable magnitude to a confirmed real at-bat elsewhere in the same
+clip -- both repeatedly cross `enter_thresh=0.006`), **but plate
+zone-velocity (already computed via `pipeline.fusion.
+compute_zone_velocity`, currently unused on the enter side) initially
+looked promising**: flat 0.000 throughout clip_300's practice stretch and
+all 3 of today's confirmed sustained-ambient "no batter visible" cases
+from `full_game.mkv`, vs. a clear 0.665 spike at real contact in
+clip_300's own confirmed at-bat (ground truth event e2), and 7 of 8
+tested real at-bat windows across the 6 target clips landing 0.33-1.11.
+
+**3. CLOSED as a blanket enter-side gate -- three real, independent
+failure modes found on generalization testing, not one:**
+- **False positive:** `bc_0d12dcc4d70d` (a real, human-labeled `downtime`
+  disagreement) spikes zone-velocity to 0.65 -- comparable to genuine
+  contact. Real frames show why: a batter walking briskly away from the
+  plate after their at-bat ended. Zone-velocity measures motion
+  *magnitude* in the zone, not "is this a swing" specifically -- it isn't
+  swing-selective on its own.
+- **False negative, disqualifying on its own:** `clip_60`'s real,
+  required taken-pitch window (`[120,127]`, ball visible, no swing) peaks
+  at only **0.08** -- an order of magnitude below every swing-containing
+  window checked. A strict gate here would risk cutting confirmed real
+  content, directly against this project's standing no-guaranteed-
+  real-play-loss rule.
+- **Doesn't generalize to the general practice-swing problem:**
+  `clip_60`'s own ground truth already names a `required: false`
+  "possible practice swings ~174" moment -- checked its real
+  zone-velocity: peaks at **0.61**, indistinguishable from genuine
+  contact. Clip_300's apparent success is explained by *where* the
+  practice swinging happened (spatially outside the plate zone, near the
+  backstop), not by any property that generalizes to practice swings
+  that happen near the plate.
+
+**4. A narrower idea surfaced but explicitly NOT tested:** near-zero
+occupancy *and* near-zero zone-velocity together, sustained over a wide
+window, as corroborating evidence for the narrow "truly nothing
+happening" case specifically (matches the 3 confirmed sustained-ambient
+cases and clip_300's specific geometry) -- alongside the existing
+occupancy check, not replacing it. Different, much smaller scope than a
+blanket gate. Flagged as a possible future direction, not proposed as
+ready, no cost measured.
+
+**5. A real documentation bug found along the way, not fixed in this
+pass:** `tests/ground_truth/clip_300.json`'s prose `notes` field ("one
+long at-bat... from t=0 to roughly t=66") is misleading against its own
+itemized `events` -- no event covers t=0-14 at all, and the first event
+touching the window (`e1`, `[14,26]`) is marked `required: false` with
+its own hedge ("pitches likely but no ball confirmed"). Worth a
+follow-up doc correction later so the loose prose doesn't mislead someone
+who doesn't check the itemized events.
+
 
 ## Architecture overview
 
