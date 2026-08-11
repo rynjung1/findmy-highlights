@@ -317,6 +317,35 @@ def test_preview_jpg_uses_a_frame_past_the_start(tmp_path):
             " -- preview frame wasn't actually offset past the start")
 
 
+def test_preview_jpg_at_seconds_overrides_default_offset(tmp_path):
+    """`at_seconds` is additive: omitting it must keep today's fixed-offset
+    behavior (blue), but passing it must actually change which real frame
+    comes back (red, from early in the clip) -- not just be accepted and
+    ignored."""
+    app = make_app(tmp_path)
+    clip = tmp_path / "src.mp4"
+    subprocess.run([
+        "ffmpeg", "-v", "error",
+        "-f", "lavfi", "-i", "color=c=red:s=64x48:d=1:r=5",
+        "-f", "lavfi", "-i", "color=c=blue:s=64x48:d=2:r=5",
+        "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0",
+        "-y", str(clip)], check=True)
+
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
+
+        r = client.get(f"/batches/{batch_id}/preview.jpg", params={"at_seconds": 0.2})
+        assert r.status_code == 200
+
+        import cv2
+        import numpy as np
+        decoded = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
+        b, g, r_channel = decoded[24, 32].tolist()
+        assert r_channel > 100 and b < 100, (
+            f"expected the red portion of the clip, got BGR=({b},{g},{r_channel})"
+            " -- at_seconds override wasn't actually applied")
+
+
 # ---- calibration ----
 
 def test_get_calibration_before_set_404(tmp_path):

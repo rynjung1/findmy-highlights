@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Multi-pass calibration diagnostic</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; }
+  #wrap { position: relative; display: inline-block; border: 1px solid #ccc; }
+  #frame { max-width: 100%; cursor: crosshair; display: block; }
+  .marker { position: absolute; width: 16px; height: 16px; border-radius: 50%; border: 3px solid; pointer-events: none; box-shadow: 0 0 0 1px white; }
+  .row { margin: 8px 0; }
+  button.sel { outline: 3px solid #333; }
+  pre { background: #f4f4f4; padding: 8px; max-height: 240px; overflow: auto; }
+  .err { color: #b00020; font-weight: bold; }
+  input[type=text], input[type=number] { font-size: 14px; padding: 4px; }
+</style>
+</head>
+<body>
+<h2>Multi-pass calibration diagnostic (not the production UI)</h2>
+<p>Real backend, real <code>POST /batches/{id}/calibration</code> submissions, same coordinate-scaling logic as the shipped calibration screen. Each "Load frame" pulls a genuinely different real frame via <code>?at_seconds=</code>.</p>
+
+<div class="row">
+  batch_id: <input type="text" id="batchId" size="20">
+  seconds: <input type="number" id="atSeconds" step="0.5" value="20">
+  <button onclick="loadFrame()">Load frame</button>
+  pass count this session: <span id="passCount">0</span>
+</div>
+
+<div class="row">
+  <button id="btn-plate" class="sel" onclick="select('plate')">Home plate</button>
+  <button id="btn-first" onclick="select('first')">First base</button>
+  <button id="btn-second" onclick="select('second')">Second base</button>
+  <button id="btn-third" onclick="select('third')">Third base</button>
+  <button onclick="clearSelected()">Clear selected</button>
+</div>
+
+<div id="wrap">
+  <img id="frame" onclick="handleClick(event)">
+</div>
+
+<div class="row">
+  <button onclick="submitPass()">Submit pass (real POST)</button>
+</div>
+<div id="error" class="err"></div>
+<pre id="log"></pre>
+
+<script>
+const COLORS = { plate: '#e53935', first: '#1e88e5', second: '#43a047', third: '#fb8c00' };
+let selected = 'plate';
+let points = {};
+let passCount = 0;
+
+function select(key) {
+  selected = key;
+  for (const k of Object.keys(COLORS)) {
+    document.getElementById('btn-' + k).classList.toggle('sel', k === key);
+  }
+}
+select('plate');
+
+function clearSelected() {
+  delete points[selected];
+  redrawMarkers();
+}
+
+function loadFrame() {
+  const batchId = document.getElementById('batchId').value.trim();
+  const atSeconds = document.getElementById('atSeconds').value;
+  if (!batchId) { setError('enter a batch_id first'); return; }
+  points = {};
+  redrawMarkers();
+  const img = document.getElementById('frame');
+  img.src = `http://localhost:8420/batches/${batchId}/preview.jpg?at_seconds=${atSeconds}&_=${Date.now()}`;
+  setError('');
+}
+
+function handleClick(e) {
+  const img = document.getElementById('frame');
+  const rect = img.getBoundingClientRect();
+  if (!img.naturalWidth || !img.naturalHeight) {
+    setError('image not loaded yet');
+    return;
+  }
+  const boxRatio = rect.width / rect.height;
+  const naturalRatio = img.naturalWidth / img.naturalHeight;
+  if (Math.abs(boxRatio - naturalRatio) / naturalRatio > 0.01) {
+    setError('image is letterboxed -- click coords would be wrong, do not submit');
+    return;
+  }
+  const displayX = e.clientX - rect.left;
+  const displayY = e.clientY - rect.top;
+  const scaleX = img.naturalWidth / rect.width;
+  const scaleY = img.naturalHeight / rect.height;
+  points[selected] = {
+    native: { x: displayX * scaleX, y: displayY * scaleY },
+    display: { x: displayX, y: displayY },
+  };
+  setError('');
+  redrawMarkers();
+}
+
+function redrawMarkers() {
+  const wrap = document.getElementById('wrap');
+  wrap.querySelectorAll('.marker').forEach(el => el.remove());
+  for (const [key, p] of Object.entries(points)) {
+    const el = document.createElement('div');
+    el.className = 'marker';
+    el.style.borderColor = COLORS[key];
+    el.style.left = (p.display.x - 8) + 'px';
+    el.style.top = (p.display.y - 8) + 'px';
+    wrap.appendChild(el);
+  }
+}
+
+function setError(msg) {
+  document.getElementById('error').textContent = msg;
+}
+
+async function submitPass() {
+  const batchId = document.getElementById('batchId').value.trim();
+  const atSeconds = document.getElementById('atSeconds').value;
+  if (!points.plate) { setError('mark home plate first'); return; }
+  const form = new FormData();
+  form.append('x', points.plate.native.x);
+  form.append('y', points.plate.native.y);
+  for (const name of ['first', 'second', 'third']) {
+    if (points[name]) {
+      form.append(`${name}_x`, points[name].native.x);
+      form.append(`${name}_y`, points[name].native.y);
+    }
+  }
+  try {
+    const res = await fetch(`http://localhost:8420/batches/${batchId}/calibration`, {
+      method: 'POST', body: form,
+    });
+    const body = await res.json();
+    if (!res.ok) { setError(JSON.stringify(body)); return; }
+    passCount += 1;
+    document.getElementById('passCount').textContent = passCount;
+    const record = { batch_id: batchId, at_seconds: parseFloat(atSeconds), submitted_at: new Date().toISOString(), calibration: body };
+    document.getElementById('log').textContent = JSON.stringify(record, null, 2) + '\n\n' + document.getElementById('log').textContent;
+    setError('pass ' + passCount + ' submitted -- tell Claude to archive it now, then load a new frame at a different timestamp for the next pass.');
+  } catch (err) {
+    setError(String(err));
+  }
+}
+</script>
+</body>
+</html>

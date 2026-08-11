@@ -285,17 +285,39 @@ def create_app(uploads_root=None, run_in_background=None,
         return {"batch_id": batch_id, **job}
 
     @app.get("/batches/{batch_id}/preview.jpg")
-    def get_preview(batch_id: str):
+    def get_preview(batch_id: str, at_seconds: float | None = None):
+        """`at_seconds`, if given, overrides grab_preview_frame's fixed
+        20.0s default -- purely additive, existing callers (the real
+        frontend calibration UI) omit it and are unaffected. Added for
+        the multi-pass redundant calibration diagnostic, which needs
+        genuinely different real frames of the same clip per pass."""
         bdir = _batch_dir(batch_id)
         names = _batch_file_names(bdir)
         try:
-            frame = grab_preview_frame(bdir / names[0])
+            if at_seconds is not None:
+                frame = grab_preview_frame(bdir / names[0], at_seconds=at_seconds)
+            else:
+                frame = grab_preview_frame(bdir / names[0])
         except ValueError as e:
             raise HTTPException(400, str(e))
         ok, buf = cv2.imencode(".jpg", frame)
         if not ok:
             raise HTTPException(500, "failed to encode preview frame")
         return Response(content=buf.tobytes(), media_type="image/jpeg")
+
+    @app.get("/diagnostics/calibration-multipass")
+    def calibration_multipass_diagnostic():
+        """Serves scripts/calibration_multipass_diagnostic.html same-origin
+        so it can call the real /batches/{id}/calibration and preview.jpg
+        endpoints without needing CORS enabled. Diagnostic-only tool for
+        the over-determined multi-pass calibration investigation -- not
+        linked from the real frontend, not part of the shipped user
+        flow. Safe to delete once that investigation is done."""
+        path = (Path(__file__).resolve().parent.parent / "scripts"
+               / "calibration_multipass_diagnostic.html")
+        if not path.exists():
+            raise HTTPException(404, "diagnostic page not present")
+        return FileResponse(path, media_type="text/html")
 
     @app.get("/batches/{batch_id}/calibration")
     def get_calibration(batch_id: str):
