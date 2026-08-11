@@ -2264,6 +2264,79 @@ its own hedge ("pitches likely but no ball confirmed"). Worth a
 follow-up doc correction later so the loose prose doesn't mislead someone
 who doesn't check the itemized events.
 
+**Same night, follow-up: two more real angles tested for cutting
+practice-swing time, both closed -- three independent approaches
+attempted tonight, all three failed for different concrete reasons.**
+
+**1. Zone-velocity as an enter-side gate -- CLOSED.** Initially promising
+on clip_300 (flat 0.000 during the practice stretch, clear spikes at real
+contact). Three real, independent failure modes found on generalization
+testing, any one of which is disqualifying on its own:
+- **False positive:** a real, human-labeled `downtime` disagreement
+  (`bc_0d12dcc4d70d`) spikes zone-velocity to 0.65 -- real frames show a
+  batter walking briskly away from the plate after their at-bat ended,
+  not swinging. Zone-velocity measures motion magnitude in the zone, not
+  "is this a swing."
+- **False negative, disqualifying under the standing no-real-play-loss
+  rule:** `clip_60`'s real, required taken-pitch window (`[120,127]`,
+  ball visible, no swing) peaks at only 0.08 -- an order of magnitude
+  below every swing-containing window tested. A strict gate would risk
+  cutting confirmed real content.
+- **Doesn't generalize to the general problem:** `clip_60`'s own
+  documented "possible practice swings ~174" case (`required: false`)
+  spikes to 0.61 -- indistinguishable from real contact. Clip_300's
+  apparent success was explained by *where* its practice swinging
+  happened (outside the plate zone, near the backstop), not by any
+  swing-specific property of the signal itself.
+
+**2. Multiple-simultaneous-batting-postures via RF-DETR bat detection --
+CLOSED.** Technically free: `pipeline/detection.py`'s `model.predict()`
+already computes all 80 COCO classes per frame, including class 39
+("baseball bat") -- the code just discards everything but `person`. But
+tested directly on real frames, it failed on its own origin clip: at
+clip_300's confirmed real at-bat instant (t=61), the two bats RF-DETR
+detected were a bat propped in a rack against the fence (a flat,
+22px-tall box, clearly not held) and an on-deck player's bat -- **not the
+actual batter's bat**, which wasn't detected at all in that frame (likely
+motion blur on a thin, fast-moving object). Bat counts were comparable
+during the practice stretch (0-4/frame) and the real at-bat (1-3/frame)
+-- real structural clutter (racked bats, on-deck players who legitimately
+hold bats during real at-bats too) swamps the signal. Raw bat count does
+not distinguish practice from real play on this footage.
+
+**3. Pre-first-real-play window via `atbat_start_times` -- CLOSED.** The
+existing mechanism (already shipped, used for closing play-extensions) is
+built to detect a new at-bat starting after a *previous* one vacates and
+the plate re-occupies -- not "first real action from a cold clip start."
+Real fires computed across clip_300 and all 6 target clips, cross-checked
+against ground truth, found two red flags:
+- `clip_540`: first fire (44.04) lands essentially exactly at its
+  required event's start (44) -- a ~0.04s margin, the same kind of
+  fragile-margin pattern already documented for this clip (the e4/
+  `post_pad_s` investigation earlier this project).
+- **`clip_whiff1`, disqualifying on its own:** first fire (17.02) lands
+  *after* the required swing-and-miss event's actual swing (14.5-14.8,
+  window `[12,18]`) -- a stricter pre-fire cutting rule would cut into
+  the swing itself. Root cause: this clip's batter was already
+  present/settled from early on with no preceding vacancy-then-arrival
+  transition for the detector to key off, exactly the structural mismatch
+  expected from a tool built for intra-clip at-bat transitions, not a
+  cold-start first-action detector. No 9-clip regression cost was
+  measured, per standing practice of not costing an already-disqualified
+  mechanism.
+
+**Honest overall bottom line: three independent, real approaches tested
+tonight, all three failed for different concrete reasons -- an imprecise
+motion signal, insufficient object-detection granularity on this
+footage, and a wrong-tool timing heuristic -- not for lack of effort.**
+Two real, uncosted options remain if this gets revisited: pose-associated
+bat-posture detection (using existing MediaPipe keypoints to confirm
+active holding/swinging rather than raw bat presence) and a
+purpose-built cold-start real-action detector, distinct from
+`atbat_start_times`. Neither was scoped or attempted tonight.
+Practice-swing/walkup cutting remains an open problem with no safe,
+cheap solution found so far.
+
 
 ## Architecture overview
 
