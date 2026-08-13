@@ -141,7 +141,16 @@ def run_export_job(batch_dir, job: dict) -> None:
         manifest_path = Path(batch_dir) / "manifest.json"
         manifest = load_manifest(manifest_path)
         output_path = Path(batch_dir) / "output.mp4"
-        result = run_stitch(manifest, batch_dir, output_path, on_stage=on_stage)
+        # max_workers=2: real, measured sweet spot on this project's own
+        # dev hardware (10-core Apple M4) -- see pipeline/stitch.py's
+        # run_stitch docstring. 2-3 concurrent extracts gave the real
+        # ~19% wall-clock improvement found (19.86s -> 16.1s on a real
+        # 12-span re-encode-triggered plan); 6 gave almost none (18.97s)
+        # because libx264's own internal threading already uses multiple
+        # cores per encode, so higher process-level parallelism mostly
+        # buys CPU contention, not real throughput, on this workload.
+        result = run_stitch(manifest, batch_dir, output_path, on_stage=on_stage,
+                            max_workers=2)
 
         apply_output_offsets(manifest, result.segment_output_offsets)
         save_manifest(manifest, manifest_path)

@@ -85,9 +85,26 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
   // defined earlier in this function body.
   async function waitForExport(): Promise<{ ok: true } | { ok: false; message: string }> {
     // Re-export is stitching only (extract + concat kept spans), not
-    // re-running detection, so this is expected to be fast in practice
-    // (measured: ~1s on clip_300) -- but it's still a real background
-    // job, so poll rather than assume.
+    // re-running detection -- but "fast" here depends entirely on
+    // whether pipeline.stitch's plan needs to re-encode. On a plan with
+    // no risky hard-cut boundary it genuinely is ~1s (stream-copy, no
+    // real encoding). But ANY hard-cut boundary with real keyframe-snap
+    // overlap risk promotes the WHOLE plan to re-encode (see
+    // pipeline.stitch.plan_stitch's docstring -- a deliberate safety
+    // fix for a real previously-found truncated-export bug, not a
+    // shortcut to remove) -- real, live-measured on clip_300 in that
+    // state: 16-23s, not ~1s, over 15x the old claim. Root-caused, not
+    // just re-measured: profiling isolated it to 12 independent libx264
+    // encodes (~94% of total time). run_stitch's extract step now runs
+    // those concurrently (max_workers=2 from the backend, the real
+    // measured sweet spot -- see pipeline.stitch's docstring for why
+    // more workers make it WORSE, not better), a real ~19% improvement,
+    // not a full fix: re-encoding itself is still genuinely required for
+    // correctness whenever this path triggers, so it's still a real
+    // multi-second-to-tens-of-seconds wait, not disappearing. On a real
+    // full-length game (~67min), if the same promotion triggers, expect
+    // low-single-digit MINUTES, not seconds -- this is still a real
+    // background job, so poll rather than assume either way.
     while (true) {
       const job = await getJob(batchId!, 'export')
       if (job?.status === 'completed') return { ok: true }
@@ -201,6 +218,14 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
   const unreviewedHardCuts = cutEntries.filter(
     (s) => s.origin === 'hard_cut' && s.status === 'cut')
 
+  // The symmetric case cutEntries can't cover: a segment the detector kept
+  // from the start (origin=="detected") never became a cut candidate, so
+  // isEditLogEntry above -- and therefore the whole cut-review list --
+  // never sees it. Without this, a wrongly-kept segment (e.g. a practice-
+  // swing clip) has no in-app path to removal at all; confirmed as a real
+  // gap during tonight's usability audit, not a hypothetical.
+  const keptEntries = activeManifest.segments.filter((seg) => seg.origin === 'detected')
+
   return (
     <div className="card">
       <h2 style={{ marginTop: 0 }}>Edit Log</h2>
@@ -291,6 +316,59 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
           })}
         </ul>
       )}
+
+      <div style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid var(--color-border)' }}>
+        <h3 style={{ marginBottom: 8 }}>Kept segments</h3>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Segments the detector kept automatically -- preview and cut any that
+          shouldn't be in the highlight reel (e.g. warm-up or practice swings).
+        </p>
+        {keptEntries.length === 0 ? (
+          <p className="muted">No kept segments to review.</p>
+        ) : (
+          <ul style={{ listStyle: 'none', padding: 0 }}>
+            {keptEntries.map((seg) => {
+              const isPending = pendingId === seg.id
+              const userRemoved = seg.status === 'cut'
+              return (
+                <li
+                  key={seg.id}
+                  className={`entry-card${userRemoved ? ' user-removed' : ''}`}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                    <div>
+                      <strong>
+                        {seg.start} - {seg.end}
+                      </strong>
+                      <span className="muted" style={{ marginLeft: 10 }}>{seg.source_file}</span>
+                      {userRemoved && (
+                        <span className="badge badge-neutral" style={{ marginLeft: 10 }}>
+                          Removed
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      <button
+                        className="secondary"
+                        onClick={() => setPreviewingId(previewingId === seg.id ? null : seg.id)}
+                        style={{ marginRight: 8 }}
+                      >
+                        {previewingId === seg.id ? 'Hide preview' : 'Preview'}
+                      </button>
+                      <button onClick={() => handleToggle(seg)} disabled={isPending || exporting}>
+                        {isPending ? 'Saving...' : userRemoved ? 'Restore' : 'Cut'}
+                      </button>
+                    </div>
+                  </div>
+                  {previewingId === seg.id && (
+                    <SegmentPreview batchId={bid} segment={seg} />
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   )
 }

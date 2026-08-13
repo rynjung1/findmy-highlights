@@ -632,6 +632,15 @@ button.pill {
   background: var(--color-success-bg);
 }
 
+/* Kept-segments list (EditLogView): the inverse of .restored -- default
+   state here is "kept" (unstyled, same as any plain entry-card), and
+   .user-removed marks a segment the viewer has actively cut out, the one
+   state that needs to stand out from the unmodified default. */
+.entry-card.user-removed {
+  opacity: 0.6;
+  background: var(--color-border);
+}
+
 .badge-warning {
   color: var(--color-warning);
 }
