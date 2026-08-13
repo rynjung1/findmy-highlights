@@ -2337,6 +2337,170 @@ purpose-built cold-start real-action detector, distinct from
 Practice-swing/walkup cutting remains an open problem with no safe,
 cheap solution found so far.
 
+**2026-08-13: a fourth practice-swing/downtime angle tested and closed --
+pitcher windup-to-release via MediaPipe pose, as a POSITIVE signal for "this
+is a real at-bat." Real repro, real measurement against a verified sample,
+honest negative result.** The idea: practice swings (tee work, soft toss,
+self-toss, cage feeds) structurally lack a pitcher delivering to a batter,
+so a detected windup (leg lift, arm circle back, stride, arm coming forward)
+should positively confirm a real at-bat where the three prior closed
+attempts (zone-velocity gate, raw bat-count, `atbat_start_times` cold-start)
+all failed. Standalone feasibility script only
+(`scripts/`-pattern, not committed to the repo -- lived in an agent
+scratchpad for this investigation), no `pipeline/`/`backend/` changes.
+
+**1. Verified sample, built from real frame inspection, not trusted labels.**
+Per explicit instruction, no existing label (ground-truth `required` flag or
+review-queue `label` field) was trusted without independently re-verifying
+via ffmpeg-extracted contact sheets viewed frame-by-frame. Final sample:
+- **18 verified real-pitch/real-action instants** (corrected from an
+  initial pass's 16 -- see correction note below): 12 sampled instants from
+  10 named `tests/ground_truth` events (`clip_300.json#e2` x2 instants
+  t=59.0/60.5, `#e4` x2 instants t=120.5/123.0, `#e6` x1 instant t=96.0;
+  `clip_540.json#e2/e3/e4` x1 instant each; `clip_60.json#e4/e5` x1 instant
+  each; `clip_foul1.json#e1` x1 instant t=10.0; `clip_whiff1.json#e1` x1
+  instant t=10.0 -- 5+3+2+1+1=12) plus 6 from `training_data/reviews`
+  (`bc_2e636269472c`, `bc_38346e7bd32e`, `bc_dc24666af1b5`,
+  `bc_ed7054ea5521`, `hc_09b6abe617f8`, `hc_5f2905bcab76`, all `real_action`)
+  -- each confirmed by eye (real swing/contact/ball-flight/fielder-reaction,
+  not just a label). 12+6=18.
+- **9 verified practice-swing/downtime instants**, all 9 named explicitly
+  (a first draft of this entry under-enumerated this list as 7 items while
+  still citing "9" -- corrected here): `clip_300.mkv`'s known-but-unitemized
+  0-20s stretch sampled at 2 instants (t=5.0, t=10.0 -- re-pulled fresh this
+  session, continuous solo swing-reset-swing cycling, no ball, no second
+  player, batter walks off to retrieve balls ~17-19s), `clip_60.json#e2`
+  sampled at 2 instants (t=30.0, t=40.0 -- owner-corrected `warmup_throws`,
+  confirmed casual catch + practice cuts with no delivering pitcher),
+  `clip_60.json#e6` at 1 instant (t=174.0 -- "possible practice swings
+  ~174", `required: false`, hedge resolved TRUE -- solo repeated swings, no
+  pitcher), plus 4 from `training_data/reviews` at 1 instant each
+  (`bc_121f61ed3d15`, `bc_374fa9fd1fa4`, `hc_081647af24b4`,
+  `hc_2677d77a90c4`, all `downtime`: a casual jog, a static bat-up
+  non-swing, and two static ready-stances with no completed swing arc).
+  2+2+1+4=9.
+- **4 additional verified real plays, `clip_base1`-`clip_base4.json#e1`,
+  EXCLUDED from the quantitative pass**: real, confirmed plays (batter
+  loads/swings, contact/ball-flight implied, fielders converge, defense
+  resolves) but shot on a different camera framing that excludes the mound
+  area from the shot entirely -- 0/4 show any pitcher pixel presence
+  anywhere in their full event windows. Counted directly toward the
+  occlusion finding below, not toward the confusion breakdown (no candidate
+  box is possible by construction).
+Each case is tagged above by its exact source file/event id per instruction.
+Given the effort already spent, this is the largest sample that could be
+genuinely hand-verified this session -- not padded to a round number.
+
+**Correction, caught on owner review before commit:** a first draft of this
+entry cited `clip_foul1.json#e1`/`clip_whiff1.json#e1` as part of the
+measured 16-case real sample, but the feasibility script's actual
+`REAL_CASES` list never included either clip -- they were verified as real
+events in the labeling pass but never run through the pose measurement,
+so citing them as contributing to the "16"/"8/16 (50%)" figures was wrong.
+Separately, the practice-swing/downtime list named only 7 distinct sources
+while citing "9," because `clip_300`'s stretch and `clip_60#e2` were each
+sampled at 2 instants without saying so. Both are fixed here by actually
+adding `clip_foul1`/`clip_whiff1` to the real measurement (re-verified via
+fresh RF-DETR box checks at t=10.0 in both clips, confirming a mound-region
+candidate is present) and re-running the full script rather than just
+editing the prose -- see the updated 18/9 counts and all downstream
+percentages below, which reflect the real re-run, not the original numbers
+with new labels pasted on.
+
+**2. Mound-region geometry had to be independently re-derived and checked,
+not trusted from an unrelated prior session's hypothesis.** No pitcher/mound
+calibration exists anywhere in this repo (checked `pipeline/calibration.py`
+and every `*.calibration.json` -- only home/1st/2nd/3rd base). An unrelated
+prior session's scratch script hypothesized `MOUND_X=(920,1100)
+MOUND_Y=(480,650)` (eyeballed, not calibrated); one specific reuse attempt of
+it this session (`c60_e4_pitcher_zoom` crop) produced a crop of pure sky and
+net -- direct evidence it can't be reused blindly. Instead: printed every
+real RF-DETR person box at known real-pitch instants and checked which one's
+x-coordinate matched the batter's own in-zone box x (both stand on the
+home-to-mound line, which projects to a near-vertical line in this camera).
+Concrete match found: `clip_300` t=59, batter box center x=1055, and a
+box at (1056, 566) sits almost exactly above it -- the strongest evidence
+available that this is really the pitcher, not an unrelated bystander. Final
+region used, `MOUND_X=(900,1150) MOUND_Y=(485,660)`, ended up close to the
+external hypothesis but only after this independent check, not on trust.
+
+**3. Measured occlusion/undetectability rate: real, not assumed.** Using
+`pipeline.detection.detect_persons` (cached for `clip_300`/`540`/`60`/
+`foul1`/`whiff1`) plus direct RF-DETR calls for `full_game.mkv` instants (no
+existing cache; a full 1fps scan of a ~68-minute file just to answer a
+handful of single-instant questions was avoided), a mound-region candidate
+box was found at every one of 18/18 real-pitch instants and every one of
+9/9 practice-swing instants --
+**box presence alone is common in BOTH classes and not discriminating**,
+because other players (fielders warming up, ball-shaggers, the next batter's
+on-deck partner) routinely stand or walk through the mound area during both
+real pitches and downtime. Box heights across the 18 real cases: 56-110px,
+mean 87.5px -- small but not zero, better than the worst-case fear from the
+model card's "further than 14 feet" out-of-scope warning
+(`pipeline/pose.py`'s own docstring), though still well below a comfortable
+margin. Adding `clip_base1`-`4`'s 4/4 zero-pitcher-visibility instants to
+the picture: **the pitcher is either genuinely absent from frame or reduced
+to a marginal ~90px box, across every verified real-pitch case checked.**
+
+**4. Built and tested a real detector -- closed, doesn't discriminate.**
+Ran `pipeline.pose.build_landmarker` on the mound-region candidate's own
+padded crop (reusing `_padded_crop_bounds`, the same construction
+`pipeline/pose.py` already uses for the batter) at each of the 27 verified
+instants (18 real + 9 negative), and checked whether MediaPipe returned any
+pose at all, plus mean visibility across the 10 windup-relevant landmarks
+(shoulders/elbows/wrists/hips/knees -- not the full 33, which includes
+ankles/feet routinely and legitimately cropped off).
+- **Real-pitch cases: pose returned in 8/18 (44.4%).** (Both newly-added
+  `clip_foul1`/`clip_whiff1` instants returned no pose -- adding them made
+  the real-side hit rate lower, not higher, strengthening rather than
+  weakening the finding below.)
+- **Practice-swing/downtime cases: pose returned in 6/9 (66.7%) -- HIGHER,
+  not lower, than the real-pitch rate.** Root cause, confirmed by visually
+  comparing saved crops side by side: a static, idle person standing in the
+  mound area (shagging balls, waiting) gives MediaPipe an easier, cleaner
+  single-frame target than a pitcher's own fast, blurring windup motion.
+  A real-pitch crop (`real_full_game_t3149.4.png`) and a downtime crop
+  (`neg_full_game_t1485.0.png`, `neg_full_game_t261.0.png`) show visually
+  indistinguishable small, static, ready-stance figures -- there is no
+  single-frame visual property this pass found that tells the classes
+  apart. Only actual multi-frame windup motion (arm-circle amplitude/
+  timing, mirroring how `pipeline.pose.wrist_displacement` already measures
+  swing motion for the batter) could in principle discriminate, and that
+  needs several consecutive successful-pose frames in a row -- which the
+  measured 44.4-66.7% single-frame hit rate makes a materially harder bar
+  than it sounds (three consecutive real-pitch successes, even under a
+  favorable independence assumption at the real 44.4% rate, lands around
+  8.8%, roughly 1-in-11).
+- **Failure-mode crops examined directly** (`real_clip_300_t120.5.png`,
+  `real_clip_60_t121.0.png`, `real_clip_540_t81.0.png`,
+  `real_clip_300_t96.0.png`): failures correlate with small box size
+  (<~75px) and this footage's frequent evening backlighting producing
+  near-silhouette figures -- both real, structural properties of this
+  camera/footage, not an artifact of the test script.
+
+**5. Bottom line: does NOT cross the bar to pursue further, same tier as
+the three already-closed attempts, for a genuinely new reason this time --
+not an imprecision or a wrong-tool mismatch, but the opposite of the needed
+correlation.** Zone-velocity failed because it wasn't swing-selective; raw
+bat-count failed because clutter swamped it; `atbat_start_times` failed
+because it's the wrong tool for a cold start. This one fails because
+single-frame pose success in the mound region is *more* likely during
+downtime than during a real windup -- a heuristic built naively on top of
+"pose found here" would be anti-correlated with the thing it's trying to
+detect, not just noisy. Not directly comparable to the 71.8% local-VLM
+accuracy figure elsewhere in this log (different problem: VLM measures
+whole-window real/downtime classification broadly, this measures one
+component signal's raw availability), but worth noting neither free/local
+path (VLM prompting, this pose approach) has cleared a usable bar for this
+specific problem. A real multi-frame windup-motion detector, built on top of
+this pass's mound-region localization, remains a real, uncosted option if
+this gets revisited -- but the 44.4-66.7% single-frame reliability found
+here means it starts from a real headwind, not a clean slate, and would need
+real engineering investment (temporal tracking, occlusion handling across
+consecutive frames) to even reach the point of being testable. Practice-
+swing/walkup cutting remains an open problem; four independent free
+approaches now closed.
+
 
 ## Architecture overview
 
