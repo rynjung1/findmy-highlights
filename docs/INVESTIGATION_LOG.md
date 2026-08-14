@@ -2501,6 +2501,153 @@ consecutive frames) to even reach the point of being testable. Practice-
 swing/walkup cutting remains an open problem; four independent free
 approaches now closed.
 
+**2026-08-13: a fifth angle, embedding-level (early/representation)
+audio+visual fusion, tested and closed -- real prototype, real numbers,
+honest negative, with one flagged caveat rather than a clean win.**
+Scoped after correcting an initial framing: no "late fusion" (combining
+independent classifiers' final decision outputs) has ever existed in this
+project to distinguish from. What's actually closed is fusion of
+HAND-CRAFTED SCALAR features -- pose peak wrist-displacement + audio onset
+rise-time, naive z-score sum (AUC 0.531) and an L2-logistic joint
+classifier over motion+pose+audio (cross-val AUC 0.191, below chance,
+n=10 overfitting). The real, previously-untried question: does fusing raw
+learned REPRESENTATIONS (model embeddings, not hand-picked scalars) do any
+better, and does it beat X-CLIP's own zero-shot text-prompt score (AUC
+0.690, p=0.012 -- the best result anywhere in this log)?
+
+**1. Architecture, concretely.** X-CLIP's raw video embedding already
+exists in this codebase, one line away from what `pipeline.xclip.
+swing_probability` already computes: `model.get_video_features(...)
+.pooler_output`, L2-normalized, 512-d (the exact tensor the zero-shot
+text-similarity is computed from, just stopped one step earlier, before
+the text comparison). No audio embedding model existed in `pipeline/` --
+`pipeline.audio` is a hand-crafted onset-rise-time feature, not a learned
+representation. Built fresh: AST (`MIT/ast-finetuned-audioset-10-10-0.4593`,
+BSD-3-Clause, already license-verified in this project for the closed
+crowd-reaction work), pooled CLS output, 768-d, L2-normalized, fed a
+2-second audio window matching X-CLIP's own validated `window_s`
+convention (same real time-window for both modalities, not an arbitrary
+mismatch). Fusion method: **concatenation** (1280-d) -- the only
+architecturally sound choice at this sample size. Cross-attention was
+considered and explicitly rejected, not just left undiscussed: a trained
+cross-attention layer needs real trainable parameters (thousands, even at
+a modest hidden dim) fit from data, and this project's own joint
+classifier already showed a 3-DIMENSIONAL hand-crafted linear model
+collapsing to below-chance performance (0.191 AUC) from severe overfitting
+at n=10 positives -- a cross-attention mechanism at 1280 input dimensions
+would be a strictly worse version of the exact failure mode already
+documented, not a new idea worth building untested.
+
+**2. Feasibility: real, confirmed by actually running it, not assumed.**
+Both models load and run locally in this project's existing venv, no paid
+API calls. X-CLIP was already cached from prior work; AST downloaded
+cleanly (86.19M params measured directly via `sum(p.numel() ...)` on the
+loaded `ASTModel` -- close to, not identical to, the log's earlier-cited
+86.6M for `ASTForAudioClassification`, the ~0.4M gap consistent with
+loading the base model without its classification head). A live smoke
+test (real audio window from
+`clip_60.mkv`, real AST forward pass) confirmed the embedding shapes and
+pipeline before committing to a full run. Total wall-clock for the full
+181-instance run on this Mac (M4, MPS): **521 seconds (~8.7 minutes)** --
+genuinely prototypable locally in well under an hour, no infrastructure
+blocker.
+
+**3. Real prototype, tested on the SAME real sample the 0.690 baseline
+was measured against -- not a stale citation, re-derived fresh from
+source ground truth every run.** Reused `scripts/pose_audio_validation.py`'s
+own `load_real_events()`/`load_ambient_samples()` directly (11 real
+swing-type ground-truth events across the 9 reference clips, 170 real
+gap-sampled ambient instances, mechanically recomputed from
+`tests/ground_truth/*.json` each execution) -- this is the exact
+construction `pipeline.xclip`'s own docstring cites as what the 0.690
+number was measured against, so evaluating the new fusion prototype
+against it is a fair, apples-to-apples comparison, not a different
+question dressed up as the same one. Every one of the 11 real events
+produced both embeddings successfully (confirmed: 0 no-video-embedding, 0
+no-audio-embedding on the real side). Paired set used for evaluation: 11
+real, 167 of 170 ambient -- the script did not separately log which 3
+ambient instances dropped or why, so that specific cause is NOT claimed
+here (a real gap in this run's own logging, not a claim to make up after
+the fact); it doesn't affect the real-side numbers or the conclusion
+below, since all 11 real cases are intact.
+
+**4. Results: fusion never beats video alone, at any setting tried, and
+never beats the 0.690 baseline. One number nominally exceeds 0.690 but
+is flagged, not claimed, as a near-certain artifact.**
+
+| method | video alone | audio (AST) alone | concatenated |
+|---|---|---|---|
+| nearest-centroid (LOO, parameter-free) | 0.579 | 0.285 | 0.327 |
+| LOO logistic regression, C=0.001 (strong reg.) | 0.557 | 0.194 | 0.371 |
+| LOO logistic regression, C=0.01 | 0.698 | 0.269 | 0.453 |
+| LOO logistic regression, C=0.1 | 0.753 | 0.292 | 0.474 |
+| LOO logistic regression, C=1.0 (weak reg.) | 0.762 | 0.311 | 0.491 |
+
+(Nearest-centroid excludes each scored point from its own class centroid,
+same LOO discipline as the trained classifier, so a real event can't
+inflate its own reference point. Video-alone's 0.579 nearest-centroid
+result is close to -- not identical to, different LOO discipline applied
+this time -- the 0.587 X-CLIP-alone raw-embedding probe already on record,
+a real consistency check, not a re-derivation of the same exact number.)
+
+**Audio (AST) is consistently, not marginally, BELOW CHANCE** -- 0.194 to
+0.311 across every method and regularization strength, never once
+crossing 0.5. This isn't noise scattered around chance the way the
+hand-crafted audio feature was (0.523, essentially exactly 0.5); this is
+a real, repeated below-chance pattern across two structurally different
+evaluation methods (one with zero trainable parameters). Directly
+consistent with, and a natural extension of, the already-closed
+crowd-reaction finding: AST detected essentially no audible
+crowd/reaction signal anywhere in this footage (max probability 0.016
+across 181 windows, closed elsewhere in this log) -- this is small
+rec-league footage, and a general AudioSet-pretrained representation
+apparently has nothing swing-relevant to key on in it, so folding it into
+a fused vector adds anti-signal, not signal. **Concatenated fusion is
+worse than video-alone at every single comparable setting** (0.327 vs
+0.579 nearest-centroid; 0.371-0.491 vs 0.557-0.762 across all four C
+values) -- audio actively drags the fused representation down, not just
+failing to help.
+
+**The one number that nominally beats 0.690 -- video-alone LOO logistic
+regression at C=1.0, 0.762 -- is flagged as a near-certain small-sample
+artifact, not reported as a win.** 512 input dimensions against 11 real
+positives is deep in the classic n-much-less-than-d regime where a linear
+classifier can often separate almost any small sample close to perfectly
+by chance alone, and LOO evaluation in this regime is known to read
+optimistic for exactly this reason (each fold trains on n-1 points in a
+space with far more dimensions than examples). This is the same
+"textbook signature of severe overfitting instability" this log already
+named for the hand-crafted joint classifier (0.191 AUC at n=10, 3
+dimensions) -- same instability class, just manifesting as an inflated
+number instead of a collapsed one because the feature space here is
+~170x higher-dimensional. Trusting this number over the already-validated
+0.690 zero-shot result, on 11 positive examples, would repeat exactly the
+mistake this project's standing Tier 3 bar (300-500 labeled events) exists
+to prevent.
+
+**5. Bottom line: closed, same ultimate conclusion as the hand-crafted
+fusion attempt, for the same root cause, at a different representation
+level.** Whether fusing hand-crafted scalars (z-score sum 0.531, joint
+logistic 0.191) or raw pretrained embeddings (nearest-centroid 0.327,
+LOO-logistic 0.371-0.491), audio consistently fails to add value on this
+project's footage, for a concrete, mechanistically-understood reason
+established independently in the crowd-reaction investigation: there
+isn't a strong, general-purpose-model-legible acoustic signal in this
+specific small rec-league recording setup for either a hand-crafted
+attack-sharpness feature or a large pretrained AudioSet representation to
+find. Video-only remains the strongest real result on record --
+X-CLIP's zero-shot text-prompt score, AUC 0.690, p=0.012, unbeaten by
+anything tried here or before. Not directly comparable to the pose-based
+windup-to-release result above (different modality pair, different
+question), but the same honest-negative category: real effort, real
+prototype, real numbers, no forced positive spin. A future audio angle
+would need either fundamentally different footage (broadcast-quality
+audio with real crowd/commentary, per the golf-highlights paper already
+checked and ruled out for this footage) or a much larger real label set
+to responsibly evaluate a high-dimensional fused classifier without
+falling into the same overfitting trap flagged above -- not a next step
+this project's own current data supports.
+
 
 ## Architecture overview
 
