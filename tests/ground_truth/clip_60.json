@@ -16,7 +16,7 @@
     {"id": "e5", "window": [137, 148], "type": "hit_and_run", "required": true,
      "check_continuity": true,
      "note": "batter load/swing ~139-143, plate empty and fielders/runner moving by ~144; continuity-checked because Stage 3 play-extension depends on the signal holding through this defensive play"},
-    {"id": "e6", "window": [168, 177], "type": "at_bat_activity", "required": false,
-     "note": "batter settling into stance, bat raised, possible practice swings ~174"}
+    {"id": "e6", "window": [168, 177], "type": "hit_and_run", "required": true,
+     "note": "RECLASSIFIED 2026-08-14 (see docs/INVESTIGATION_LOG.md correction): originally logged as 'possible practice swings ~174' from a mound-region-only crop that excluded the batter, the rest of the field, and the ball. Full-frame review shows batter loaded with a complete defense positioned ~171.5-173.5, then the ball visible in flight above the infield with the pitcher running and the batter running to first ~174-175 -- a real at-bat with contact and a baserunning sequence, not a practice swing."}
   ]
 }
