@@ -1074,6 +1074,7 @@ joint model in angle 3.
    highlight-length excerpts) was never built to answer this question;
    a real answer needs real full-game footage with many plays per game,
    not reference clips.
+
 3. **A small joint classifier** (`scripts/joint_classifier_investigation.py`)
    combining motion peak score, pose peak wrist displacement, and audio
    onset rise-time (temporal position excluded — angle 1 didn't prove
@@ -1339,6 +1340,61 @@ that a naive threshold on this exact signal would score as *less*
 swing-like than half of genuine dead time. Not a catastrophic miss the
 way the flow investigation's 4th-percentile finding was, but a real,
 named exception, not glossed over.
+
+**Correction (2026-08-16), covering every number above in this
+sub-investigation plus the pose+audio table and both temporal-position
+angles earlier in this same night's write-up: `clip_60#e6` was a real
+at-bat mislabeled as practice (fixed in `tests/ground_truth/clip_60.json`,
+commit `73f45a9`; see the 2026-08-14 windup-to-release doc correction for
+how it was caught). All three affected scripts re-run for real against
+the corrected label, before -> after:**
+
+| result | before | after |
+|---|---|---|
+| pose alone (n real/ambient, AUC) | 10/118, 0.532 | 11/118, **0.535** |
+| audio alone (n, AUC) | 11/170, 0.523 | 12/170, **0.508** |
+| pose+audio combined (paired n, AUC) | 10, 0.531 | 11, **0.531** (same rounded value, different n) |
+| temporal angle 1 (n gaps, range, CV) | 12, -1 to 86s, 0.90 | **identical**, digit-for-digit (only a type label changed) |
+| temporal angle 2 (pooled n, CV) | 5, 0.65 | 6, **0.64** (never a published headline number before this correction) |
+| X-CLIP zero-shot AUC | 0.690 (documented) / **0.688** (this session's faithful same-methodology reconstruction, since no committed script for the original run exists) | **0.6527** |
+
+**Every non-X-CLIP number keeps its original verdict** — pose, audio,
+their naive combination, and both temporal angles all stay at or near
+chance / too-sparse-to-trust exactly as before; this correction moves
+precise digits, not conclusions, for those five.
+
+**X-CLIP is the one real, load-bearing exception, and its significance
+was re-checked for real rather than assumed carried over — priority
+item, not left open.** Two independent tests, both against the corrected
+n=12 real / n=167-scored-ambient sample: a 2000-shuffle permutation test
+(seed 20260816, fixed and reported) gives **p=0.0395**; an analytic
+Mann-Whitney U test (U=1308.0, alternative="greater") gives **p=0.0390**,
+cross-validating the permutation result and independently reproducing
+the same 0.6527 AUC from the U statistic itself. **Still clears
+conventional significance (p<0.05) — but only just, not comfortably.**
+The original claim was p=0.012 (permutation) / p≈0.017 (Mann-Whitney);
+the margin has roughly shrunk to a third of what it was. This remains
+technically the best real result on record in this log, but "the first
+signal all night to actually clear conventional significance," stated
+with real headroom before, now describes a result sitting much closer to
+the line — a materially weaker headline than the original write-up
+conveys, even though the verdict (real, not chance) hasn't flipped.
+
+**Five other results also rest on the pre-correction 11-event set and
+were NOT rebuilt tonight, by explicit scope decision, not oversight:**
+the X-CLIP raw-embedding nearest-centroid probe (0.587, referenced a few
+paragraphs above), the HFC/spectral-flux onset-detection comparison
+(0.605/0.646, benchmarked against the pre-correction audio AUC of 0.523),
+this X-CLIP entry's own 5-prompt-variant robustness table (0.620-0.690),
+`scripts/joint_classifier_investigation.py`'s single-feature and
+cross-validated AUCs (0.509/0.529/0.469 paired, 0.191 combined), and the
+2026-08-13 embedding-level audio+visual fusion entry (which reused this
+same 11-event set throughout and compared its own results against 0.690
+as "the baseline to beat"). Several of these, like the X-CLIP zero-shot
+case above, have no committed script to simply re-run — rebuilding them
+would mean reconstructing lost methodology, not just re-executing
+something that exists. Left as real, open, explicitly-tracked debt
+rather than silently assumed still valid.
 
 *Semantic crowd-reaction audio.* License-checked two candidates first:
 PANNs (`qiuqiangkong/audioset_tagging_cnn`) has an MIT-licensed
