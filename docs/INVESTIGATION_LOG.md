@@ -2754,6 +2754,107 @@ to responsibly evaluate a high-dimensional fused classifier without
 falling into the same overfitting trap flagged above -- not a next step
 this project's own current data supports.
 
+**2026-08-17: a sixth angle, acoustic bat-crack signature detection
+(contact-transient sound, audio-only, no visual signal), tested and
+closed -- but for a genuinely different, more fundamental reason than
+either prior audio result tonight, not a repeat of "no usable signal."**
+Distinct from both closed audio results earlier tonight (AST
+crowd-reaction AUC 0.414, AST raw-embedding AUC 0.194-0.311, both
+explained by "no audible crowd/reaction sound on this small rec-league
+footage") -- this asked about the contact transient itself, a genuinely
+different, untested question that isn't automatically disproven by
+either prior result.
+
+**1. Real-contact sample: 9 instances, independently verified, both
+visually and acoustically -- and one real methodology trap caught along
+the way.** Every ground-truth/review-queue event with CONFIRMED contact
+(not just "real" broadly -- excludes taken pitches like `clip_60#e4` and
+misses like `clip_whiff1#e1`, which have no contact to analyze; also
+excludes `clip_60#e6` per direct instruction, now correctly classified
+as real but not reused here): `clip_540#e2/e3/e4`, `clip_60#e5`,
+`clip_base1-4#e1`, `clip_foul1#e1`. For each, the documented contact
+window was searched for a real audio transient, THEN checked against
+frames -- not the reverse. This caught a real methodology trap on
+`clip_foul1`: the LOUDEST peak in its wider event window (t=16.40) is
+crowd/vocal reaction to the foul ball (frame-confirmed: batter already
+walking away by then), not the bat-crack -- the real contact transient
+is a much smaller peak at t=15.49, inside the documented 15.25-15.5s
+window. Every one of the 9 final instants was frame-checked and shows a
+real, sharp transient 6.9x-33x above the local noise floor.
+
+**2. Practice-contact sample: n=1, a real and informative limitation,
+not a shortcut around the sample-building work.** Systematic peak search
+(not cherry-picked) across `clip_300`'s entire known 0-20s practice
+stretch, cross-checked against dense (5-8fps) frame sequences, found
+exactly ONE instant with visually-confirmed swing motion (bat sweeping
+across the body, t=13.5-14.6) -- and even that swing's own audio
+transient (2.9x above floor) is far weaker than any of the 9 confirmed
+real contacts. Every OTHER strong audio peak in the practice stretch
+(including two nearly as strong as real contacts, 17.4x and 12.7x at
+t=10.73/18.18) was checked against frames and corresponds to something
+else -- people standing relatively still, a person crouching to pick up
+a bat (matching the documented "walks off to retrieve balls ~17-19s"),
+not a swing. Four additional `training_data/reviews` "downtime"
+candidates were also checked (not exhaustively -- 4 of 106 unchecked
+ones) and showed walking or throwing, not batting. **The honest
+conclusion this points to: this footage's practice-swing activity
+appears to be predominantly dry/no-ball swings, not tee or self-toss
+hitting** -- there may simply not be much confirmable practice-CONTACT
+sound on this footage to detect, a data-availability finding, not a
+signal-quality one.
+
+**3. Environmental audio quality: real, measured, not the dominant
+blocker here.** Per-clip noise-floor stability (1s-block RMS across each
+full file): median floor 0.034-0.049 across 5 clips checked, but real
+variability in how stable that floor is -- coefficient of variation
+0.26 (`clip_base3`, calm) to 0.75 (`clip_60`, noisier/more variable).
+Real, non-trivial environmental noise exists, but it did not block this
+test the way the task's step 3 worried it might: the 9 real-contact
+transients all cleared 6.9x+ above their local floor regardless of which
+clip's baseline noise level they sat in. The actual blocker was upstream
+of audio quality -- finding enough confirmable practice-CONTACT events
+to test against in the first place.
+
+**4. Feature comparison: peak amplitude, attack sharpness (rise time),
+and a new frequency-domain feature (high-frequency energy ratio, not
+tried in any prior audio investigation tonight) -- honest result, no
+forced AUC.**
+
+| feature | real (n=9) | practice (n=1) | separates? |
+|---|---|---|---|
+| peak amplitude | 0.143-0.486, mean 0.289 | 0.098 | below real min, but n=1 -- not a real finding |
+| attack rise time (ms) | 5-55, mean 16.1 | 40 | inside real range -- no |
+| HF energy ratio (>2kHz) | 0.101-0.637, mean 0.454 | 0.325 | inside real range -- no |
+
+With only one practice example, no AUC or precision/recall is honestly
+computable -- reported as exactly that rather than forced. What IS real
+and worth noting: the confirmed real-contact class itself spans almost
+the entire plausible range on 2 of 3 features (rise time 5-55ms is an
+11x spread; HF ratio 0.10-0.64 is a 6x spread) -- different clips, camera
+distances, and contact types (clean hit vs. foul tip vs. different bat/
+ball combinations) produce real bat-cracks that don't share one tight
+acoustic signature even among themselves. That internal spread is real
+evidence that even a larger practice sample would likely need many more
+than a handful of examples to separate cleanly from a real class this
+heterogeneous -- echoing the same small-sample-instability lesson this
+project's joint classifier and X-CLIP-fusion investigations already
+demonstrated, before ever reaching the real-vs-practice question.
+
+**5. Bottom line: closed, but as a genuinely different result from
+tonight's other two audio closures, not a repeat.** The crowd-reaction
+and raw-embedding tests failed because the target signal doesn't exist
+in this footage at a well-populated sample. This one hits a more
+fundamental wall first: **the practice-contact class barely exists as
+confirmable data on this footage** -- not enough dry-swing-vs-real-hit
+contrast to even reach a well-powered signal-quality test. No guaranteed
+real-play loss risk either way, since nothing here was wired into any
+cutting decision. A real future attempt at this specific angle would
+need footage that actually contains batting-practice-with-a-ball
+(tee work, soft toss) in enough volume to build a real sample -- not
+achievable by searching harder within this project's current reference
+clips and review-queue data, which is a real, checked limit, not an
+assumption.
+
 
 ## Architecture overview
 
