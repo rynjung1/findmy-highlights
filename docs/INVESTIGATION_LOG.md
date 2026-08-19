@@ -4515,6 +4515,19 @@ than documenting the exact dashboard values directly:
 - Detection is tuned to **never miss a real play**: borderline segments are
   kept, so some dead time will survive into the output by design.
 
+- **2026-08-19: `clip_300.mkv` has been uploaded/re-run at least 5 times,
+  producing duplicate review-queue data, not new information.** Batches
+  `fb07ea71f4b3`, `ac262f25bf56`, `705e659881e7`, `cc8de6558105`, and
+  `a2116018e6b0` all reprocess the same source file and yield the exact
+  same 5 physical candidate events (2 `boundary_crossing`, 3
+  `hard_cut_dip`) — `features_at_label_time` is byte-identical across
+  batches, only `id`/`created_at`/`batch_id`/`config_hash` differ. One of
+  these, `705e659881e7`, is separately confirmed corrupted (7,220 real
+  ffmpeg decode errors, video 145.9s vs. audio/container 166.8s
+  mismatch — see the stitch multi-file-mismatch fix above). If untracked
+  files reappear in `training_data/reviews/` referencing `clip_300.mkv`,
+  check for this duplication before assuming they're new labeled data.
+
 
 ## Testing
 
