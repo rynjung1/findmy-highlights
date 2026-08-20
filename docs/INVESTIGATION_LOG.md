@@ -4656,6 +4656,37 @@ than documenting the exact dashboard values directly:
   Not yet confirmed as a real problem — flagged as an open question,
   not a verdict.
 
+- **2026-08-20: dedicated review closes the open item above — the
+  existing shipped hard-cut (`clip_300`, 95.595-97.202s) is confirmed
+  SAFE, zero real content lost.** Dense chronological check, 34 real
+  frames: the disputed 95.595-97.202s window itself sampled at 0.1s
+  spacing (16 frames, dense enough to catch anything sub-second), plus
+  0.25s spacing through 93.5-95.595s and 97.202-99.0s margin. Every one
+  of the 16 in-window frames shows the identical static scene — batter
+  standing at the plate holding the bat, mid-field figure standing
+  still — no swing, no contact, no bat drop, no running anywhere in the
+  full 1.6s cut. The real action from ground-truth event e6 (hit-and-
+  run) brackets the cut without touching it: real fielding/running
+  motion resolves into stillness by ~95.0s, BEFORE the cut starts
+  (95.595s); the batter's drop-and-run transition becomes visible at
+  ~98.2s, roughly a full second AFTER the cut ends (97.202s). The cut
+  sits in a genuine ~1.6s lull between two real moments, neither of
+  which it reaches.
+
+  **This corrects the earlier informal flag above, not just supersedes
+  it.** That check used sparse 0.5s-spaced stills and, without a clear
+  enough timeline, read the real pre-cut fielding motion (93.5-94.75s,
+  already fully kept, never at risk) as adjacent to or inside the cut
+  window — it wasn't; dense sampling resolves exactly where that motion
+  starts and stops relative to the cut boundary.
+
+  **Separate, lower-priority note:** e6's own "swing/contact ~97"
+  annotation doesn't match anything visible in dense sampling of that
+  region — no swing is visible anywhere from 93.5-99.0s. The note is
+  explicitly approximate ("~"), so this isn't treated as a ground-truth
+  error needing a fix, just flagged so future work keying off that exact
+  sub-timestamp within e6 knows it's imprecise.
+
 
 ## Testing
 
