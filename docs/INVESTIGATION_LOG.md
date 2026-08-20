@@ -4528,6 +4528,134 @@ than documenting the exact dashboard values directly:
   files reappear in `training_data/reviews/` referencing `clip_300.mkv`,
   check for this duplication before assuming they're new labeled data.
 
+- **2026-08-19: confirmed, real distinction between "cut" (genuinely
+  removed on export) and `skip_suggestions` (in-app-only, survives every
+  download).** Prompted by a direct question about whether cut segments
+  are physically excised or just marked for the app's own player.
+
+  **"Cut" segments are genuinely removed, verified four independent real
+  ways** against a real production batch (`fb07ea71f4b3`, `clip_300.mkv`,
+  12 kept + 13 cut segments): (1) a real `run_stitch()` run with every
+  ffmpeg command logged shows exactly 12 EXTRACT commands, matching only
+  the 12 kept spans' timestamps — zero commands reference any of the 13
+  cut windows; (2) `segment_output_offsets` (the app's own real
+  "where does this live in output.mp4" map) has `ABSENT` for all 13 cut
+  segment ids and valid offsets for all 12 kept ones; (3) real ffprobe
+  duration on the freshly-regenerated output is 147.272104s — matching
+  the sum of kept spans (147.075s), not the 185.71s source, and matching
+  the already-shipped `output.mp4`'s duration exactly, clean strict
+  decode; (4) a real extracted frame from a kept window matches (SSIM
+  0.898) the real output frame at its computed offset, while a real
+  frame from inside a cut window does not (SSIM 0.567 against that same
+  output frame) — visually confirmed, not just measured.
+
+  **`skip_suggestions` (quiet stretches inside an already-kept segment)
+  are a separate, deliberately non-destructive UI feature, confirmed
+  never read by the export path.** `pipeline/stitch.py` never references
+  `skip_suggestions`; the only consumer is
+  `frontend/src/components/SkippableVideo.tsx`, which does a browser
+  `currentTime` jump during in-app playback and says so directly in its
+  own comment: "export/download always contains the complete output
+  regardless of this component's state." Real magnitude on the same
+  batch: 16.16s across 5 windows sit inside kept segments as
+  skip-suggestions, against a 147s exported video (~11%) — fully present
+  in any downloaded/shared file, invisible only inside this app's
+  player. This is a real gap for the church-volunteer-downloads-and-
+  shares use case, not a bug: the feature was built this way on purpose
+  (see `pipeline.segments.SkipSuggestionConfig`'s own docstring).
+
+- **2026-08-20: correction — a "tightened export" second pass using
+  `HardCutConfig` is not new work; it already shipped.** Prompted by a
+  request to build exactly this. `apply_hard_cuts()` already loops `for
+  seg_a, seg_b in kept_segments` (`pipeline/segments.py`), i.e. it
+  already scans each individual kept span, and is already called
+  unconditionally as the literal last step of `process_video()`
+  (`pipeline/run.py:209`) — the single entry point both the single-file
+  and multi-file detect scripts share. There is no code path for a real
+  upload that skips it.
+
+  **Real confirmation on the same `fb07ea71f4b3` clip_300 batch used
+  throughout tonight's stitch investigation:** its manifest already
+  contains 6 `origin="hard_cut"` entries (only 2 were visible in an
+  earlier truncated listing; the other 4 sit in the segments not shown
+  then), totaling 6.408s already genuinely removed via this exact
+  mechanism, already reflected in the 147.272104s output duration
+  verified earlier tonight. An idempotency check — rerunning
+  `apply_hard_cuts()` with the identical default `HardCutConfig()`
+  against the CURRENT (already-tightened) kept spans, using freshly
+  recomputed real motion data — found zero new cut windows and left the
+  kept spans unchanged. Not a coincidence of this clip: `find_cut_windows`
+  scans a kept span's entire motion timeline in one linear pass before
+  any splitting happens, so the first (already-shipped) application
+  already exhausts everything the current 0.002 threshold / 0.5s buffer
+  / 1.5s merge-gap config can find. No code was written or changed —
+  reimplementing an identical already-shipped pass would be redundant by
+  construction, not a cautious negative result.
+
+- **2026-08-20: real measurement pass — sweeping `HardCutConfig`'s three
+  parameters independently on `clip_300` (`fb07ea71f4b3`), starting from
+  the shipped baseline (threshold 0.002, min_raw_dip_s 0.5, merge_gap_s
+  1.5, buffer_s 0.5 -> 6 cuts, 6.41s).** No default changed, nothing
+  shipped — this is a real cost/risk measurement only, real motion data
+  recomputed against the real clip, every new candidate window frame-
+  checked at the same rigor as the earlier SSIM stitch verification, not
+  just read off the motion score.
+
+  **Threshold sweep (0.002 -> 0.0058, the skip_suggestion bar):** 0.003
+  adds 4.53s (6 new windows), 0.004 adds 11.25s (7 new), 0.005 adds
+  18.99s (10 new), 0.0058 adds 23.47s (10 new). Frame-checked all 10
+  distinct new windows (22-frame contact sheet, dense-resampled the two
+  largest). Real risk found starting at 0.005: window 52.74-58.41s shows
+  a second player visibly walking up progressively closer to the batter
+  across a 0.5s-spaced dense sample — real motion, not just a quiet
+  motion score — sitting immediately before required ground-truth event
+  e2's own documented window (pitch, load 59-62, ball ~63). Window
+  113.22-119.83s (appears at 0.0058) is the single largest fraction-of-
+  span removal in the sweep (83% of its 7.987s span); its 0.8s-spaced
+  sample looked genuinely static (batter stepping out, no swing) but
+  that spacing can't rule out something sub-second between samples. The
+  other 8 new windows looked genuinely idle on inspection.
+
+  **Min-dip sweep (0.5s -> 0.1s):** 0.35 adds 2.02s (1 new), 0.2 adds
+  4.70s (5 new), 0.1 adds 5.89s (6 new) — smallest apparent risk of the
+  three levers by raw numbers, but every new window here is a small
+  fragment (<=1s) sitting inside a region already frame-checked under
+  the threshold sweep above (including the flagged 52.74-58.41s walk-up
+  region), so it is NOT independently safer, just a smaller slice of the
+  same already-flagged risk.
+
+  **Buffer sweep (0.5s -> 0.0s):** 0.35 -> 8.91s total, 0.2 -> 12.73s,
+  0.0 -> 17.93s. This lever mostly grows the edges of the 6 already-
+  shipped windows rather than finding new ones. Highest risk of the
+  three: at buffer=0 the largest existing window (95.595-97.202s) grows
+  to 95.09-97.70s, and that window sits inside required ground-truth
+  event e6 (hit-and-run). A dense 0.5s-spaced check of 93.5-99.0s showed
+  a person in active running/fielding motion through that stretch, not
+  visible dead time — shrinking the buffer here erodes margin at exactly
+  the point closest to a documented required real play. Recommendation
+  reported, not acted on: threshold should not move past ~0.003 without
+  per-window frame review; min-dip is the least-bad lever by raw
+  numbers but inherits the same flagged risk, not a separate safer one;
+  buffer is the lever least likely to be worth moving at all.
+
+- **2026-08-20: NEW open item, distinct from the sweep above — the
+  EXISTING shipped baseline hard-cut window on `clip_300`
+  (95.595-97.202s, currently live in production, part of the same 6
+  cuts the idempotency check above confirmed as already-shipped, not
+  something this session introduced) sits adjacent to required
+  ground-truth event e6 (hit-and-run, note: "swing/contact ~97, batter
+  drops bat and runs ~98, fielding through ~102").** A handful of
+  0.5s-spaced stills taken while investigating the buffer sweep's edge
+  growth showed what looks like real running/fielding motion near this
+  window, but that check does not meet this project's own bar for a
+  real verification — it was incidental to the buffer-sweep check above,
+  not a dedicated pass. This needs the same rigor as the earlier
+  `clip_60#e6` ground-truth relabel correction tonight (full-frame
+  context, not narrow/sparse sampling, before concluding anything about
+  already-shipped production behavior) as its own dedicated follow-up.
+  Not yet confirmed as a real problem — flagged as an open question,
+  not a verdict.
+
 
 ## Testing
 
