@@ -1,9 +1,21 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getJob, getManifest, outputUrl, sourceUrl, triggerExport, updateSegmentStatus } from '../api'
 import type { Manifest, Segment } from '../types'
-import SkippableVideo from './SkippableVideo'
+import SkippableVideo, { type SkippableVideoHandle } from './SkippableVideo'
 
 const EXPORT_POLL_MS = 1000
+
+// Segment-relative duration, not two timestamps the viewer has to
+// subtract themselves -- real usability gap flagged in tonight's Edit
+// Log audit, especially at full-game scale (hundreds of entries).
+function formatDuration(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds.toFixed(seconds < 10 ? 2 : 1)}s`
+  }
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds - m * 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
 
 type LoadState = 'loading' | 'ready' | 'not_ready' | 'error'
 
@@ -40,6 +52,17 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
   const [exportVersion, setExportVersion] = useState<string | number | null>(null)
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
+  // For the "jump to this point" affordance (finding #2 of tonight's
+  // Edit Log audit): outputVideoRef drives the actual seek+play,
+  // outputSectionRef just scrolls the player into view first so a jump
+  // from an entry far down a long list is visible, not silent.
+  const outputVideoRef = useRef<SkippableVideoHandle>(null)
+  const outputSectionRef = useRef<HTMLDivElement>(null)
+
+  function handleJumpToOutput(seconds: number) {
+    outputSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    outputVideoRef.current?.seekTo(seconds)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -230,7 +253,7 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
     <div className="card">
       <h2 style={{ marginTop: 0 }}>Edit Log</h2>
 
-      <div style={{ marginBottom: 24, paddingBottom: 20, borderBottom: '1px solid var(--color-border)' }}>
+      <div ref={outputSectionRef} style={{ marginBottom: 24, paddingBottom: 20, borderBottom: '1px solid var(--color-border)' }}>
         <h3 style={{ marginBottom: 8 }}>Current output</h3>
         {exporting && (
           <p>
@@ -242,6 +265,7 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
         {exportVersion ? (
           <>
             <SkippableVideo
+              ref={outputVideoRef}
               src={outputUrl(bid, exportVersion)}
               segments={activeManifest.segments}
             />
@@ -269,51 +293,20 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
         <p className="muted">Detection didn't cut anything from this video -- nothing to review here.</p>
       ) : (
         <ul style={{ listStyle: 'none', padding: 0 }}>
-          {cutEntries.map((seg) => {
-            const restored = seg.status === 'kept'
-            const isPending = pendingId === seg.id
-            const isHardCut = seg.origin === 'hard_cut'
-            return (
-              <li
-                key={seg.id}
-                className={`entry-card${isHardCut ? ' hard-cut' : ''}${restored ? ' restored' : ''}`}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                  <div>
-                    <strong>
-                      {seg.start} - {seg.end}
-                    </strong>
-                    <span className="muted" style={{ marginLeft: 10 }}>{seg.source_file}</span>
-                    {isHardCut && (
-                      <span className="badge badge-warning" style={{ marginLeft: 10 }}>
-                        ⚠ Auto-cut mid-play — review recommended
-                      </span>
-                    )}
-                    {restored && (
-                      <span className="badge badge-success" style={{ marginLeft: 10 }}>
-                        Restored
-                      </span>
-                    )}
-                  </div>
-                  <div>
-                    <button
-                      className="secondary"
-                      onClick={() => setPreviewingId(previewingId === seg.id ? null : seg.id)}
-                      style={{ marginRight: 8 }}
-                    >
-                      {previewingId === seg.id ? 'Hide preview' : 'Preview'}
-                    </button>
-                    <button onClick={() => handleToggle(seg)} disabled={isPending || exporting}>
-                      {isPending ? 'Saving...' : restored ? 'Cut again' : 'Restore'}
-                    </button>
-                  </div>
-                </div>
-                {previewingId === seg.id && (
-                  <SegmentPreview batchId={bid} segment={seg} />
-                )}
-              </li>
-            )
-          })}
+          {cutEntries.map((seg) => (
+            <EditLogEntry
+              key={seg.id}
+              batchId={bid}
+              segment={seg}
+              kind="cut"
+              isPending={pendingId === seg.id}
+              exporting={exporting}
+              isPreviewing={previewingId === seg.id}
+              onTogglePreview={() => setPreviewingId(previewingId === seg.id ? null : seg.id)}
+              onToggleStatus={() => handleToggle(seg)}
+              onJumpToOutput={handleJumpToOutput}
+            />
+          ))}
         </ul>
       )}
 
@@ -327,49 +320,136 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
           <p className="muted">No kept segments to review.</p>
         ) : (
           <ul style={{ listStyle: 'none', padding: 0 }}>
-            {keptEntries.map((seg) => {
-              const isPending = pendingId === seg.id
-              const userRemoved = seg.status === 'cut'
-              return (
-                <li
-                  key={seg.id}
-                  className={`entry-card${userRemoved ? ' user-removed' : ''}`}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                    <div>
-                      <strong>
-                        {seg.start} - {seg.end}
-                      </strong>
-                      <span className="muted" style={{ marginLeft: 10 }}>{seg.source_file}</span>
-                      {userRemoved && (
-                        <span className="badge badge-neutral" style={{ marginLeft: 10 }}>
-                          Removed
-                        </span>
-                      )}
-                    </div>
-                    <div>
-                      <button
-                        className="secondary"
-                        onClick={() => setPreviewingId(previewingId === seg.id ? null : seg.id)}
-                        style={{ marginRight: 8 }}
-                      >
-                        {previewingId === seg.id ? 'Hide preview' : 'Preview'}
-                      </button>
-                      <button onClick={() => handleToggle(seg)} disabled={isPending || exporting}>
-                        {isPending ? 'Saving...' : userRemoved ? 'Restore' : 'Cut'}
-                      </button>
-                    </div>
-                  </div>
-                  {previewingId === seg.id && (
-                    <SegmentPreview batchId={bid} segment={seg} />
-                  )}
-                </li>
-              )
-            })}
+            {keptEntries.map((seg) => (
+              <EditLogEntry
+                key={seg.id}
+                batchId={bid}
+                segment={seg}
+                kind="kept"
+                isPending={pendingId === seg.id}
+                exporting={exporting}
+                isPreviewing={previewingId === seg.id}
+                onTogglePreview={() => setPreviewingId(previewingId === seg.id ? null : seg.id)}
+                onToggleStatus={() => handleToggle(seg)}
+                onJumpToOutput={handleJumpToOutput}
+              />
+            ))}
           </ul>
         )}
       </div>
     </div>
+  )
+}
+
+interface EditLogEntryProps {
+  batchId: string
+  segment: Segment
+  kind: 'cut' | 'kept'
+  isPending: boolean
+  exporting: boolean
+  isPreviewing: boolean
+  onTogglePreview: () => void
+  onToggleStatus: () => void
+  onJumpToOutput: (seconds: number) => void
+}
+
+// Shared row for both the cut-review list and the kept-segments list --
+// used to be two near-identical inline blocks; pulled out once thumbnail/
+// duration/jump-to-output needed to land in both without drifting apart.
+function EditLogEntry({
+  batchId,
+  segment: seg,
+  kind,
+  isPending,
+  exporting,
+  isPreviewing,
+  onTogglePreview,
+  onToggleStatus,
+  onJumpToOutput,
+}: EditLogEntryProps) {
+  const isHardCut = seg.origin === 'hard_cut'
+  const restored = kind === 'cut' && seg.status === 'kept'
+  const userRemoved = kind === 'kept' && seg.status === 'cut'
+  const duration = seg.end_s - seg.start_s
+  // Only present once a real export has run and this segment landed in
+  // it (pipeline.manifest.apply_output_offsets) -- absent, not guessed,
+  // for a segment currently excluded from the output (e.g. still cut),
+  // same "position unknown" contract SkippableVideo's own skip-ahead
+  // logic already follows.
+  const canJump = seg.output_start_s != null
+
+  const toggleLabel =
+    kind === 'cut'
+      ? isPending
+        ? 'Saving...'
+        : restored
+          ? 'Cut again'
+          : 'Restore'
+      : isPending
+        ? 'Saving...'
+        : userRemoved
+          ? 'Restore'
+          : 'Cut'
+
+  return (
+    <li
+      className={`entry-card${isHardCut ? ' hard-cut' : ''}${restored ? ' restored' : ''}${userRemoved ? ' user-removed' : ''}`}
+    >
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+        <SegmentThumbnail batchId={batchId} segment={seg} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <strong>
+                {seg.start} - {seg.end}
+              </strong>
+              <span className="muted" style={{ marginLeft: 8 }}>({formatDuration(duration)})</span>
+              <span className="muted" style={{ marginLeft: 10 }}>{seg.source_file}</span>
+              {isHardCut && (
+                <span className="badge badge-warning" style={{ marginLeft: 10 }}>
+                  ⚠ Auto-cut mid-play — review recommended
+                </span>
+              )}
+              {restored && (
+                <span className="badge badge-success" style={{ marginLeft: 10 }}>
+                  Restored
+                </span>
+              )}
+              {userRemoved && (
+                <span className="badge badge-neutral" style={{ marginLeft: 10 }}>
+                  Removed
+                </span>
+              )}
+            </div>
+            <div>
+              {canJump && (
+                <button
+                  className="secondary"
+                  type="button"
+                  title="Jump to this point in the output player above"
+                  onClick={() => onJumpToOutput(seg.output_start_s!)}
+                  style={{ marginRight: 8 }}
+                >
+                  ↑ Jump to output
+                </button>
+              )}
+              <button
+                className="secondary"
+                type="button"
+                onClick={onTogglePreview}
+                style={{ marginRight: 8 }}
+              >
+                {isPreviewing ? 'Hide preview' : 'Preview'}
+              </button>
+              <button type="button" onClick={onToggleStatus} disabled={isPending || exporting}>
+                {toggleLabel}
+              </button>
+            </div>
+          </div>
+          {isPreviewing && <SegmentPreview batchId={batchId} segment={seg} />}
+        </div>
+      </div>
+    </li>
   )
 }
 
@@ -378,24 +458,190 @@ interface SegmentPreviewProps {
   segment: Segment
 }
 
+// Scoped to the segment's own [start_s, end_s] window, not the source
+// file's full timeline -- a native <video controls> here would show the
+// whole source's scrubber (e.g. 3:10 for a 0.35s hard-cut window), which
+// is exactly the gap this replaces (finding #1 of tonight's Edit Log
+// usability audit). Custom play/pause + a scrubber whose range IS the
+// segment's own duration, not the source file's.
 function SegmentPreview({ batchId, segment }: SegmentPreviewProps) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [playing, setPlaying] = useState(false)
+  // Seconds into the SEGMENT (0..duration), not the source file's own
+  // currentTime -- what the scrubber and time readout are driven by.
+  const [elapsed, setElapsed] = useState(0)
+  const duration = Math.max(0, segment.end_s - segment.start_s)
+
   function handleLoadedMetadata(e: React.SyntheticEvent<HTMLVideoElement>) {
     e.currentTarget.currentTime = segment.start_s
   }
 
   function handleTimeUpdate(e: React.SyntheticEvent<HTMLVideoElement>) {
-    if (e.currentTarget.currentTime >= segment.end_s) {
+    const t = e.currentTarget.currentTime
+    if (t >= segment.end_s) {
       e.currentTarget.pause()
+    }
+    setElapsed(Math.max(0, Math.min(duration, t - segment.start_s)))
+  }
+
+  function togglePlay() {
+    const el = videoRef.current
+    if (!el) return
+    if (el.paused) {
+      // Replay from the start once playback has reached the segment's
+      // own end -- otherwise Play would do nothing (already-paused-at-end
+      // is a dead click, not a real replay).
+      if (el.currentTime < segment.start_s || el.currentTime >= segment.end_s) {
+        el.currentTime = segment.start_s
+      }
+      void el.play()
+    } else {
+      el.pause()
     }
   }
 
+  function handleScrubberClick(e: React.MouseEvent<HTMLDivElement>) {
+    const el = videoRef.current
+    if (!el || duration <= 0) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    el.currentTime = segment.start_s + frac * duration
+  }
+
+  const frac = duration > 0 ? elapsed / duration : 0
+
   return (
-    <video
-      controls
-      src={sourceUrl(batchId, segment.source_file)}
-      onLoadedMetadata={handleLoadedMetadata}
-      onTimeUpdate={handleTimeUpdate}
-      style={{ maxWidth: '100%', width: '100%', background: '#000', marginTop: 10 }}
-    />
+    <div style={{ marginTop: 10 }}>
+      <video
+        ref={videoRef}
+        src={sourceUrl(batchId, segment.source_file)}
+        onLoadedMetadata={handleLoadedMetadata}
+        onTimeUpdate={handleTimeUpdate}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        style={{ maxWidth: '100%', width: '100%', background: '#000' }}
+      />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
+        <button className="secondary" type="button" onClick={togglePlay}>
+          {playing ? 'Pause' : 'Play'}
+        </button>
+        <div className="segment-preview-scrubber" onClick={handleScrubberClick}>
+          <div className="segment-preview-scrubber-fill" style={{ width: `${frac * 100}%` }} />
+        </div>
+        <span className="muted" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
+          {formatDuration(elapsed)} / {formatDuration(duration)}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+const THUMB_W = 96
+const THUMB_H = 54
+
+interface SegmentThumbnailProps {
+  batchId: string
+  segment: Segment
+}
+
+// A real frame from the segment's own midpoint, captured client-side (a
+// hidden <video> seeked to that instant, drawn to a canvas) -- no new
+// backend endpoint, reusing the same source-file byte-range serving the
+// preview player already relies on. Lazy via IntersectionObserver: a
+// full-length game batch can carry hundreds of entries (e.g. 681 on a
+// real full_game.mkv run), and decoding a frame for every one of them
+// eagerly would mean hundreds of concurrent <video> loads at once --
+// only entries actually scrolled into view ever get a real decode.
+function SegmentThumbnail({ batchId, segment }: SegmentThumbnailProps) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(false)
+  const [dataUrl, setDataUrl] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisible(true)
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '200px' },
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!visible || dataUrl || failed) return
+    const video = document.createElement('video')
+    video.src = sourceUrl(batchId, segment.source_file)
+    video.muted = true
+    video.preload = 'metadata'
+    let cancelled = false
+
+    function cleanup() {
+      video.removeAttribute('src')
+      video.load()
+    }
+
+    function onLoadedMetadata() {
+      if (cancelled) return
+      const mid = segment.start_s + (segment.end_s - segment.start_s) / 2
+      // Clamp inside the actually-decodable range -- a segment sitting
+      // right at the source's own tail could otherwise request a seek
+      // past what video.duration reports.
+      video.currentTime = Math.min(mid, Math.max(0, video.duration - 0.05))
+    }
+
+    function onSeeked() {
+      if (cancelled) return
+      const canvas = document.createElement('canvas')
+      canvas.width = THUMB_W
+      canvas.height = THUMB_H
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        setFailed(true)
+        cleanup()
+        return
+      }
+      try {
+        ctx.drawImage(video, 0, 0, THUMB_W, THUMB_H)
+        setDataUrl(canvas.toDataURL('image/jpeg', 0.7))
+      } catch {
+        setFailed(true)
+      }
+      cleanup()
+    }
+
+    function onError() {
+      if (cancelled) return
+      setFailed(true)
+    }
+
+    video.addEventListener('loadedmetadata', onLoadedMetadata)
+    video.addEventListener('seeked', onSeeked)
+    video.addEventListener('error', onError)
+
+    return () => {
+      cancelled = true
+      video.removeEventListener('loadedmetadata', onLoadedMetadata)
+      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('error', onError)
+      cleanup()
+    }
+  }, [visible, dataUrl, failed, batchId, segment])
+
+  return (
+    <div
+      ref={containerRef}
+      className="segment-thumb"
+      style={{ width: THUMB_W, height: THUMB_H, flexShrink: 0 }}
+      aria-hidden="true"
+    >
+      {dataUrl && <img src={dataUrl} alt="" width={THUMB_W} height={THUMB_H} />}
+    </div>
   )
 }

@@ -1,5 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import type { Segment } from '../types'
+
+// Exposed to parents via ref so something outside this component (e.g.
+// an Edit Log entry's "jump to this point" affordance) can move the
+// player without reaching into its internal <video> DOM node directly.
+export interface SkippableVideoHandle {
+  seekTo: (seconds: number) => void
+}
 
 const TOAST_VISIBLE_MS = 2000
 const TOAST_FADE_MS = 300
@@ -82,13 +89,29 @@ interface SkippableVideoProps extends React.VideoHTMLAttributes<HTMLVideoElement
 //   - Manual (the original behavior, kept for anyone who'd rather
 //     decide per-window): a "Skip ahead" button appears while playback
 //     is inside a window and the viewer clicks it themselves.
-export default function SkippableVideo({ src, segments, style, ...videoProps }: SkippableVideoProps) {
+const SkippableVideo = forwardRef<SkippableVideoHandle, SkippableVideoProps>(function SkippableVideo(
+  { src, segments, style, ...videoProps },
+  ref,
+) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const skipWindows = useMemo(() => computeSkipWindows(segments), [segments])
   const [autoSkip, setAutoSkip] = useState(true)
   const [activeSkip, setActiveSkip] = useState<SkipWindow | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
   const toastTimers = useRef<ReturnType<typeof setTimeout>[]>([])
+
+  useImperativeHandle(ref, () => ({
+    seekTo(seconds: number) {
+      const el = videoRef.current
+      if (!el) return
+      el.currentTime = seconds
+      // A jump-to-here click is a request to actually watch that
+      // moment, not just move the playhead silently underneath a
+      // paused frame -- matches what a viewer expects from clicking a
+      // timestamp.
+      void el.play()
+    },
+  }))
 
   useEffect(() => () => toastTimers.current.forEach(clearTimeout), [])
 
@@ -176,4 +199,6 @@ export default function SkippableVideo({ src, segments, style, ...videoProps }: 
       )}
     </div>
   )
-}
+})
+
+export default SkippableVideo
