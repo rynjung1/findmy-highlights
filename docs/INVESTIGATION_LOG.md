@@ -4687,6 +4687,41 @@ than documenting the exact dashboard values directly:
   error needing a fix, just flagged so future work keying off that exact
   sub-timestamp within e6 knows it's imprecise.
 
+- **2026-08-21: full hard-cut safety verification on `full_game.mkv`
+  reaches 100% coverage — zero confirmed failures, deployment target
+  cleared.** Extends the clip_300/e6 review's method (dense 0.4s-spaced
+  frame sampling + margin, real visual judgment, not motion score alone)
+  across every hard-cut window the shipped mechanism produced on a real
+  67.5-minute game recording, not just a 3-minute reference clip. Final
+  tally: **207 of 207 windows checked, 172.96s of 172.96s hard-cut time
+  verified (100% by both count and time)**. Done in two passes: 53
+  windows / 88.49s (all 33 windows over 1.5s plus a random 20-window
+  cross-section of the rest) first, then the remaining 154 windows /
+  84.47s to close out full coverage.
+
+  **Zero confirmed failures.** Two borderline cases were surfaced and
+  documented explicitly rather than silently folded into "pass," same
+  standard as this project uses for every ambiguous call:
+  - **L12** (1194.09-1196.53s): real player movement (walking/
+    repositioning) visible during the cut, no swing/contact/pitch.
+  - **R132** (3503.687-3504.042s): real, sustained running motion during
+    the actual cut window (not just the margin) — a person jogging along
+    the sideline fence. Home plate confirmed empty throughout (no
+    batter, no pitcher, no ball anywhere in frame) — no live batted-ball
+    play for this motion to be baserunning from.
+
+  Both ruled **PASS**, consistent with this project's standing
+  definition of protected real play (swing/contact/pitch/baserunning
+  tied to a live play, not any human motion on screen) — confirmed by
+  owner review: R132 is genuinely intended dead time (sideline jogging),
+  not a missed edge case the definition should be widened to catch.
+
+  **The hard-cut mechanism (`HardCutConfig`/`apply_hard_cuts`, 0.002
+  threshold / 0.5s buffer / 1.5s merge-gap, unchanged from its shipped
+  defaults throughout this entire verification) is now verified safe at
+  full 100% coverage on the real full-length deployment target, not just
+  the 190s reference clips it was originally tuned and tested against.**
+
 
 ## Testing
 
