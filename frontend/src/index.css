@@ -683,9 +683,17 @@ video {
 
 .progress-fill {
   height: 100%;
-  width: 30%;
   border-radius: 999px;
   background: var(--color-text);
+}
+
+/* No real percent-complete signal for the current stage: an honest
+   "working" animation, not a fabricated position. Applied only when
+   ProcessingStep has no real (t/duration) fraction to render -- see
+   that component for where the real, determinate width comes from
+   instead whenever one exists. */
+.progress-fill--indeterminate {
+  width: 30%;
   animation: indeterminate 1.4s ease-in-out infinite;
 }
 

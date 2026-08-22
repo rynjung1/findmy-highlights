@@ -13,6 +13,7 @@ no channel for state to leak from one file into the next.
 """
 
 import os
+import time
 from pathlib import Path
 
 from pipeline.atbat import AtBatConfig, atbat_start_times
@@ -86,7 +87,27 @@ def process_video(video: str, zone, motion_only: bool = False,
     cache_dir = cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR
     if on_stage:
         on_stage("analyzing motion")
-    motion = compute_motion(video)
+
+    last_motion_progress_at = 0.0
+
+    def _motion_progress(t, duration):
+        # compute_motion samples at MotionConfig.sample_fps (10/s of
+        # source video) and, on a real full-length game, runs well faster
+        # than real-time -- calling on_stage (a real job-file disk write,
+        # see backend/pipeline_runner.py) on every sample would mean
+        # dozens of writes per wall-clock second. Throttled to roughly
+        # once per real wall-clock second instead, the same cadence
+        # detection's own progress already settles into naturally from
+        # its ~1 sampled-frame/sec model inference rate -- see
+        # _detection_progress below, same (t/duration) format so the
+        # frontend can parse both stages identically.
+        nonlocal last_motion_progress_at
+        now = time.monotonic()
+        if now - last_motion_progress_at >= 1.0:
+            last_motion_progress_at = now
+            on_stage(f"analyzing motion ({t:.0f}s/{duration:.0f}s)")
+
+    motion = compute_motion(video, progress_cb=_motion_progress if on_stage else None)
     if motion_only:
         segs = scores_to_segments(motion.times, motion.scores, SegmentConfig())
         return segs, [], motion.duration, motion, []

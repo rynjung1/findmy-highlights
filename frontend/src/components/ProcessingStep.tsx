@@ -4,6 +4,42 @@ import type { Job } from '../types'
 
 const POLL_INTERVAL_MS = 2000
 
+// Human labels for the raw stage names pipeline/run.py and
+// pipeline/stitch.py report via on_stage. Falls back to the raw stage
+// text itself for anything not listed here, so an unrecognized future
+// stage still shows something real rather than going blank.
+const STAGE_LABELS: Record<string, string> = {
+  'analyzing motion': 'Analyzing motion',
+  'running player detection': 'Detecting plays',
+  'extending and padding segments': 'Refining play boundaries',
+  'building manifest': 'Finalizing analysis',
+  'extracting kept segments': 'Cutting downtime',
+  'stitching output': 'Assembling final video',
+}
+
+// Parses a raw job.stage string like
+// "running player detection (612s/4050s) (full_game.mkv)" into a clean
+// label plus a real percent, when the backend actually reports one.
+// Only `analyzing motion` and `running player detection` currently embed
+// a real (secondsDone/secondsTotal) fraction (see pipeline/run.py) --
+// every other stage has no per-frame signal to report, so this
+// deliberately returns percent: null for those rather than guessing one.
+function parseStage(raw: string | null | undefined): { label: string; percent: number | null } {
+  if (!raw) return { label: 'starting...', percent: null }
+
+  const base = raw.split('(')[0].trim()
+  const label = STAGE_LABELS[base] ?? base
+
+  const match = raw.match(/\((\d+)s\/(\d+)s\)/)
+  if (!match) return { label, percent: null }
+
+  const done = Number(match[1])
+  const total = Number(match[2])
+  if (!total) return { label, percent: null }
+  const percent = Math.min(100, Math.max(0, Math.round((done / total) * 100)))
+  return { label, percent }
+}
+
 interface ProcessingStepProps {
   batchId: string
   onDone: () => void
@@ -69,9 +105,7 @@ export default function ProcessingStep({ batchId, onDone, onError }: ProcessingS
     }
   }, [batchId, onDone, onError])
 
-  const stageLabel = exportJob
-    ? `Stitching output: ${exportJob.stage || 'starting...'}`
-    : `Analyzing: ${detectJob?.stage || 'starting...'}`
+  const { label, percent } = parseStage(exportJob ? exportJob.stage : detectJob?.stage)
 
   return (
     <div className="card">
@@ -79,10 +113,15 @@ export default function ProcessingStep({ batchId, onDone, onError }: ProcessingS
       <h2 style={{ marginTop: 0 }}>Processing</h2>
       <p>
         <span className="spinner" aria-hidden="true" />
-        {stageLabel}
+        {label}
+        {percent !== null ? ` — ${percent}% through the video` : ''}
       </p>
       <div className="progress-track">
-        <div className="progress-fill" />
+        {percent !== null ? (
+          <div className="progress-fill" style={{ width: `${percent}%` }} />
+        ) : (
+          <div className="progress-fill progress-fill--indeterminate" />
+        )}
       </div>
       <p className="muted" style={{ fontSize: 14 }}>
         This can take a while for long recordings. Progress is saved on the
