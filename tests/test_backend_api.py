@@ -192,6 +192,53 @@ def test_upload_extension_check_is_case_insensitive(tmp_path):
         assert r.status_code == 200
 
 
+def test_upload_disk_full_gives_clear_507_not_generic_500(tmp_path, monkeypatch):
+    """Real operational failure this project actually hit (see
+    docs/INVESTIGATION_LOG.md): before this fix, an uncaught OSError from
+    storage.save_upload fell through to Starlette's default handler, a
+    bare 500 with detail "Internal Server Error" -- indistinguishable
+    from a real bug, zero indication the disk is full. Confirms the real
+    exception path, not just that the code compiles: monkeypatches
+    save_upload to raise the exact real errno ENOSPC raises."""
+    import errno as errno_module
+
+    def fake_save_upload(dest_path, file_obj):
+        raise OSError(errno_module.ENOSPC, "No space left on device", str(dest_path))
+
+    monkeypatch.setattr("backend.app.storage.save_upload", fake_save_upload)
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("clip.mkv", b"video bytes", "video/x-matroska"))])
+        assert r.status_code == 507
+        detail = r.json()["detail"]
+        assert "disk space" in detail.lower()
+        assert "internal server error" not in detail.lower()
+        # the partial batch dir this attempt started must not survive --
+        # a retry shouldn't find a half-written directory left behind
+        assert list((tmp_path / "uploads").glob("*")) == []
+
+
+def test_upload_other_os_error_gives_real_detail_not_generic_500(tmp_path, monkeypatch):
+    """Same real gap, non-ENOSPC case: any other OSError (permissions,
+    a bad mount, etc.) used to be just as generic. Not classified as
+    disk-full, but still real, specific detail instead of nothing."""
+    import errno as errno_module
+
+    def fake_save_upload(dest_path, file_obj):
+        raise OSError(errno_module.EACCES, "Permission denied", str(dest_path))
+
+    monkeypatch.setattr("backend.app.storage.save_upload", fake_save_upload)
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("clip.mkv", b"video bytes", "video/x-matroska"))])
+        assert r.status_code == 500
+        detail = r.json()["detail"]
+        assert "Permission denied" in detail
+        assert detail != "Internal Server Error"
+
+
 def test_upload_traversal_filename_would_have_escaped_pre_fix(tmp_path):
     """Proves the vulnerability the next few tests guard against is
     real, not hypothetical -- the exact join upload_batch used to do

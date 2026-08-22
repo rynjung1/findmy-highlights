@@ -34,17 +34,105 @@ function apiUrl(path: string): string {
   return `${API_BASE}${path}`
 }
 
-async function request(path: string, options: RequestInit = {}): Promise<Response> {
-  const res = await fetch(apiUrl(path), options)
-  if (!res.ok) {
-    let detail: string | undefined
-    try {
-      detail = (await res.json()).detail
-    } catch {
-      detail = res.statusText
-    }
-    throw new Error(detail || `HTTP ${res.status}`)
+// Real operational failures this app has actually hit (see
+// docs/INVESTIGATION_LOG.md): a transient backend-unreachable moment and
+// a mid-write server disk-full error. Neither used to get any distinct
+// handling -- every catch block across every component just showed
+// whatever raw string ended up in err.message, which for a network
+// failure is a vague, browser-specific engine string ("Failed to
+// fetch", "Load failed", "NetworkError...") and for the old generic
+// disk-full response was literally "Internal Server Error", both
+// meaningless to a non-technical user. Classifying centrally here means
+// every existing `err instanceof Error ? err.message : String(err)`
+// call site across the app (there are many, all written the same way)
+// gets the improved message for free, with no per-component changes.
+export type AppErrorKind = 'network' | 'disk_full' | 'server'
+
+export class AppError extends Error {
+  kind: AppErrorKind
+  constructor(message: string, kind: AppErrorKind) {
+    super(message)
+    this.name = 'AppError'
+    this.kind = kind
   }
+}
+
+// Exported so callers reading a raw error string that never went through
+// an HTTP error response can still get the same classification -- the
+// one real case that matters: a background job (detect/export) that hit
+// ENOSPC mid-run reports it via `job.error`, Python's own OSError string
+// ("[Errno 28] No space left on device: '...'"), inside an otherwise-200
+// `GET .../jobs/{type}` response body. That never passes through
+// `request()`'s error branch at all (the HTTP request itself succeeded;
+// it's the job that failed), so ProcessingStep/EditLogView need to run
+// job.error through this themselves before displaying it.
+export function classifyMessage(raw: string): { message: string; kind: AppErrorKind } {
+  const lower = raw.toLowerCase()
+  if (lower.includes('no space left on device') || lower.includes('enospc')) {
+    return {
+      message:
+        'The server ran out of disk space while handling this. Free up ' +
+        'space on the server, then try again.',
+      kind: 'disk_full',
+    }
+  }
+  return { message: raw, kind: 'server' }
+}
+
+const UNREACHABLE_MESSAGE =
+  "Can't reach the Find My Highlights server right now. Make sure it's " +
+  'running, then try again.'
+
+function throwClassified(raw: string): never {
+  const { message, kind } = classifyMessage(raw)
+  throw new AppError(message, kind)
+}
+
+// Every request in this module funnels through here or handleErrorResponse
+// below -- the one place that turns "fetch() itself rejected" into a
+// real, classified, friendly error instead of letting each call site
+// rediscover the same raw TypeError independently.
+async function fetchOrThrow(path: string, options?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(apiUrl(path), options)
+  } catch {
+    // fetch() rejects (not a 4xx/5xx response -- an actual rejection)
+    // when the request never reached ANY server at all: offline, DNS
+    // failure, or a direct connection refused with no proxy in front
+    // (the real topology a production deploy with VITE_API_BASE_URL
+    // pointed straight at the backend would have). Every browser
+    // signals this the same way, with wording that means nothing to
+    // someone who isn't a developer.
+    throw new AppError(UNREACHABLE_MESSAGE, 'network')
+  }
+}
+
+// Every non-ok response funnels through here. Real, live-tested finding
+// (not assumed): in this project's actual local-dev topology, killing
+// the backend process does NOT make fetch() reject at all -- Vite's own
+// dev proxy (see vite.config.ts) catches the real ECONNREFUSED
+// server-side and hands the browser a normal-looking HTTP 500 with no
+// body ("[vite] http proxy error: ... ECONNREFUSED" in the vite log,
+// confirmed live). A production deploy behind a reverse proxy in front
+// of a crashed backend looks the same way for the same reason. This
+// app's own FastAPI backend, by contrast, ALWAYS returns a real JSON
+// {"detail": ...} body on a real handled error (every HTTPException
+// here does) -- so a non-ok response with no parseable JSON detail is
+// itself the signal: not a real answer from this app, an
+// infrastructure-level failure between the browser and it.
+async function handleErrorResponse(res: Response): Promise<never> {
+  let detail: string | undefined
+  try {
+    detail = (await res.json()).detail
+  } catch {
+    throw new AppError(UNREACHABLE_MESSAGE, 'network')
+  }
+  throwClassified(detail || `HTTP ${res.status}`)
+}
+
+async function request(path: string, options: RequestInit = {}): Promise<Response> {
+  const res = await fetchOrThrow(path, options)
+  if (!res.ok) await handleErrorResponse(res)
   return res
 }
 
@@ -65,9 +153,9 @@ export async function runDemo(): Promise<DemoRunResponse> {
 }
 
 export async function getCalibration(batchId: string): Promise<Calibration | null> {
-  const res = await fetch(apiUrl(`/batches/${batchId}/calibration`))
+  const res = await fetchOrThrow(`/batches/${batchId}/calibration`)
   if (res.status === 404) return null
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) await handleErrorResponse(res)
   return res.json()
 }
 
@@ -136,16 +224,16 @@ export async function confirmOrder(batchId: string, order: string[]): Promise<Jo
 }
 
 export async function getJob(batchId: string, jobType: JobType): Promise<Job | null> {
-  const res = await fetch(apiUrl(`/batches/${batchId}/jobs/${jobType}`))
+  const res = await fetchOrThrow(`/batches/${batchId}/jobs/${jobType}`)
   if (res.status === 404) return null
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) await handleErrorResponse(res)
   return res.json()
 }
 
 export async function getManifest(batchId: string): Promise<Manifest | null> {
-  const res = await fetch(apiUrl(`/batches/${batchId}/manifest`))
+  const res = await fetchOrThrow(`/batches/${batchId}/manifest`)
   if (res.status === 404) return null
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) await handleErrorResponse(res)
   return res.json()
 }
 
@@ -188,9 +276,9 @@ export async function triggerExport(batchId: string): Promise<Job> {
 // which ReviewQueueView treats as a distinct "not enabled" state from
 // an empty-but-enabled queue ({done: true}, a normal 200).
 export async function getNextReview(): Promise<ReviewNextResponse | null> {
-  const res = await fetch(apiUrl('/review/next'))
+  const res = await fetchOrThrow('/review/next')
   if (res.status === 404) return null
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) await handleErrorResponse(res)
   return res.json()
 }
 

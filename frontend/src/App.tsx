@@ -6,7 +6,7 @@ import ProcessingStep from './components/ProcessingStep'
 import ResultStep from './components/ResultStep'
 import EditLogView from './components/EditLogView'
 import ReviewQueueView from './components/ReviewQueueView'
-import { getJob, triggerProcess } from './api'
+import { AppError, type AppErrorKind, getJob, triggerProcess } from './api'
 
 const STORAGE_KEY = 'fmh_batch_id'
 
@@ -79,6 +79,14 @@ export default function App() {
   const [batchId, setBatchId] = useState<string | null>(null)
   const [orderInfo, setOrderInfo] = useState<OrderInfo | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  // 'network' gets a real Retry action below (a transient backend blip
+  // is worth trying again); 'disk_full' doesn't (retrying changes
+  // nothing until someone actually frees space on the server) -- see
+  // docs/INVESTIGATION_LOG.md for the two real incidents this
+  // distinction comes from. Defaults to 'server' for anything not an
+  // AppError (a plain thrown string, etc.), which keeps today's retry
+  // behavior for those rather than silently dropping the option.
+  const [errorKind, setErrorKind] = useState<AppErrorKind>('server')
 
   // On mount: resume from wherever the batch actually is on the server,
   // never assume a fresh client. Job state is durable server-side (see
@@ -121,9 +129,11 @@ export default function App() {
         `The previous run for this upload didn't finish (${detect.status}): ` +
           `${detect.error || 'no error detail available'}`,
       )
+      setErrorKind('server')
       setStage('error')
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err))
+      setErrorKind(err instanceof AppError ? err.kind : 'server')
       setStage('error')
     }
   }
@@ -165,12 +175,26 @@ export default function App() {
       // otherwise ProcessingStep's own polling takes over from here
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err))
+      setErrorKind(err instanceof AppError ? err.kind : 'server')
       setStage('error')
     }
   }
 
   function handleOrderConfirmed() {
     setStage('processing')
+  }
+
+  // Re-asks the server where this batch actually stands, rather than
+  // just clearing the error and hoping -- covers both real error
+  // sources that route here (the mount-time resume check and
+  // ProcessingStep's own onError once ITS internal retry tolerance is
+  // exhausted) with one path: if the server's back, this naturally
+  // lands on whatever stage it should be in now; if it's still down,
+  // it fails again with the same honest message, no worse off.
+  function handleRetry() {
+    if (!batchId) return
+    setErrorMessage(null)
+    resumeFromServer(batchId)
   }
 
   function handleStartOver() {
@@ -246,8 +270,9 @@ export default function App() {
             <ProcessingStep
               batchId={batchId}
               onDone={() => setStage('done')}
-              onError={(msg: string) => {
+              onError={(msg: string, kind: AppErrorKind = 'server') => {
                 setErrorMessage(msg)
+                setErrorKind(kind)
                 setStage('error')
               }}
             />
@@ -255,8 +280,26 @@ export default function App() {
           {stage === 'done' && batchId && <ResultStep batchId={batchId} />}
           {stage === 'error' && (
             <div className="card">
-              <h2>Something went wrong</h2>
+              <h2>
+                {errorKind === 'network'
+                  ? "Can't reach the server"
+                  : errorKind === 'disk_full'
+                    ? 'Server is out of disk space'
+                    : 'Something went wrong'}
+              </h2>
               <p className="alert alert-danger">{errorMessage}</p>
+              {errorKind === 'disk_full' ? (
+                <p className="muted">
+                  This won't resolve on its own -- someone needs to free up
+                  space on the server first.
+                </p>
+              ) : (
+                batchId && (
+                  <p>
+                    <button onClick={handleRetry}>Try again</button>
+                  </p>
+                )
+              )}
             </div>
           )}
 

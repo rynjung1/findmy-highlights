@@ -1,8 +1,17 @@
-import { useEffect, useState } from 'react'
-import { getJob } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { AppError, type AppErrorKind, classifyMessage, getJob } from '../api'
 import type { Job } from '../types'
 
 const POLL_INTERVAL_MS = 2000
+// A real transient backend blip (a --reload restart picking up a code
+// change, a container restarting, a brief network hiccup) is exactly
+// the kind of thing a developer waits out without a second thought but
+// a non-technical volunteer reads as "it's broken, start over" -- see
+// docs/INVESTIGATION_LOG.md's real ECONNREFUSED incident. Tolerating a
+// handful of consecutive failed polls before giving up (10s at the
+// current interval) means the UI rides out a brief outage instead of
+// ending the session on the very first missed poll.
+const MAX_CONSECUTIVE_NETWORK_FAILURES = 5
 
 // Human labels for the raw stage names pipeline/run.py and
 // pipeline/stitch.py report via on_stage. Falls back to the raw stage
@@ -43,12 +52,21 @@ function parseStage(raw: string | null | undefined): { label: string; percent: n
 interface ProcessingStepProps {
   batchId: string
   onDone: () => void
-  onError: (message: string) => void
+  onError: (message: string, kind?: AppErrorKind) => void
 }
 
 export default function ProcessingStep({ batchId, onDone, onError }: ProcessingStepProps) {
   const [detectJob, setDetectJob] = useState<Job | null>(null)
   const [exportJob, setExportJob] = useState<Job | null>(null)
+  // Visible while tolerating consecutive network failures, below --
+  // distinct from the normal "Working" state so a real outage isn't
+  // silently indistinguishable from ordinary processing until it
+  // suddenly gives up.
+  const [reconnecting, setReconnecting] = useState(false)
+  // A ref, not state: read/written from inside the poll loop's closure
+  // on every attempt, and a state update here would just cause a render
+  // this component doesn't otherwise need.
+  const consecutiveNetworkFailures = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -58,10 +76,13 @@ export default function ProcessingStep({ batchId, onDone, onError }: ProcessingS
       try {
         const detect = await getJob(batchId, 'detect')
         if (cancelled) return
+        consecutiveNetworkFailures.current = 0
+        setReconnecting(false)
         setDetectJob(detect)
 
         if (detect?.status === 'failed') {
-          onError(`Detection failed: ${detect.error}`)
+          const classified = classifyMessage(detect.error || '')
+          onError(`Detection failed: ${classified.message}`, classified.kind)
           return
         }
         if (detect?.status === 'interrupted') {
@@ -83,7 +104,8 @@ export default function ProcessingStep({ batchId, onDone, onError }: ProcessingS
             return
           }
           if (exp?.status === 'failed') {
-            onError(`Export failed: ${exp.error}`)
+            const classified = classifyMessage(exp.error || '')
+            onError(`Export failed: ${classified.message}`, classified.kind)
             return
           }
           if (exp?.status === 'interrupted') {
@@ -94,7 +116,18 @@ export default function ProcessingStep({ batchId, onDone, onError }: ProcessingS
 
         timer = setTimeout(poll, POLL_INTERVAL_MS)
       } catch (err) {
-        if (!cancelled) onError(err instanceof Error ? err.message : String(err))
+        if (cancelled) return
+        const isNetwork = err instanceof AppError && err.kind === 'network'
+        if (isNetwork && consecutiveNetworkFailures.current < MAX_CONSECUTIVE_NETWORK_FAILURES) {
+          consecutiveNetworkFailures.current += 1
+          setReconnecting(true)
+          timer = setTimeout(poll, POLL_INTERVAL_MS)
+          return
+        }
+        onError(
+          err instanceof Error ? err.message : String(err),
+          err instanceof AppError ? err.kind : 'server',
+        )
       }
     }
 
@@ -111,11 +144,18 @@ export default function ProcessingStep({ batchId, onDone, onError }: ProcessingS
     <div className="card">
       <span className="step-eyebrow">Working</span>
       <h2 style={{ marginTop: 0 }}>Processing</h2>
-      <p>
-        <span className="spinner" aria-hidden="true" />
-        {label}
-        {percent !== null ? ` — ${percent}% through the video` : ''}
-      </p>
+      {reconnecting ? (
+        <p className="alert alert-warning">
+          <span className="spinner" aria-hidden="true" />
+          Lost the connection to the server -- retrying...
+        </p>
+      ) : (
+        <p>
+          <span className="spinner" aria-hidden="true" />
+          {label}
+          {percent !== null ? ` — ${percent}% through the video` : ''}
+        </p>
+      )}
       <div className="progress-track">
         {percent !== null ? (
           <div className="progress-fill" style={{ width: `${percent}%` }} />

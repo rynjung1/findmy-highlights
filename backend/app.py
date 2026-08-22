@@ -17,10 +17,12 @@ Nothing is ever auto-deleted from uploads/ in v1 (see README's Known
 limitations) — that's a deliberate scope cut, not an oversight.
 """
 
+import errno
 import json
 import mimetypes
 import os
 import re
+import shutil
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -231,10 +233,27 @@ def create_app(uploads_root=None, run_in_background=None,
         batch_id = storage.new_batch_id()
         bdir = storage.batch_dir(app.state.uploads_root, batch_id)
         names = []
-        for f in files:
-            storage.save_upload(bdir / f.filename, f.file)
-            names.append(f.filename)
-        (bdir / "files.json").write_text(json.dumps({"files": names}))
+        try:
+            for f in files:
+                storage.save_upload(bdir / f.filename, f.file)
+                names.append(f.filename)
+            (bdir / "files.json").write_text(json.dumps({"files": names}))
+        except OSError as e:
+            # Real operational failure hit during actual use (see
+            # docs/INVESTIGATION_LOG.md): an uncaught OSError here fell
+            # through to Starlette's default 500 handler, which returns a
+            # bare "Internal Server Error" with zero indication of what
+            # happened -- not just unfriendly, actively misleading for a
+            # non-technical deployment (looks identical to a real bug).
+            # Clean up whatever partial batch dir this attempt left
+            # behind so a retry doesn't find a half-written directory.
+            shutil.rmtree(bdir, ignore_errors=True)
+            if e.errno == errno.ENOSPC:
+                raise HTTPException(
+                    507, "Not enough disk space on the server to save this "
+                         "upload. Free up space on the server, then try "
+                         "again.") from e
+            raise HTTPException(500, f"failed to save upload: {e}") from e
         return {"batch_id": batch_id, "files": names}
 
     @app.get("/health")

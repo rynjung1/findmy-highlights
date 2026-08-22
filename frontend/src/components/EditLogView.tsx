@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
-import { getJob, getManifest, outputUrl, sourceUrl, triggerExport, updateSegmentStatus } from '../api'
+import {
+  AppError,
+  classifyMessage,
+  getJob,
+  getManifest,
+  outputUrl,
+  sourceUrl,
+  triggerExport,
+  updateSegmentStatus,
+} from '../api'
 import type { Manifest, Segment } from '../types'
 import SkippableVideo, { type SkippableVideoHandle } from './SkippableVideo'
 
 const EXPORT_POLL_MS = 1000
+// Same tolerance as ProcessingStep's detect-stage polling, and for the
+// same real reason: a brief backend blip mid-re-export shouldn't end
+// the attempt on the very first missed poll.
+const MAX_CONSECUTIVE_NETWORK_FAILURES = 5
 
 // Segment-relative duration, not two timestamps the viewer has to
 // subtract themselves -- real usability gap flagged in tonight's Edit
@@ -128,11 +141,24 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
     // full-length game (~67min), if the same promotion triggers, expect
     // low-single-digit MINUTES, not seconds -- this is still a real
     // background job, so poll rather than assume either way.
+    let consecutiveNetworkFailures = 0
     while (true) {
-      const job = await getJob(batchId!, 'export')
+      let job
+      try {
+        job = await getJob(batchId!, 'export')
+        consecutiveNetworkFailures = 0
+      } catch (err) {
+        const isNetwork = err instanceof AppError && err.kind === 'network'
+        if (isNetwork && consecutiveNetworkFailures < MAX_CONSECUTIVE_NETWORK_FAILURES) {
+          consecutiveNetworkFailures += 1
+          await new Promise((resolve) => setTimeout(resolve, EXPORT_POLL_MS))
+          continue
+        }
+        return { ok: false, message: err instanceof Error ? err.message : String(err) }
+      }
       if (job?.status === 'completed') return { ok: true }
       if (job?.status === 'failed' || job?.status === 'interrupted') {
-        return { ok: false, message: job.error || `export ${job.status}` }
+        return { ok: false, message: classifyMessage(job.error || `export ${job.status}`).message }
       }
       await new Promise((resolve) => setTimeout(resolve, EXPORT_POLL_MS))
     }
