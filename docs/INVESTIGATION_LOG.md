@@ -4893,6 +4893,94 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   real-content-loss risk the moment verification widened past the single
   clip either was designed and swept against.
 
+- **2026-08-23: the 5-prompt-variant X-CLIP robustness table (open debt
+  from the 2026-08-16 consolidated correction) re-verified against the
+  corrected `clip_60#e6` ground truth -- closes as a 9th negative result
+  in the same pattern as the eight above, on the same signal already
+  held back from cutting logic.**
+
+  **First: the sample this table actually uses, checked rather than
+  assumed.** This table reuses `scripts/pose_audio_validation.py`'s
+  `load_real_events()`/`load_ambient_samples()`, the same loaders the
+  main X-CLIP zero-shot 0.690 -> 0.6527 correction used -- **12 real /
+  167 ambient**, not 18/9. The 18 -> 19 real-count pairing belongs to a
+  different investigation entirely (the windup-pose mound-occlusion
+  script's `REAL_CASES`/`NEG_CASES`), and even there the negative count
+  doesn't "stay 9" -- it moves 9 -> 8. `load_real_events()` reads
+  `tests/ground_truth/*.json` live, so it picks up the corrected
+  `clip_60#e6` label (`hit_and_run`, now inside `SWING_TYPES`) with no
+  manual adjustment: real count is 12, matching the already-logged
+  0.6527 result exactly, confirmed by reproducing that exact number
+  below as a sanity check before trusting anything new.
+
+  **Reconstruction, not a byte-identical rerun -- same gap as the main
+  baseline's own "0.688 (this session's faithful same-methodology
+  reconstruction)" line.** No script for this table was ever committed;
+  only prose descriptions survive. Rebuilt from those descriptions
+  (`scripts/prompt_variant_recheck.py`, now committed, closing that part
+  of the debt for future reruns): a 3-way split adding "fielders
+  actively making a play", a more specific idle phrasing ("standing
+  around doing nothing, no action happening"), a defensive-negative pair
+  ("fielders defending a play in the field"), and a broader "game in
+  progress" framing. Video embeddings computed once per window and
+  cached across all 5 variants, same real cost-saving property the
+  original exploited.
+
+  **Real before/after, per variant, permutation test on each (2000
+  shuffles, seed 20260816, same standard as the main X-CLIP recheck --
+  not assumed to carry over):**
+
+  | variant | AUC | perm p | Mann-Whitney p |
+  |---|---|---|---|
+  | baseline (original pair, reproduction) | **0.6527** (matches the logged correction exactly) | 0.0445 | 0.0390 |
+  | 3-way split (+ fielders making a play) | 0.6442 | 0.0500 | 0.0481 |
+  | more specific idle phrasing | 0.6826 | 0.0195 | 0.0175 |
+  | defensive-negative pair | 0.6717 | 0.0220 | 0.0238 |
+  | swing vs. game-in-progress framing | 0.5594 | 0.2605 | 0.2472 |
+
+  Two of four new alternates nominally score higher than the corrected
+  baseline (0.6826, 0.6717 vs. 0.6527) and nominally clear p<0.05
+  individually. **Neither survives Bonferroni correction across the
+  4-alternate family (alpha=0.05/4=0.0125)** -- the same multiple-
+  comparisons standard this project already applied to the flow/onset
+  investigation earlier the same night. `more specific idle phrasing`
+  comes closest (p=0.0195) and still doesn't clear it.
+
+  **The specific structural fragility already named for this table
+  reproduces almost exactly on the corrected sample.** Per-clip
+  percentile-of-ambient across all 5 variants, the same six clips the
+  original check used (`clip_base1`-`4`, `clip_foul1`, `clip_whiff1`):
+  `clip_whiff1` (zero defensive reaction) stays at the **96th-100th
+  percentile regardless of wording** (98, 96, 100, 98, 99) -- matching
+  the original "96th-98th percentile" finding almost digit-for-digit.
+  `clip_base3` (defensive activity visible, the original's named
+  fragile case) swings from the **19th to the 77th percentile**
+  depending on wording alone (19, 41, 42, 69, 77) -- wider than the
+  original's 43rd-68th range, not narrower. `clip_base1`, `clip_base2`,
+  and `clip_foul1` show the same real swing (e.g. `clip_base1`: 96th
+  percentile on the baseline pair, 46th on the game-in-progress
+  framing). The `game-in-progress` variant is the clearest mechanistic
+  case: broadening the negative prompt pulls every defensive-activity
+  event down near or below the ambient median while leaving
+  `clip_whiff1` untouched at the 99th -- direct evidence the instability
+  is tied to defensive activity in frame, not noise.
+
+  **Honest bottom line: no variant meaningfully and reliably beats the
+  corrected 0.653 baseline.** Two nominally score higher; none survive
+  the same multiple-comparisons correction this project already holds
+  every other multi-test result to, and the exact structural weakness
+  that kept X-CLIP out of cutting logic in the first place -- unstable
+  on exactly the contact/defensive plays that matter most -- is
+  unchanged, if anything slightly wider on the corrected sample. This
+  closes as a 9th data point in the same pattern as the eight
+  investigations above and the same conclusion as the 2026-08-16
+  multi-prompt-ensembling/temporal-windowing closure: prompt wording is
+  a real, adjustable lever, but adjusting it doesn't stabilize the
+  signal, it just moves the noise around. Nothing changes for cutting
+  logic -- X-CLIP stays Tier 1 review-queue instrumentation only, same
+  as before this recheck; no guaranteed real-play loss risk was ever on
+  the table since nothing here touches a destructive decision.
+
 
 ## Testing
 
