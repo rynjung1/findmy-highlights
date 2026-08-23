@@ -4722,6 +4722,177 @@ than documenting the exact dashboard values directly:
   full 100% coverage on the real full-length deployment target, not just
   the 190s reference clips it was originally tuned and tested against.**
 
+- **2026-08-22: a seventh practice-swing/downtime angle closed --
+  ensemble-of-weak-signals, and X-CLIP's reliability called into
+  question on independent data.** Explicitly not a repeat of
+  `joint_classifier_investigation.py`'s collapse to 0.191 AUC from
+  overfitting at n=10 -- that failure mode was designed around, not
+  repeated with different features.
+
+  **Real data volume, tallied and cross-checked before any modeling, not
+  estimated.** Only **27 hand-verified real-vs-practice instants exist
+  project-wide with rigorous common ground truth** (19 real / 8
+  negative) -- the windup-pose investigation's set, built by
+  independently re-verifying every case via full-frame contact sheets
+  rather than trusting existing labels. Larger-sounding numbers cited
+  elsewhere tonight (170 "ambient" samples, 149 review-queue records)
+  are not rigorous practice-swing labels: the 170 are mechanically
+  synthesized from gaps between annotated events, never human-verified;
+  the review-queue negatives are generic "downtime," not specifically
+  confirmed practice swings. **n=27 sits in the exact same regime that
+  already caused the joint classifier's overfitting collapse at n=10** --
+  per standing instruction, this rules out any trained model. Not
+  attempted.
+
+  **Three of the five nominal input signals have no reusable form.**
+  Zone-velocity, bat-count, and atbat-timing were each closed as one-off
+  ad-hoc investigations with no reusable committed scoring code and no
+  per-instant dataset. Recomputing them under time pressure would mean
+  building new, untested infrastructure from scratch -- declined, rather
+  than risk repeating the count-drift self-corrections the windup-pose
+  investigation itself already had to fix twice (16→18→19 reals,
+  9→7→8 negatives, self-flagged in its own entry above).
+
+  **Windup-pose excluded for a mechanistic reason, not a data gap: it is
+  anti-correlated with real play** (pose detected in 75.0% of negatives
+  vs. only 42.1% of reals -- the opposite of what a positive-agreement
+  "both signals agree" rule needs). ANDing it in would make a
+  combination worse, not better.
+
+  **That leaves no viable second signal to combine with X-CLIP.** Ran
+  the more useful real test instead: fresh X-CLIP scores computed on
+  this same 27-instant hand-verified set (`pipeline.xclip.
+  swing_probability`, unchanged default config) -- an independent sample
+  from the one that produced the earlier 0.653 result, not the same
+  cases re-measured. Full-sample AUC: **0.428, below chance** (negative-
+  case mean score 0.729 higher than real-case mean 0.692). A real
+  stratified 70/30 holdout (threshold chosen on the design set only,
+  applied blind to 8 held-out cases) produced 75% test accuracy -- but
+  every one of the 8 predictions was "real": **zero of the 2 real
+  negatives in the test set were correctly identified.** The 75% figure
+  is a pure base-rate artifact (design/test sets were ~68-75% real by
+  construction), not real discrimination, and is reported as such rather
+  than left to look like a positive result.
+
+  **Explicit framing, not a contradiction of the earlier result:** this
+  does NOT overturn the 0.653 AUC / p≈0.039 significance finding on its
+  own original sample (12 real / 167 ambient) -- both are real findings
+  on different samples. It does mean X-CLIP's practical reliability is
+  now in real doubt beyond what `pipeline/xclip.py`'s own docstring
+  already flagged (prompt-sensitivity on contact/hit-type events) --
+  worth treating with real caution going forward, not as a settled
+  positive result.
+
+  **Nothing from this investigation is wired into `pipeline/`/cutting
+  logic** -- no real-play-loss risk either way. Bottom line: this joins
+  the six already-closed angles, not from a data-volume argument alone
+  but from an actual test that failed on independent data.
+
+- **2026-08-22: an eighth angle closed -- two targeted mitigations for
+  X-CLIP's documented prompt-sensitivity, tested for real, don't hold up
+  under significance testing.** Not a new signal: multi-prompt
+  ensembling, temporal windowing, and their combination, applied to the
+  one real positive result from angle seven's own instability finding.
+  Tested on both the original 0.653 sample and the independent
+  27-instant sample that scored 0.428.
+
+  **Raw AUC numbers superficially suggest convergence toward ~0.58-0.62
+  on both samples** (worse on the sample that was already good, better
+  on the sample that was broken) -- **but a real 10,000-shuffle
+  permutation test shows none of it clears p<0.05, on either sample, for
+  any variant tested.** Single prompt, multi-prompt average, multi-prompt
+  vote, temporal median, temporal vote, and the full combination were
+  all tested; the best-looking candidates by raw AUC (multi-prompt vote,
+  combined mean) came back at p=0.266-0.427. The apparent stabilization
+  is not statistically distinguishable from noise.
+
+  **Honest framing: this does not stabilize X-CLIP, it moves the
+  instability around without resolving it.** Sample A's own baseline not
+  reaching its previously-documented significance in this run (p=0.090
+  here vs. the earlier full-sample p≈0.039) is noted as a likely
+  artifact of the smaller ambient subsample used for computational
+  practicality (40 of 170, disclosed at the time), not a contradiction
+  of the earlier full-sample result.
+
+  **Nothing from this investigation is wired into `pipeline/`/cutting
+  logic** -- no real-play-loss risk either way.
+
+**Closing summary: eight independent, real investigations into
+practice-swing/downtime detection on this footage have now closed, each
+with a specific, evidenced, mechanistic reason for failure** -- structural
+clutter (raw bat-count), unreliable small-object detection (zone-velocity
+distance sensitivity), non-differentiating motion (zone-velocity gate),
+an anti-correlated pose signal (windup-to-release), no audio signal at
+two representation levels (hand-crafted fusion and embedding fusion),
+insufficient practice-contact data (acoustic bat-crack), overfitting risk
+at the available sample sizes (ensemble-of-weak-signals), and now
+confirmed statistical instability in the one apparent positive signal
+(X-CLIP mitigation). This converges with the sibling stat-tracker
+project's own independent conclusion: **the limitation is this footage,
+not the software.** Further angles on this same data are very unlikely to
+succeed without different input -- either better/closer camera footage or
+a non-visual/non-audio signal source (e.g. a companion sensor).
+
+- **2026-08-23: `HardCutConfig.quiet_thresh` threshold-raise attempts
+  (0.003 and 0.004) both closed as unsafe on real evidence; the shipped
+  0.002 default's full "touches required" surface is now completely
+  verified clean.** Two separate real findings, not one.
+
+  **Threshold raise closed.** 0.004 (13 hard-cut windows on clip_300,
+  7 new vs. baseline, all individually frame-verified clean on
+  clip_300) looked clean in isolation, but a full 9-clip regression
+  sweep -- not just the clip_300 batch it was designed against --
+  surfaced a new required-event overlap on `clip_foul1.mkv`: real
+  batter load motion clipped immediately before a confirmed foul ball
+  (contact ~15.25-15.5s). 0.003, swept the same way across all 9 clips,
+  fared worse: a confirmed real violation on `clip_base2.mkv` (the
+  batter shown in an active, cocked bat-load stance inside the newly-cut
+  window, with the real swing beginning t≈11.2, immediately after the
+  window closes), plus further real concerns on `clip_base3.mkv` (a
+  tiny new window sitting inside the ground truth's documented
+  "contact ~12-13, fielders converging" description) and `clip_foul1.mkv`
+  (the same load-motion content flagged at 0.004, largely unchanged at
+  the narrower 0.003 window). **`HardCutConfig.quiet_thresh` stays at
+  0.002 -- no change shipped.** Both attempted code changes were reverted
+  and confirmed via `git diff` before any of this was logged.
+
+  **Separately, and prompted by finding these two real regressions: the
+  shipped 0.002 default itself had 9 "touches required" overlaps already
+  live in production, and only one (`clip_300#e6`, reviewed earlier
+  tonight) had ever been individually frame-verified.** The other 8 --
+  `clip_300` e4; `clip_540` e2 (two separate windows) and e4; `clip_60`
+  e4, e5, and e6; `clip_base1` e1 -- were checked fresh, same dense-
+  sampling rigor as every other check tonight. **All 8 verify clean.**
+  Each sits in a real, static holding stance with the actual described
+  action (swing, contact, ball flight, or defensive convergence)
+  beginning with real measured margin after the cut window closes.
+
+  `clip_base1#e1` needed a second pass to reach that conclusion, worth
+  recording honestly rather than glossing over: an initial read, leaning
+  on the ground truth note's prose timing ("bat trails down at ~9.0,
+  drops to a relaxed hang... at ~9.5") plus a lower-resolution, poorly-
+  framed first crop, suggested the cut window might be capturing real
+  bat-lowering motion. A second, correctly-cropped and more finely
+  spaced (0.15s) frame sequence resolved this cleanly: the bat is
+  already raised and held in a static, unmoving cocked position well
+  before the cut window starts, stays static throughout it, and is
+  still in the identical held position immediately after -- poses
+  matching on both sides of the cut, no motion discontinuity. The real
+  swing doesn't begin until t≈10.0-10.2, roughly 0.6-0.8s after the cut
+  window closes. The note's approximate prose timing didn't match the
+  real frame-level evidence here; the direct frame check is what
+  settled it, same standing rule this project has followed all night.
+
+  **Closing summary: the shipped hard-cut mechanism, at its current
+  0.002 threshold, is now fully verified safe across every
+  "touches required" overlap on every reference clip** -- not just
+  `full_game.mkv` (207/207 windows, logged earlier) and `clip_300`
+  (also logged earlier), but all 9 clips' pre-existing overlaps too.
+  0.002 is the real, evidence-backed safety ceiling for this mechanism
+  right now: both tested alternatives (0.003, 0.004) produced confirmed
+  real-content-loss risk the moment verification widened past the single
+  clip either was designed and swept against.
+
 
 ## Testing
 
