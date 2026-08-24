@@ -5380,6 +5380,80 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   different input. Nothing implemented, nothing wired into cutting
   logic; no guaranteed real-play loss risk was ever on the table.
 
+- **2026-08-24: follow-up to the hand-rule check -- full ROC/AUC sweep
+  of raw whole-frame motion, completely unconstrained by any threshold,
+  to settle threshold-placement vs. information-problem for real.**
+  The hand-rule check found `HardCutConfig.quiet_thresh` (0.002) fires
+  on almost nothing in the 27-instant sample (1/27) -- this leaves open
+  whether a DIFFERENT threshold would have worked, or whether the
+  signal itself carries no separating information at any cutoff. Tested
+  directly: every possible threshold on this sample's own real-valued
+  range, not just quiet_thresh or any other value used elsewhere in
+  this project. Reused the exact same 27-instant sample and motion-peak
+  extraction as `scripts/hand_rule_ensemble_check.py` (imported
+  directly, not re-derived, so the two scripts' numbers are guaranteed
+  comparable), now committed as `scripts/motion_roc_sweep.py`.
+
+  **Full AUC (motion-low-as-downtime-predictor direction): 0.4605 --
+  below chance.** Real events have a HIGHER median raw motion (0.01124)
+  than downtime instants (0.00859) in this sample -- the raw signal
+  points the opposite direction from the hypothesis, though the effect
+  is small at n=27 and shouldn't be over-read as its own finding.
+
+  **Best possible balanced accuracy anywhere on the full ROC curve:
+  0.5625 -- barely above the 0.500 chance line, and achieved only by an
+  almost-degenerate rule.** At the single best cutpoint found by
+  sweeping every distinct value in the sample (raw motion < 0.037763),
+  the confusion is TP=19 FP=7 TN=1 FN=0 -- this "best" rule predicts
+  "downtime" for 26 of 27 cases, correctly excluding only the single
+  highest-motion negative outlier in the whole sample
+  (`clip_60#e2 warmup b`, 0.04798). That is not meaningful
+  discrimination by any reasonable reading -- it is "always predict
+  downtime" plus one lucky exclusion, and the ROC curve in between (see
+  the full table in `scripts/motion_roc_sweep.py`'s own output) shows
+  no cutpoint anywhere climbing meaningfully above 0.55 balanced
+  accuracy.
+
+  **Real, direct answer to the actual question: this is an information
+  problem, not a threshold-placement problem.** No cutoff exists
+  anywhere on the continuous range that gives useful discrimination on
+  this sample -- `quiet_thresh`, or any other choice, was never the
+  bottleneck. Adjusting a safety bar could not have helped here,
+  independent of whether that bar itself should ever change for other
+  reasons.
+
+  **Direct comparison to the already-closed zone-velocity investigation:
+  consistent with its closure, not contradicting it -- but a weaker,
+  more fundamental failure, and that difference makes mechanistic
+  sense.** Zone-velocity (motion restricted to the batting zone
+  specifically, a different, more spatially-targeted signal) DID show
+  real separating power at the coarse level: a full order-of-magnitude
+  gap between a required no-swing taken-pitch (0.08) and real contact
+  windows (0.33-1.11) -- it was closed for failing the NEXT question up
+  (swing-selectivity: practice swings and a batter simply walking away
+  both spike to 0.61-0.65, comparable to real contact). Whole-frame
+  motion, tested here, doesn't even clear that first, coarser bar -- it
+  barely separates real from downtime at all (AUC 0.4605, best
+  balanced accuracy 0.5625), let alone reaching the swing-selectivity
+  question zone-velocity got to before failing. This isn't a
+  contradiction: restricting to the batting zone should carry more
+  signal than the whole frame, which dilutes it with fielders,
+  background players, and camera motion -- the same "structural
+  clutter swamps the signal" mechanism already named for the closed
+  raw bat-count attempt, one level removed. Whole-frame motion failing
+  even more completely than zone-velocity did is the expected direction
+  of that relationship, not a surprising or contradictory result.
+
+  **Honest bottom line: closes the threshold-vs-information question
+  definitively for this signal.** Nothing about this changes any
+  existing conclusion -- zone-velocity stays closed for swing-
+  selectivity, whole-frame motion is now confirmed closed for an even
+  more basic reason (no real separation at any threshold), and the
+  hand-rule check's own negative result is now explained at the root
+  rather than left as "the shipped threshold happened not to fire."
+  Purely diagnostic, as scoped -- nothing wired into cutting logic, no
+  guaranteed real-play loss risk was ever on the table.
+
 
 ## Testing
 
