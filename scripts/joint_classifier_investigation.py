@@ -125,9 +125,16 @@ def logistic_predict(w, X):
 def leave_one_out_auc(X, y, l2=1.0):
     """Real classifiers' scores on held-out samples, one at a time --
     every prediction comes from a model that never saw that sample
-    during training, the honest way to evaluate with this little data."""
+    during training, the honest way to evaluate with this little data.
+    Also returns the per-fold fitted weight vector (bias last) for every
+    fold that held out a REAL sample -- the original investigation's own
+    "the fitted boundary swings enough between folds" claim was always
+    qualitative; this is what actually quantifies it (how much the
+    coefficients themselves move fold to fold, not just the resulting
+    score)."""
     n = len(y)
     scores = np.zeros(n)
+    real_fold_weights = []
     for i in range(n):
         train_idx = np.array([j for j in range(n) if j != i])
         mean, std = zscore_fit(X[train_idx])
@@ -135,9 +142,11 @@ def leave_one_out_auc(X, y, l2=1.0):
         w = logistic_fit(Xtr, y[train_idx], l2=l2)
         Xte = (X[i:i + 1] - mean) / std
         scores[i] = logistic_predict(w, Xte)[0]
+        if y[i] == 1:
+            real_fold_weights.append(w)
     real_scores = scores[y == 1]
     ambient_scores = scores[y == 0]
-    return auc(list(real_scores), list(ambient_scores)), scores
+    return auc(list(real_scores), list(ambient_scores)), scores, np.array(real_fold_weights)
 
 
 def main():
@@ -171,11 +180,30 @@ def main():
         print(f"  {name}: AUC = {auc(real_vals, ambient_vals):.3f}")
 
     print("\n=== joint logistic regression, leave-one-out cross-validated ===")
-    cv_auc, scores = leave_one_out_auc(X, y, l2=1.0)
+    cv_auc, scores, real_fold_weights = leave_one_out_auc(X, y, l2=1.0)
     print(f"  AUC (leave-one-out): {cv_auc:.3f}")
     print(f"  n={len(y)} ({n_real} real / {n_ambient} ambient) -- with "
          f"this few real positives, treat this number as indicative, "
          f"not a real performance estimate.")
+
+    real_held_out = scores[y == 1]
+    ambient_held_out = scores[y == 0]
+    print("\n=== per-fold variance, not just the single AUC number ===")
+    print(f"  real-side held-out scores: {np.array2string(real_held_out, precision=3)}")
+    print(f"    mean={real_held_out.mean():.3f} std={real_held_out.std():.3f} "
+         f"min={real_held_out.min():.3f} max={real_held_out.max():.3f}")
+    print(f"  ambient-side held-out scores: mean={ambient_held_out.mean():.3f} "
+         f"std={ambient_held_out.std():.3f} min={ambient_held_out.min():.3f} "
+         f"max={ambient_held_out.max():.3f}")
+    print(f"  (real median {np.median(real_held_out):.3f} vs. ambient median "
+         f"{np.median(ambient_held_out):.3f} -- {'LOWER' if np.median(real_held_out) < np.median(ambient_held_out) else 'higher'}, "
+         f"the below-chance AUC's direct cause)")
+
+    print("\n  per-fold fitted coefficients (one row per fold that held out a "
+         "REAL sample -- quantifies 'the boundary swings between folds'):")
+    for name, col in zip(feature_names, real_fold_weights.T):
+        print(f"    {name}: {np.array2string(col, precision=2)}  "
+             f"std={col.std():.3f}  sign flips={ (np.sign(col[:-1]) != np.sign(col[1:])).sum() if len(col) > 1 else 0 }")
 
     # weights on the FULL dataset, for a look at what the model actually
     # leaned on -- not used for the CV number above, diagnostic only

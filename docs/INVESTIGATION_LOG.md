@@ -5110,6 +5110,79 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   cutting logic; no guaranteed real-play loss risk was ever on the
   table since nothing here touches a destructive decision.
 
+- **2026-08-23: the joint classifier collapse (open debt from the
+  2026-08-16 consolidated correction, originally 0.191 AUC at n=10)
+  re-verified against the corrected `clip_60#e6` ground truth -- the
+  collapse reproduces and deepens, exactly the failure mode expected,
+  now with real per-fold instability numbers instead of a qualitative
+  description.**
+
+  **Script already existed and is already committed**
+  (`scripts/joint_classifier_investigation.py`, from the original
+  2026-08-13 session) -- no "no committed script" debt here, unlike the
+  three prior rechecks tonight. Extended in place to report per-fold
+  variance (real-side/ambient-side held-out score spread, and the
+  fitted coefficient vector for every fold, not just the single
+  aggregate AUC) rather than writing a parallel script, since it
+  already reuses the same live `load_real_events()`/
+  `load_ambient_samples()` loaders and picks up the corrected label
+  automatically.
+
+  **Real n, checked rather than assumed: 11, not 10 -- and not 12
+  either.** This script's own "fully-paired" discipline (only samples
+  where motion, pose-near-plate, AND audio all succeed) means the
+  corrected sample's 12 real events don't all make it in; **11 real /
+  117 ambient** actually got scored, one shy of the corrected ground
+  truth's full real count, for reasons this run doesn't individually
+  log (same category of gap already flagged honestly for the
+  X-CLIP-fusion investigation's own paired-subset dropouts).
+
+  **Single-feature AUCs on the paired subset, before -> after: motion
+  0.509 -> 0.542, pose 0.529 -> 0.532, audio 0.469 -> 0.459** -- all
+  three stay in the same near-chance band as before, no individual
+  feature meaningfully moved.
+
+  **The joint model's cross-validated AUC: 0.191 -> 0.100 -- further
+  below chance, not less.** Adding a single additional real example
+  (10 -> 11) made the number worse, not better -- itself a concrete
+  demonstration of exactly how unstable LOO-CV logistic regression is
+  at this scale, not a sign the corrected label broke anything.
+
+  **Per-fold variance, quantified for the first time rather than
+  described qualitatively:** real-side held-out scores are tightly
+  clustered and consistently low (mean 0.072, std 0.008, range
+  0.060-0.083); ambient-side scores run higher on average (mean 0.088,
+  std 0.010, range 0.038-0.103) -- the model isn't randomly noisy
+  fold-to-fold on its *predictions*, it's **systematically** scoring
+  real events lower than ambient ones, the direct, stable cause of the
+  below-chance AUC. The instability lives in the **coefficients**
+  instead: across the 11 real-holdout folds, `motion_peak`'s weight
+  flips sign 3 of 10 fold-to-fold transitions (range -0.20 to +0.06),
+  `pose_peak_px` flips sign 6 of 10 (range -0.17 to +0.09) -- the model
+  can't even agree on which DIRECTION pose should point from one fold
+  to the next. `audio_rise_ms` is the one stable coefficient (0 sign
+  flips, consistently negative, the theoretically correct direction) --
+  the only piece of this joint model that isn't actively unstable, and
+  it's also the single weakest univariate feature (AUC 0.459, below
+  chance on its own). This is a real, direct quantification of the
+  original writeup's own qualitative claim ("the fitted boundary swings
+  enough between folds") -- confirmed for 2 of 3 features, not merely
+  asserted.
+
+  **Honest bottom line: no change, and if anything a sharper
+  illustration of the same conclusion.** The corrected sample doesn't
+  rescue this classifier -- it collapses further (0.191 -> 0.100), the
+  per-fold coefficient instability is real and now measured rather than
+  assumed, and the underlying cause is unchanged: 11 real positives
+  against 3 features is deep in the same n-much-less-than-needed regime
+  this project's own Tier 3 bar (300-500 labeled events) exists to
+  guard against. Sample size has not meaningfully grown (10 -> 11 is
+  the same order of magnitude, not a scale change), so this was always
+  expected to reproduce the same failure mode, and it did, more
+  starkly. Nothing changes for cutting logic -- this was never wired
+  into anything real; no guaranteed real-play loss risk was ever on the
+  table.
+
 
 ## Testing
 
