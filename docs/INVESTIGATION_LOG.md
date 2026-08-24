@@ -4981,6 +4981,60 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   as before this recheck; no guaranteed real-play loss risk was ever on
   the table since nothing here touches a destructive decision.
 
+- **2026-08-23: the X-CLIP raw-embedding nearest-centroid probe (open
+  debt from the 2026-08-16 consolidated correction, originally AUC
+  0.587, not significant at p~0.17) re-verified against the corrected
+  `clip_60#e6` ground truth -- closes as a 10th data point, genuinely
+  narrower than the other nine but still not enough to change anything.**
+
+  **Same sample-verification discipline as the prompt-variant recheck.**
+  Reused `scripts/pose_audio_validation.py`'s `load_real_events()`/
+  `load_ambient_samples()` -- **12 real / 167 ambient**, matching the
+  main 0.690 -> 0.6527 correction's sample exactly. Before trusting
+  anything new, reproduced the zero-shot text-prompt baseline from
+  these same cached video embeddings as a sanity check: **AUC 0.6527,
+  exact match to the documented corrected value** -- confirms the
+  embedding extraction here is methodologically identical to every
+  other X-CLIP recheck tonight, not a subtly different pipeline.
+
+  **Reconstruction, not a rerun -- no committed script existed for this
+  probe either.** Rebuilt from the original prose ("leave-one-out
+  nearest-centroid cosine similarity on the 512-dim pooled video
+  embedding"): score = cos_sim(embedding, LOO real-centroid) -
+  cos_sim(embedding, LOO ambient-centroid), each point's own class
+  centroid excluding itself, raw `get_video_features()` pooler output,
+  no text prompts involved at all (a genuinely different question from
+  every prompt-variant number above -- this measures whether the
+  embedding space separates the classes on its own, with no
+  language-supervision assist). Now committed as
+  `scripts/embedding_centroid_recheck.py`, closing that debt item.
+
+  **Real before/after: AUC 0.587 -> 0.6352 (n 11/170 -> 12/167),
+  permutation p 0.17 -> 0.0550, Mann-Whitney p 0.0594 (2000 shuffles,
+  seed 20260816, same standard as every recheck tonight).** The number
+  moved up more than any other rechecked figure this session -- the gap
+  to the zero-shot baseline narrowed from 0.103 (0.587 vs. 0.690) to
+  0.0175 (0.6352 vs. 0.6527) -- and it went from clearly chance-level to
+  sitting right at the edge of conventional significance. **It still
+  does not clear p<0.05 on its own.** Reported exactly as measured, not
+  rounded down to "still nothing" or up to "now significant": this is a
+  real, meaningfully closer number that still falls on the wrong side of
+  the line this project holds every other signal to.
+
+  **Honest bottom line: no change to the project's conclusion.**
+  Zero-shot text-prompt scoring (0.6527, p=0.0395/0.0390, clears
+  significance) remains the one real, load-bearing X-CLIP signal.
+  Raw pooled embeddings, scored with no text-prompt assist at all, stay
+  below it and outside conventional significance, even though the
+  margin narrowed substantially on the corrected sample -- consistent
+  with, not contradicting, the existing conclusion that the model's
+  zero-shot video-text alignment (not the raw visual embedding space by
+  itself) is where this project's one real signal actually lives.
+  Nothing changes for cutting logic -- X-CLIP stays Tier 1
+  instrumentation only, same as before this recheck; no guaranteed
+  real-play loss risk was ever on the table since nothing here touches
+  a destructive decision.
+
 
 ## Testing
 
