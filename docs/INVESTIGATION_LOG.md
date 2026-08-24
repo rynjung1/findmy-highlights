@@ -5183,6 +5183,88 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   into anything real; no guaranteed real-play loss risk was ever on the
   table.
 
+- **2026-08-23/24: the 2026-08-13 embedding-level (X-CLIP+AST) fusion
+  investigation -- the last of the five items the 2026-08-16
+  consolidated correction flagged as not yet rebuilt -- re-verified
+  against the corrected `clip_60#e6` ground truth. Confirmed by direct
+  doc check, not assumed, that this one genuinely needed a fresh
+  recheck (same pre-correction 11-event set, explicitly named in that
+  correction's own "not rebuilt" list). Audio/concatenated parts
+  reproduce cleanly as before. The video-alone part does NOT reproduce
+  cleanly -- a real, different pattern than the original table showed,
+  reported honestly rather than folded into the same overfitting
+  dismissal as before.**
+
+  **No committed script existed; now committed as
+  `scripts/embedding_fusion_recheck.py`, closing the last item on the
+  2026-08-16 debt list.** Reconstructed from the original prose: X-CLIP
+  `get_video_features().pooler_output` (512-d, L2-normalized, 2.0s
+  window) and `MIT/ast-finetuned-audioset-10-10-0.4593` pooled CLS
+  output (768-d, L2-normalized, matching 2.0s window), concatenation
+  fusion (1280-d), scored via LOO nearest-centroid and LOO L2-logistic
+  at C in {0.001, 0.01, 0.1, 1.0} -- the same 5-method x 3-feature-set
+  structure as the original table. 12 real / 167 ambient fully-paired
+  (both embeddings present), matching the main correction's sample.
+  Every number permutation-tested (2000 shuffles, seed 20260816, same
+  standard as every recheck tonight) via a fast rank-based AUC verified
+  equivalent to the project's canonical pairwise implementation before
+  trusting any output.
+
+  **Audio (AST) alone and concatenated fusion reproduce the original
+  conclusion cleanly.** Audio alone: 0.2445-0.3728 (was 0.194-0.311),
+  consistently below chance, p=0.92-1.0 (one-sided, i.e. genuinely
+  worse than chance, not noise). Concatenated: 0.3488-0.4970 (was
+  0.327-0.491), never beats video alone at any setting, never clears
+  significance. **Unchanged: audio still actively drags fusion down,
+  not merely fails to help.**
+
+  **Video alone does NOT reproduce the original pattern -- a real,
+  qualitatively different result.** Original: only the weakest-
+  regularization extreme (C=1.0, AUC 0.762) nominally beat the 0.690
+  zero-shot baseline, flagged as a near-certain overfitting artifact
+  because strong regularization (C=0.001, AUC 0.557) looked near-
+  chance -- exactly the huge-swing-across-C signature overfitting
+  produces. **On the corrected sample, every C value scores 0.7365-
+  0.7839, individually significant (p=0.000-0.003), clustered in a
+  tight band regardless of regularization strength** -- the opposite
+  signature from what sank the original number. Nearest-centroid stays
+  consistent with the raw-embedding-probe recheck (0.6352, exact match,
+  a real cross-check that this run's embeddings are the same ones
+  already verified).
+
+  **Before trusting this, ran the same recall-risk check that caught
+  the zero-shot signal's `clip_base3` fragility -- and it does NOT
+  reproduce here.** LOO held-out percentile-of-ambient for
+  `clip_base1`-`4`/`foul1`/`whiff1` (video-alone logistic, C=0.01):
+  59%, 87%, 92%, 96%, 70%, 94% -- no near-median or below-median
+  misses, genuinely different from the zero-shot text-prompt signal's
+  own documented 31st-79th-percentile instability on these same six
+  clips. One real caveat, not glossed over: the actual predicted
+  probabilities for 5 of 6 real events are near-zero (0.0000-0.0858)
+  despite outranking nearly all ambient samples -- well-RANKED but
+  poorly CALIBRATED outputs, a real symptom of 512 dimensions against
+  only 12 positives that regularization alone doesn't fully resolve.
+
+  **Honest bottom line: this is the single most promising number from
+  every recheck run tonight, and also the one this project's own
+  standing rule most clearly says not to act on yet.** A tight,
+  significant, recall-risk-clean band across all four regularization
+  strengths is real evidence against the specific "overfitting
+  artifact" explanation that closed this exact number before -- worth
+  flagging plainly, not re-explained away by default. But 12 real
+  positives against 512 input dimensions remains deep in the same
+  n-much-less-than-d regime this project's Tier 3 bar (300-500 labeled
+  events) exists to guard against, regardless of how clean a permutation
+  test or recall-risk check on this SAME finite sample looks -- neither
+  check can speak to generalization on real games this exact 12-event
+  sample has never seen. Not implemented, not wired into cutting logic,
+  same as every other candidate signal in this log. Flagged as the
+  clearest concrete candidate for revisiting once real review-queue
+  usage accumulates enough labels to properly test generalization,
+  not a result to build against today. No guaranteed real-play loss
+  risk was ever on the table -- nothing here touches a destructive
+  decision.
+
 
 ## Testing
 
