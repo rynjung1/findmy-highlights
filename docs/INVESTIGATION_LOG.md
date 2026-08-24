@@ -5265,6 +5265,121 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   risk was ever on the table -- nothing here touches a destructive
   decision.
 
+- **2026-08-24: a ninth angle, hand-specified AND/OR rules over
+  already-weak signals (motion, mound-region windup pose, audio
+  transient), tested as a structurally different alternative to the
+  collapsed trained ensemble -- closed negative, real numbers, one real
+  mechanistic surprise along the way.** The premise: a hand-specified
+  rule has no coefficients to fit or flip sign fold to fold, so it
+  can't fail via the SPECIFIC mechanism that collapsed the joint
+  logistic-regression ensemble to 0.100 AUC (see the 2026-08-23
+  recheck). Carried in explicitly, not glossed over: the individual
+  signals are each already characterized as weak or actively
+  anti-correlated on this footage (windup-pose succeeds MORE during
+  downtime than real play; audio has no confirmed usable signal;
+  motion alone isn't swing-selective) -- a rule built from already-weak
+  parts can still fail, and this was a real, live test of whether it
+  would, not a foregone conclusion either way.
+
+  **Sample: the 27-instant hand-verified set (19 real/8 negative) from
+  the 2026-08-14 windup-to-release investigation -- reconstructed, not
+  rerun, since that investigation "lived in an agent scratchpad, not
+  committed."** 22 of 27 instants were exactly recoverable from the
+  doc's own prose citations or `training_data/reviews/*.json`'s own
+  `window.start_s` (source of truth for those 10). 5 (clip_540#e2/e3/
+  e4, clip_60#e4/e5) were never individually recorded with an exact
+  instant -- reconstructed this session via fresh ffmpeg frame pulls,
+  visually verified before use, same discipline the original
+  investigation itself used. One real discrepancy surfaced and resolved
+  during that check: a documented crop filename implied t=121.0 for
+  `clip_60#e4`, but that frame shows what looks like an in-progress
+  swing, contradicting the event's own ground-truth note ("no swing").
+  Checked t=120/122/123 directly: both 120 and 123 cleanly show a
+  loaded, non-swinging stance matching the note; t=123.0 was used.
+  Flagged plainly: these 5 are this session's own verified picks, not a
+  recovered byte-identical match to whatever the original investigation
+  actually used. Now committed as `scripts/hand_rule_ensemble_check.py`,
+  closing the "lived in a scratchpad" gap for this sample going forward.
+
+  **Signal definitions reused already-established project bars, not new
+  numbers fit to this test.** Motion-low: peak motion within +/-1.0s
+  against `HardCutConfig.quiet_thresh` (0.002), the single strictest,
+  most extensively safety-verified "quiet" bar already shipped in this
+  project. Pose-detected: single-frame MediaPipe check on the same
+  fixed mound region the original investigation derived (reusing
+  `pipeline.pose`'s own crop/landmarker construction). Audio-transient:
+  `rise_time_s <= 0.030s`, reasoned from `pipeline/audio.py`'s own
+  docstring, not fit to this sample.
+
+  **Real result: all three specified rules land at or below chance,
+  none beat the corrected X-CLIP zero-shot baseline (0.653 native /
+  0.428 on this same independent sample).**
+
+  | rule | balanced-acc-equivalent AUC | real plays lost (FP) |
+  |---|---|---|
+  | 1: motion_low AND NOT pose_detected | 0.500 | 0 |
+  | 2: + AND NOT audio_transient | 0.500 | 0 |
+  | 3 (baseline): motion_low alone | 0.474 | 1 |
+
+  **Real, honest mechanism, not just a number: the shipped 0.002
+  quiet_thresh essentially never fires on isolated +/-1.0s point-instant
+  windows -- true for only 1 of 27 cases in this sample, and that one
+  case was a REAL play (`clip_300#e6`), not a downtime instant.** Rules
+  1 and 2 are therefore degenerate on this sample: they never predict
+  "downtime" for anything at all, which trivially produces zero
+  real-play loss (a real, correct number) but zero actual
+  discrimination either (balanced accuracy exactly 0.500, "always
+  predict real" by construction) -- not a working rule, a threshold
+  mismatch between what `quiet_thresh` was calibrated for (sustained
+  quiet stretches inside an already-kept segment) and what this test
+  asked of it (single isolated point instants). Rule 3, using motion
+  alone, does fire once -- and that one prediction is a real-play loss,
+  landing it below chance (0.474).
+
+  **Diagnostic only, explicitly NOT a proposed rule, run to actually
+  answer the task's specific question about pose's directional effect
+  once the motion gate isn't saturating everything to False:**
+  median-split this same 27-point sample's own motion scores (0.00891,
+  vs. the shipped 0.002) -- flagged plainly as fit to the exact
+  evaluation sample, the same small-sample overclaim risk this project
+  has named everywhere else tonight, not a candidate for anything.
+  Motion-relaxed alone: balanced-acc-AUC 0.513, but **9 of 19 real
+  plays wrongly flagged** -- unacceptably unsafe on its own. AND-ing in
+  `NOT pose_detected`: balanced-acc-AUC 0.572, real-plays-lost drops
+  from 9 to 2. **This does NOT reproduce "including windup-pose makes
+  things worse" the way the task's caveat anticipated -- if anything,
+  the opposite, on this one diagnostic.** But the honest mechanism
+  matters more than the direction: `pose_detected` was `True` in 84.2%
+  of real cases and 62.5% of negative cases in this exact sample
+  (nearly saturated, not clearly discriminating either way) -- so
+  AND-ing it in mostly just makes the overall rule more conservative
+  (fires far less often), which mechanically trades recall for
+  precision almost regardless of whether pose carries real signal here.
+  The safer, more honest reading: this doesn't establish pose as newly
+  useful, it shows that ANY sufficiently restrictive extra condition
+  would likely shrink false positives the same way at this sample size
+  -- a real result, reported exactly as measured, not spun toward
+  either "pose helps" or "pose hurts" beyond what this data actually
+  supports.
+
+  **Honest bottom line: closes negative, a structurally different test
+  from the collapsed logistic ensemble, reaching the same practical
+  conclusion by a different, real mechanism.** No specified rule beats
+  chance meaningfully; none approach the X-CLIP zero-shot baseline in
+  either its native (0.653) or independent-sample (0.428) form. The
+  real, new finding isn't "the parts are still weak" (already known
+  going in) -- it's that the project's own strictest already-shipped
+  motion threshold is fundamentally the wrong tool for point-instant
+  classification, a genuine, previously-undocumented mismatch between
+  what `quiet_thresh` was built for and what this test asked of it.
+  Combined with the pose-inclusion diagnostic's ambiguous, likely-
+  conservatism-driven (not signal-driven) result, this is a real,
+  structurally different angle that also closed negative -- consistent
+  with, not just repeating, this project's standing conclusion that
+  further angles on this exact footage are unlikely to succeed without
+  different input. Nothing implemented, nothing wired into cutting
+  logic; no guaranteed real-play loss risk was ever on the table.
+
 
 ## Testing
 
