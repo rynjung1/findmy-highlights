@@ -5035,6 +5035,81 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   real-play loss risk was ever on the table since nothing here touches
   a destructive decision.
 
+- **2026-08-23: the HFC/spectral-flux onset-detection comparison (open
+  debt from the 2026-08-16 consolidated correction, originally AUC
+  0.605/0.646, neither significant) re-verified against the corrected
+  `clip_60#e6` ground truth -- a genuinely mixed result, not a clean
+  10th/11th data point either way, reported exactly as measured.**
+
+  **Same sample-verification discipline as every recheck tonight.**
+  Reused `scripts/pose_audio_validation.py`'s `load_real_events()`/
+  `load_ambient_samples()` -- 12 real / 170 ambient (audio has no
+  calibration-dependent drop the way pose/X-CLIP video embedding did,
+  so the ambient count stays the full 170 here, unlike the 167 the
+  X-CLIP rechecks saw). Sanity check: reproduced the RMS-envelope
+  rise-time audio-alone baseline from `pipeline.audio` directly --
+  **AUC 0.5083, matching the documented corrected value (0.508)**
+  before trusting anything new.
+
+  **Reconstruction, not a rerun -- no committed script existed for
+  either onset feature.** Rebuilt from the original prose ("HFC and
+  spectral flux via `scipy.signal.stft`, same +/-1.0s peak-search
+  window as the rise-time work"). The exact STFT frame/hop size was
+  never recorded -- reconstructed as nperseg=512/noverlap=384 (32ms
+  frames, 8ms hop), flagged plainly as a reconstruction choice, not a
+  recovered original parameter. HFC = frequency-bin-weighted energy
+  (Masri 1996); spectral flux = half-wave-rectified frame-to-frame
+  magnitude increase; score = peak novelty value within the +/-1.0s
+  window. Now committed as `scripts/onset_detection_recheck.py`,
+  closing that debt item.
+
+  **Real before/after: HFC 0.605 -> 0.6877 (p 0.128 -> 0.0185, a real,
+  non-trivial move); spectral flux 0.646 -> 0.6316 (p 0.056 -> 0.0625,
+  essentially unchanged).** HFC's new p nominally clears both 0.05 on
+  its own AND a 2-test Bonferroni correction scoped to just this
+  recheck's family (alpha=0.025). **This is deliberately NOT reported
+  as an 11th positive signal, for two concrete reasons, not caution for
+  its own sake:**
+
+  1. *Correction scope is genuinely unresolved, not favorable by
+     default.* The original 0.605/0.646 numbers were judged against a
+     6-test family (4 optical-flow angle-change features + these 2),
+     Bonferroni-corrected at alpha=0.05/6~0.0083 -- HFC's new p=0.0185
+     does NOT clear that threshold. The flow features weren't
+     rechecked today (out of scope for this task), so the honest
+     answer to "does HFC survive the real correction" is: unresolved
+     until the flow side is rechecked too, not "yes" by only
+     re-scoping the family to the 2 tests actually run tonight.
+
+  2. *The original investigation's own real-play recall-risk check
+     reproduces, and gets a second confirmed case.* `clip_base3/e1` --
+     the play already named "a real, confirmed play reading as more
+     ambient than 87-96% of genuine ambient samples" on these exact
+     features -- scores at the **15th percentile (HFC) / 7th percentile
+     (spectral flux)** on the corrected sample, matching the original's
+     13th-percentile HFC finding almost exactly. `clip_base2/e1`, not
+     flagged before, now also reads low: **31st (HFC) / 16th
+     (spectral flux) percentile.** Two of the six recall-risk clips
+     now read as more "ambient" than most genuine ambient samples on
+     the signal whose aggregate number nominally looks best tonight --
+     the identical structural weakness the original investigation
+     used to hold this signal back, not resolved by the correction,
+     arguably one confirmed case wider.
+
+  **Honest bottom line: no change to the project's audio conclusion.**
+  HFC's aggregate AUC moved further than any other number rechecked
+  tonight and nominally clears a narrowly-scoped significance test --
+  reported exactly as measured, not hidden. But it fails the same
+  recall-risk bar every other signal in this project has been held to,
+  on two confirmed real plays rather than one, and its significance
+  verdict depends on a multiple-comparisons scope this recheck can't
+  fully resolve without also rechecking the flow features. No usable,
+  reliable audio signal is confirmed to exist on this footage --
+  consistent with, not overturned by, the crowd-reaction and
+  raw-embedding audio findings already closed. Nothing changes for
+  cutting logic; no guaranteed real-play loss risk was ever on the
+  table since nothing here touches a destructive decision.
+
 
 ## Testing
 
