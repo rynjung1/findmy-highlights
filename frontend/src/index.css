@@ -645,6 +645,14 @@ button.pill {
   color: var(--color-warning);
 }
 
+/* Brief visual feedback after "Next flagged" scrolls a reviewer to an
+   entry -- cleared automatically after ~1.6s (EditLogView), not a
+   persistent state, so it doesn't get confused with .hard-cut/.restored/
+   .user-removed which all mean something about the segment itself. */
+.entry-card.jump-highlight {
+  box-shadow: 0 0 0 3px var(--color-accent);
+}
+
 /* ---------- media ---------- */
 
 video {

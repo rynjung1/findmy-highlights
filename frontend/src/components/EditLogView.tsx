@@ -77,6 +77,38 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
     outputVideoRef.current?.seekTo(seconds)
   }
 
+  // "Jump to next flagged" (hard-cut) entry -- lets a reviewer page
+  // through just the higher-risk hard-cut segments without scrolling
+  // past dozens of ordinary gap cuts to find them. Cursor tracks
+  // position within the FULL hard-cut list (not just still-unreviewed
+  // ones), so it stays usable even after every flagged segment has
+  // already been restored/confirmed -- a reviewer paging through to
+  // double-check shouldn't lose the control the moment the count hits
+  // zero.
+  const [flaggedCursor, setFlaggedCursor] = useState(-1)
+  const [highlightedId, setHighlightedId] = useState<string | null>(null)
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function handleJumpToNextFlagged(flaggedEntries: Segment[]) {
+    if (flaggedEntries.length === 0) return
+    const next = (flaggedCursor + 1) % flaggedEntries.length
+    setFlaggedCursor(next)
+    const target = flaggedEntries[next]
+    document.getElementById(`edit-log-entry-${target.id}`)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+    })
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current)
+    setHighlightedId(target.id)
+    highlightTimeoutRef.current = setTimeout(() => setHighlightedId(null), 1600)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current)
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     async function load() {
@@ -266,6 +298,10 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
     .sort((a, b) => (a.origin === 'hard_cut' ? 0 : 1) - (b.origin === 'hard_cut' ? 0 : 1))
   const unreviewedHardCuts = cutEntries.filter(
     (s) => s.origin === 'hard_cut' && s.status === 'cut')
+  // Every hard-cut entry, reviewed or not -- what "Jump to next flagged"
+  // cycles through (see the handler above for why this is broader than
+  // unreviewedHardCuts).
+  const flaggedEntries = cutEntries.filter((s) => s.origin === 'hard_cut')
 
   // The symmetric case cutEntries can't cover: a segment the detector kept
   // from the start (origin=="detected") never became a cut candidate, so
@@ -307,6 +343,18 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
       </div>
 
       {error && <p className="alert alert-danger">{error}</p>}
+      {flaggedEntries.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+          <button type="button" className="secondary" onClick={() => handleJumpToNextFlagged(flaggedEntries)}>
+            ↓ Next flagged
+          </button>
+          <span className="muted" style={{ fontSize: 13 }}>
+            {flaggedCursor >= 0
+              ? `${flaggedCursor + 1} of ${flaggedEntries.length} flagged segments`
+              : `${flaggedEntries.length} flagged segment${flaggedEntries.length === 1 ? '' : 's'} in this list`}
+          </span>
+        </div>
+      )}
       {unreviewedHardCuts.length > 0 && (
         <p className="alert alert-warning">
           ⚠ {unreviewedHardCuts.length} segment{unreviewedHardCuts.length === 1 ? '' : 's'}{' '}
@@ -331,6 +379,7 @@ export default function EditLogView({ batchId }: EditLogViewProps) {
               onTogglePreview={() => setPreviewingId(previewingId === seg.id ? null : seg.id)}
               onToggleStatus={() => handleToggle(seg)}
               onJumpToOutput={handleJumpToOutput}
+              highlighted={highlightedId === seg.id}
             />
           ))}
         </ul>
@@ -377,6 +426,7 @@ interface EditLogEntryProps {
   onTogglePreview: () => void
   onToggleStatus: () => void
   onJumpToOutput: (seconds: number) => void
+  highlighted?: boolean
 }
 
 // Shared row for both the cut-review list and the kept-segments list --
@@ -392,6 +442,7 @@ function EditLogEntry({
   onTogglePreview,
   onToggleStatus,
   onJumpToOutput,
+  highlighted = false,
 }: EditLogEntryProps) {
   const isHardCut = seg.origin === 'hard_cut'
   const restored = kind === 'cut' && seg.status === 'kept'
@@ -419,7 +470,8 @@ function EditLogEntry({
 
   return (
     <li
-      className={`entry-card${isHardCut ? ' hard-cut' : ''}${restored ? ' restored' : ''}${userRemoved ? ' user-removed' : ''}`}
+      id={`edit-log-entry-${seg.id}`}
+      className={`entry-card${isHardCut ? ' hard-cut' : ''}${restored ? ' restored' : ''}${userRemoved ? ' user-removed' : ''}${highlighted ? ' jump-highlight' : ''}`}
     >
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
         <SegmentThumbnail batchId={batchId} segment={seg} />
@@ -472,7 +524,15 @@ function EditLogEntry({
               </button>
             </div>
           </div>
-          {isPreviewing && <SegmentPreview batchId={batchId} segment={seg} />}
+          {isPreviewing && (
+            <SegmentPreview
+              batchId={batchId}
+              segment={seg}
+              onToggleStatus={onToggleStatus}
+              toggleDisabled={isPending || exporting}
+              toggleLabel={toggleLabel}
+            />
+          )}
         </div>
       </div>
     </li>
@@ -482,6 +542,9 @@ function EditLogEntry({
 interface SegmentPreviewProps {
   batchId: string
   segment: Segment
+  onToggleStatus: () => void
+  toggleDisabled: boolean
+  toggleLabel: string
 }
 
 // Scoped to the segment's own [start_s, end_s] window, not the source
@@ -490,7 +553,7 @@ interface SegmentPreviewProps {
 // is exactly the gap this replaces (finding #1 of tonight's Edit Log
 // usability audit). Custom play/pause + a scrubber whose range IS the
 // segment's own duration, not the source file's.
-function SegmentPreview({ batchId, segment }: SegmentPreviewProps) {
+function SegmentPreview({ batchId, segment, onToggleStatus, toggleDisabled, toggleLabel }: SegmentPreviewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [playing, setPlaying] = useState(false)
   // Seconds into the SEGMENT (0..duration), not the source file's own
@@ -534,6 +597,36 @@ function SegmentPreview({ batchId, segment }: SegmentPreviewProps) {
     el.currentTime = segment.start_s + frac * duration
   }
 
+  // Keyboard shortcuts, scoped to while a preview is actually open (this
+  // effect only runs while SegmentPreview is mounted, i.e. exactly one
+  // entry's preview at a time -- previewingId in the parent guarantees
+  // that). Space play/pauses; Enter runs the same restore/cut action the
+  // toggle button does, for a reviewer doing many small fixes in a row
+  // without reaching for the mouse each time. preventDefault on both is
+  // real, not decorative: without it, Space would ALSO click whatever
+  // button currently has focus (most likely the "Preview"/"Hide preview"
+  // button the reviewer just clicked to get here), instantly closing the
+  // preview they just opened -- a real collision found and fixed while
+  // building this, not a hypothetical.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+        return
+      }
+      if (e.code === 'Space') {
+        e.preventDefault()
+        togglePlay()
+      } else if (e.code === 'Enter') {
+        e.preventDefault()
+        if (!toggleDisabled) onToggleStatus()
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  })
+
   const frac = duration > 0 ? elapsed / duration : 0
 
   return (
@@ -558,6 +651,9 @@ function SegmentPreview({ batchId, segment }: SegmentPreviewProps) {
           {formatDuration(elapsed)} / {formatDuration(duration)}
         </span>
       </div>
+      <p className="muted" style={{ fontSize: 12, marginTop: 4, marginBottom: 0 }}>
+        Space: play/pause · Enter: {toggleLabel}
+      </p>
     </div>
   )
 }
