@@ -25,6 +25,16 @@ class DetectionConfig:
     threshold: float = 0.4
     person_class_id: int = 1      # COCO 'person'
     device: str = "auto"          # auto -> mps if available, else cpu
+    # Investigated 2026-08-25 (real detect-stage speed profiling): on this
+    # project's Apple Silicon/MPS hardware, inference is 99.3% of real
+    # detect-stage wall clock (frame grab/convert/postprocess are all
+    # <1% combined), so this is the one lever worth exposing. "base"
+    # (default, unchanged) stays the shipped, fully-verified choice --
+    # smaller variants trade real accuracy for speed and need the full
+    # scripts/regression.py gate before ever becoming the default; see
+    # that investigation's writeup in docs/INVESTIGATION_LOG.md before
+    # changing this default.
+    model_variant: str = "base"   # base | medium | small | nano
 
 
 @dataclass
@@ -45,8 +55,22 @@ def _cache_key(video_path: Path, cfg: DetectionConfig) -> str:
     stat = video_path.stat()
     raw = f"{video_path.name}:{stat.st_size}:{stat.st_mtime_ns}:" \
           f"{_model_version()}:{cfg.sample_fps}:{cfg.resolution}:" \
-          f"{cfg.threshold}:{cfg.person_class_id}"
+          f"{cfg.threshold}:{cfg.person_class_id}:{cfg.model_variant}"
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+_MODEL_CLASSES = {"base": "RFDETRBase", "medium": "RFDETRMedium",
+                  "small": "RFDETRSmall", "nano": "RFDETRNano"}
+
+
+def _resolve_model_class(model_variant: str):
+    import rfdetr
+    try:
+        class_name = _MODEL_CLASSES[model_variant]
+    except KeyError:
+        raise ValueError(f"unknown model_variant {model_variant!r}, "
+                         f"expected one of {sorted(_MODEL_CLASSES)}") from None
+    return getattr(rfdetr, class_name)
 
 
 def _resolve_device(device: str) -> str:
@@ -73,10 +97,10 @@ def detect_persons(video_path: str, config: DetectionConfig | None = None,
                                    config=cfg)
 
     from PIL import Image
-    from rfdetr import RFDETRBase
 
-    model = RFDETRBase(device=_resolve_device(cfg.device),
-                       resolution=cfg.resolution)
+    model_cls = _resolve_model_class(cfg.model_variant)
+    model = model_cls(device=_resolve_device(cfg.device),
+                      resolution=cfg.resolution)
 
     cap = cv2.VideoCapture(str(vp))
     if not cap.isOpened():

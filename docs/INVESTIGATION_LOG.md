@@ -5454,6 +5454,253 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   Purely diagnostic, as scoped -- nothing wired into cutting logic, no
   guaranteed real-play loss risk was ever on the table.
 
+- **2026-08-25: real detect-stage speed investigation -- where the
+  ~45min cold-detect time actually goes, three real levers tested, one
+  real viable candidate found and left opt-in pending explicit sign-off,
+  not silently flipped as the default.**
+
+  **1. Real per-component profiling (`scripts/detect_profile.py`,
+  clip_300.mkv, no cache): inference is 99.3% of real wall clock.**
+  Frame grab+retrieve (cv2): 0.3%. BGR->RGB + PIL convert: 0.4%.
+  `model.predict()`: **99.3%, 352.9ms/sample average**. Box
+  post-processing: ~0%. Confirms the earlier full-length test's
+  assumption directly rather than leaving it assumed -- there is
+  exactly one component worth optimizing, and it's the one this
+  investigation spent its time on.
+
+  **2. `optimize_for_inference()` -- rfdetr's own suggested lever,
+  tested and closed. Real, on Apple Silicon/MPS the library's own "~8x
+  on T4" claim does not transfer, and the one variant that does show a
+  speedup fails on accuracy.** All three tested on the identical 186
+  real sampled frames from clip_300.mkv, compared against the
+  unoptimized baseline:
+  - `compile=False` (export only, fp32): 1.02x -- real but negligible,
+    0.000px difference from baseline (byte-identical).
+  - `compile=True, batch_size=1` (JIT-traced, fp32): **0.89x -- slower
+    than baseline**, plus 21.84s one-time trace overhead. JIT tracing
+    actively hurts single-image inference on this MPS setup. Still
+    0.000px difference from baseline (safe, just not useful).
+  - `compile=True, batch_size=1, dtype=fp16`: 1.19x speedup, but
+    **8/186 real box-count mismatches, max coordinate difference
+    107.4px** -- far beyond a fp16-rounding tolerance (3px), a real,
+    confirmed detection change, not numeric noise. Ruled out
+    immediately under the no-silent-regression rule.
+  Closed: no `optimize_for_inference()` configuration gives both real
+  speed and unchanged accuracy on this hardware.
+
+  **3. Batching (`scripts/detect_batch_check.py`, batch_size=8): real,
+  confirmed byte-identical detections, but no real speedup on MPS.**
+  Verified first, not assumed, that rfdetr's own batch path is a
+  genuine stacked-tensor forward pass (`torch.stack` + one model call,
+  not a hidden per-image loop) before testing. Sequential: 364.7ms/frame.
+  Batched (size 8): 375.9ms/frame -- **0.97x, no speedup, if anything
+  marginally slower.** 0/186 box-count mismatches, max coordinate
+  difference 0.0000px -- perfectly identical, confirming the batched
+  path is numerically exact, just not faster here. Consistent with
+  finding #1: inference is real GPU compute time, not per-call Python/
+  dispatch overhead, and Apple's MPS backend doesn't give the same
+  batched-throughput benefit CUDA does for this architecture. Closed,
+  real negative.
+
+  **4. Frame sampling rate: already reduced, not a new lever.**
+  `DetectionConfig.sample_fps=1.0` already samples 1 frame in ~48 on
+  this footage (measured: clip_300 at 47.95fps source, step=48) -- the
+  literal "detect every Nth frame instead of every frame" ask is
+  already shipped, not untried. Going lower (0.5fps) was NOT tested
+  further: it would touch already-extensively-verified at-bat-boundary
+  and hard-cut timing margins (see the 2026-08-23 threshold-sweep
+  closure) and would need the same full-9-clip re-verification rigor
+  that sweep required, for a lever whose real bottleneck (per-2 below)
+  isn't sampling density in the first place.
+
+  **5. Faster RF-DETR variant -- the one real, viable candidate found,
+  verified via the full regression gate, not just an aggregate count.**
+  Quick screen first (`scripts/detect_variant_speed_check.py`,
+  clip_whiff1.mkv, 43 frames) before paying for the expensive full
+  suite: RFDETRNano ruled out immediately (551 vs Base's 590 total
+  person detections across 43 frames, -6.6%, and a WORSE min detected
+  box height, 18.2px vs 17.0px -- real degradation on exactly the
+  distant-fielder case Base was chosen for). RFDETRMedium (271.8ms/frame,
+  588 detections) and RFDETRSmall (262.3ms/frame, 588 detections) both
+  looked close enough to warrant the real check; Small taken forward as
+  the faster of the two.
+
+  Added `DetectionConfig.model_variant` (default `"base"`, unchanged)
+  and a `--model-variant` flag to `scripts/regression.py`, cache key
+  updated to include it so this never reads or pollutes the existing
+  `base` cache. Ran the FULL 9-clip regression suite with `small`, then
+  again with the (now cache-invalidated, freshly computed) `base`
+  default for a real same-methodology comparison, not a stale citation.
+
+  **Both: ALL PASS. 100% required-event recall on every clip, hard-cut
+  exclusion mechanism validated, every stitched output decodes clean.**
+  Diffed line-by-line, not just pass/fail: 6 of 9 clips are byte-
+  identical or differ only in sub-0.3s scale-boost/segment-boundary
+  noise (clip_540, clip_base2, clip_foul1). **One real, honestly-flagged
+  difference: `clip_base3`'s kept segment ends 21.0s under Small vs.
+  18.6s under Base (+2.4s), producing 2 hard-cut windows (-1.75s) instead
+  of 1 (-0.25s).** Still recall 1/1, still passes the hard-cut exclusion
+  and stitch-decode gates -- not a safety failure -- but a real,
+  measurable behavioral difference, reported exactly as found rather
+  than smoothed into "identical." Aggregate kept-time across all 9 clips:
+  Base 610.85s before hard-cut / 580.01s after; Small 612.73s / 580.39s
+  -- within 0.3% either way.
+
+  **Real speedup: 352.9ms/frame (Base) -> 262.3ms/frame (Small),
+  1.34x on the component that's 99.3% of real detect-stage time.**
+  Extrapolated (not directly measured on `full_game.mkv` itself, flagged
+  as an extrapolation): a ~45min cold detect would become roughly
+  ~34min, a real ~11min reduction on a full-game job -- worth verifying
+  directly against `full_game.mkv` before trusting the exact number,
+  same as this project's own standing "measure the real thing, don't
+  extrapolate and call it done" discipline.
+
+  **Honest bottom line: a real, viable ~1.34x speedup exists (RFDETRSmall)
+  and clears the project's own full safety gate -- left opt-in
+  (`model_variant="small"`), not flipped as the default.** The one real
+  behavioral difference found (clip_base3) doesn't cost recall or fail
+  any gate, but this project's own standing pattern (see the 2026-08-23
+  threshold-sweep closure, which kept the safer default even after
+  testing alternatives) is not to silently change shipped pipeline
+  behavior without explicit sign-off, even when a change measures safe.
+  Reported as a real, concrete, ready-to-adopt option, not shipped
+  unilaterally. `optimize_for_inference()` and batching both close as
+  genuine negatives on this specific Apple Silicon/MPS deployment --
+  honest outcomes, not failures to avoid reporting. Sample-rate
+  reduction was already done before this investigation started, not a
+  new lever tonight. No guaranteed real-play loss and no silent
+  detection-quality regression: the one real change tested and left
+  available was verified against the full 9-clip gate with recall
+  reported before and after, not assumed.
+
+- **2026-08-26: real export encoding audit -- current settings measured,
+  not assumed, and found to be genuinely oversized for the real target
+  use case (church volunteers sharing over phones/messaging apps). One
+  real, evidence-backed change proposed and implemented as an opt-in
+  parameter, default left unchanged pending explicit sign-off, same
+  pattern as the 2026-08-25 detect-variant investigation.**
+
+  **1. Real current state, traced directly in `pipeline/stitch.py`, not
+  assumed.** Two distinct paths: pure stream-copy (`-c copy`, no
+  transcoding, output resolution/bitrate/codec is simply whatever the
+  source already is) whenever a plan doesn't need re-encoding, and a
+  real libx264 encode (`-preset veryfast -crf 18`, AAC audio at
+  ffmpeg's own default ~128kbps, no explicit `-b:v` -- pure CRF quality-
+  target mode, no bitrate cap) whenever it does. Re-encoding is NOT rare
+  in practice: it fires on any multi-file resolution/codec/fps mismatch
+  OR whenever a hard-cut boundary needs frame-exact re-encoding for even
+  one span -- and hard cuts now ship unconditionally in production (see
+  the 2026-08-23 threshold-sweep closure), so most real exports with any
+  hard-cut activity go through this path. Confirmed against a real,
+  already-produced export (`uploads/fb07ea71f4b3/output.mp4`, via
+  `ffprobe`): **1920x1080, ~5.41Mbps video, ~130kbps AAC, 97.48MB for
+  147.3s of output** -- ~40MB/min.
+
+  **2. Real assessment against the real target use case.** At the
+  measured ~40MB/min, a realistic 20-30min highlight reel extrapolates
+  to **800MB-1.2GB** -- not a hypothetical concern but a direct,
+  concrete problem for a church volunteer downloading over home/mobile
+  data and sharing via a messaging app, most of which either hard-cap
+  file size well below that (traditional MMS/chat limits) or silently
+  re-compress on upload anyway, meaning CRF 18's quality investment is
+  substantially wasted for this specific distribution path. CRF 18 is a
+  real, deliberately very-high-quality setting ("visually near-
+  lossless"), well above what's typically needed for casual mobile
+  viewing of moderate-motion outdoor sports footage.
+
+  **3. Real test, not assumed: same real footage, four CRF values, file
+  size AND a real visual check, twice.** Encoded the exact same
+  `build_extract_cmd` command (same scale/pad, same `veryfast` preset,
+  only CRF varied: 18/21/23/26) against two real reference-clip windows
+  -- a static loaded-batter moment (clip_300, t=55-65s) and a genuine
+  fast-motion swing-and-miss (clip_whiff1, t=10-18s, real ball-in-flight
+  motion blur present). File size, same clip both times:
+
+  | CRF | file size | vs. CRF 18 |
+  |---|---|---|
+  | 18 (current) | 5.83MB / 4.75MB | -- |
+  | 21 | 4.13MB / 3.38MB | -29% |
+  | 23 | 3.21MB / 2.63MB | -45% |
+  | 26 | 2.02MB / 1.66MB | -65% |
+
+  Real visual check, not just file-size math: extracted a frame at the
+  same real timestamp from each of the four encodes, both moments,
+  built as side-by-side composites and inspected directly -- including a
+  full-resolution zoomed crop on the single highest-frequency detail in
+  frame (the batting-cage chain-link netting against open sky, exactly
+  where compression artifacts show first if they're going to show at
+  all). **No visible difference at any CRF tested, up to and including
+  26, on either the static or the fast-motion test.** Sky gradients
+  stayed smooth (no banding), netting mesh stayed crisp, motion blur
+  present in the swing frame was identical real subject/shutter blur
+  across all four, not additional compression blur.
+
+  **4. Real change: implemented, not just recommended, as an opt-in
+  parameter.** Added `crf: int = 18` to `build_extract_cmd` and
+  `run_stitch` (both default exactly the current shipped value --
+  byte-for-byte unchanged behavior for every existing caller that
+  doesn't pass it). No backend/CLI caller updated to pass a non-default
+  value yet -- that's the real, deliberate decision left open, not an
+  oversight. Full test suite: 481 passed, unaffected.
+
+  **Honest bottom line: CRF 18 is real, measured, unnecessary size for
+  this project's real footage and real target use case, with real
+  evidence (not assumption) that CRF 23 -- x264's own long-established
+  default, a conservative pick even though CRF 26 also showed no visible
+  difference in this testing -- costs nothing visible while cutting
+  output size by 45%.**
+
+  **5. Flipped for real, in the actual production call site, not left
+  opt-in.** Confirmed `backend/pipeline_runner.py:run_export_job` is the
+  single real production path first, not assumed: it's the only non-
+  test/non-script caller of `run_stitch` in the codebase, invoked both
+  by the auto-chained export right after detection
+  (`run_detect_then_export_job`) and by the Edit Log's real
+  restore/cut-triggered re-export (`backend/app.py`'s
+  `POST /batches/{id}/export`) -- every real export in this project goes
+  through this one function. Changed its `run_stitch(...)` call to pass
+  `crf=23` explicitly. Full test suite re-run after: **19 real failures**
+  surfaced first (`TypeError: fake_run_stitch() got an unexpected
+  keyword argument 'crf'`) -- three `run_stitch`-shaped fake fixtures in
+  `tests/test_backend_api.py` had fixed signatures that didn't accept
+  the new parameter; updated all three to accept `crf=18` (matching
+  `pipeline.stitch`'s own default) and re-ran: **481 passed, 0 failed.**
+
+  **Real full-export verification, not just the earlier frame-level
+  clips.** Ran a real, complete `run_stitch` against the actual
+  `fb07ea71f4b3` batch's real manifest (the same batch used for all of
+  tonight's earlier Edit Log browser verification) at `crf=23`, to a
+  separate output file so the live production `output.mp4` was never
+  touched. Confirmed real, not assumed: correctly took the re-encode
+  path (`reencoded=True`, "a hard-cut boundary needs frame-exact
+  re-encoding..."), the exact path production hard-cut-bearing exports
+  actually use.
+
+  | | crf=18 (real production output.mp4) | crf=23 (real full export, same manifest) |
+  |---|---|---|
+  | file size | 97.48MB | 54.76MB |
+  | video bitrate | ~5.41Mbps | ~2.98Mbps |
+  | resolution | 1920x1080 | 1920x1080 (unchanged) |
+  | duration | 147.29s | 147.29s (unchanged) |
+
+  **-43.8% real file size, matching the earlier frame-level test's -45%
+  prediction almost exactly**, on a real, complete, production-path
+  export -- not just the isolated 8-10s test clips. Confirmed both
+  outputs are genuinely distinct files (different MD5s), not a stale
+  probe artifact, before trusting the size numbers. Test export file
+  deleted after verification; the real batch's own `output.mp4` and
+  `manifest.json` were never touched by this check.
+
+  Left as-shipped, not opt-in: matches this project's own pattern for a
+  change that's real, evidence-backed, tested against a real production
+  export, AND explicitly requested to be flipped -- unlike the 2026-08-25
+  detect-variant investigation, which stayed opt-in because it had one
+  flagged, non-trivial behavioral difference on real content
+  (`clip_base3`'s kept-segment length) and had not yet been explicitly
+  approved for production. No guaranteed real-play loss risk: this
+  changes image compression quality only, never which content is kept
+  or cut.
+
 
 ## Testing
 

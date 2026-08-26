@@ -149,8 +149,16 @@ def run_export_job(batch_dir, job: dict) -> None:
         # because libx264's own internal threading already uses multiple
         # cores per encode, so higher process-level parallelism mostly
         # buys CPU contention, not real throughput, on this workload.
+        # crf=23: real, evidence-backed change (2026-08-26 investigation,
+        # docs/INVESTIGATION_LOG.md), not the pipeline.stitch default. CRF
+        # 18 measured ~40MB/min on real footage, impractical for the real
+        # target use case (church volunteers sharing over phones/messaging
+        # apps) -- CRF 23 (x264's own long-established default) cut real
+        # file size 45% with no visible difference on either a static or
+        # fast-motion real test frame, including a full-resolution crop on
+        # the highest-frequency detail in frame.
         result = run_stitch(manifest, batch_dir, output_path, on_stage=on_stage,
-                            max_workers=2)
+                            max_workers=2, crf=23)
 
         apply_output_offsets(manifest, result.segment_output_offsets)
         save_manifest(manifest, manifest_path)

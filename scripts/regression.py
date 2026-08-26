@@ -102,6 +102,11 @@ def main() -> None:
     ap.add_argument("--clips-dir", default=str(ROOT / "reference_clips"))
     ap.add_argument("--motion-only", action="store_true",
                     help="skip the fused pipeline (Stage 1 baseline only)")
+    ap.add_argument("--model-variant", default="base",
+                    help="RF-DETR variant to test (base|medium|small|nano) -- "
+                         "see the 2026-08-25 detect-speed investigation. "
+                         "Uses a separate cache key, so this never reads or "
+                         "pollutes the default 'base' cache.")
     args = ap.parse_args()
     clips_dir = Path(args.clips_dir)
 
@@ -141,7 +146,7 @@ def main() -> None:
                                      compute_zone_velocity)
         from pipeline.refine import RefineConfig, refine_segments
         from pipeline.settle import SettleConfig
-        det = detect_persons(str(clip_path), DetectionConfig(),
+        det = detect_persons(str(clip_path), DetectionConfig(model_variant=args.model_variant),
                              cache_dir=str(CACHE_DIR))
         fused = fuse(motion.times, motion.scores, motion.grids,
                      motion.frame_size, motion.analysis_size, motion.border_px,

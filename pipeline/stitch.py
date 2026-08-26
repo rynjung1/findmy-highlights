@@ -620,7 +620,7 @@ def plan_stitch(manifest: dict, source_dir, prober=probe_video_params,
 
 
 def build_extract_cmd(job: SpanJob, out_path, reencode: bool,
-                      target: tuple | None = None) -> list:
+                      target: tuple | None = None, crf: int = 18) -> list:
     """ffmpeg command to extract one kept span to its own clip file.
 
     job.start_s/end_s are in the SOURCE FILE's own nominal timeline (t=0
@@ -640,7 +640,24 @@ def build_extract_cmd(job: SpanJob, out_path, reencode: bool,
     this module's own "never less, only extra" guarantee. Verified fixed
     directly: the same span before the fix measured 115.690s against a
     120.155s request; after shifting both -ss/-to by 4.506s it measured
-    120.195s (extra, as documented, never short)."""
+    120.195s (extra, as documented, never short).
+
+    `crf` (default 18, the value this project has always shipped) only
+    applies on the re-encode path -- stream-copy carries no quality
+    setting at all. 2026-08-26 investigation (docs/INVESTIGATION_LOG.md):
+    a real, currently-shipped 1920x1080 export measures ~5.4Mbps video at
+    CRF 18 (~40MB/min), which extrapolates to 800MB-1.2GB for a real
+    20-30min highlight reel -- impractical for the real target use case
+    (church volunteers sharing over messaging apps on phones). Real
+    encodes of the same real footage at CRF 21/23/26, checked both by
+    file size AND a real side-by-side frame comparison (a static frame
+    and a genuine fast-motion swing, at full resolution, including a
+    zoomed crop on the highest-frequency detail in frame, the batting-
+    cage netting) found NO visible difference even at CRF 26 (-65% file
+    size) on either test. CRF 23 (-45%, x264's own long-established
+    default) is the safe, evidence-backed recommendation -- left as an
+    explicit default-unchanged parameter rather than silently flipped,
+    same pattern as pipeline.detection's model_variant."""
     base = ["ffmpeg", "-y",
             "-ss", f"{job.start_s + job.start_offset}",
             "-to", f"{job.end_s + job.start_offset}",
@@ -654,7 +671,7 @@ def build_extract_cmd(job: SpanJob, out_path, reencode: bool,
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1")
     return base + [
         "-vf", scale_pad, "-r", f"{fps}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
         "-c:a", "aac", str(out_path)]
 
 
@@ -708,7 +725,7 @@ def compute_output_offsets(manifest: dict, placements: list) -> dict:
 def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
               prober=probe_video_params, keyframe_prober=get_keyframe_times,
               duration_prober=probe_duration,
-              runner=None, on_stage=None, max_workers=1) -> StitchResult:
+              runner=None, on_stage=None, max_workers=1, crf: int = 18) -> StitchResult:
     """Execute a stitch plan: extract every kept span, then concat them
     into `output_path`. `work_dir` holds intermediate per-span clips
     (a temp dir is used and cleaned up if not given). `runner` defaults
@@ -719,6 +736,9 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
     `on_stage`, if given, is called with a human-readable stage name
     before extraction and again before the final concat (added for the
     backend's progress reporting; scripts/stitch.py doesn't pass one).
+    `crf` (default 18, unchanged) is forwarded to build_extract_cmd on
+    the re-encode path only -- see that function's own docstring for the
+    real evidence behind the recommended (not yet default) CRF 23.
 
     `max_workers` (default 1, i.e. today's exact sequential behavior --
     every existing caller/test that doesn't pass it is byte-for-byte
@@ -783,7 +803,7 @@ def run_stitch(manifest: dict, source_dir, output_path, work_dir=None,
         if on_stage:
             on_stage("extracting kept segments")
         clip_paths = [work_dir / job.clip_name for job in plan.jobs]
-        cmds = [build_extract_cmd(job, out, plan.reencode, plan.target)
+        cmds = [build_extract_cmd(job, out, plan.reencode, plan.target, crf=crf)
                for job, out in zip(plan.jobs, clip_paths)]
 
         # Extraction only -- independent per span (own output file, same

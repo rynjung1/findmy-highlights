@@ -92,7 +92,8 @@ def fake_process_video_factory(segments_by_file=None, default_segments=((1.0, 3.
 
 
 def fake_run_stitch(manifest, source_dir, output_path, work_dir=None,
-                    prober=None, runner=None, on_stage=None, max_workers=1):
+                    prober=None, runner=None, on_stage=None, max_workers=1,
+                    crf=18):
     if on_stage:
         on_stage("extracting kept segments")
         on_stage("stitching output")
@@ -1170,7 +1171,8 @@ def test_export_persists_real_output_offsets_onto_manifest(tmp_path, monkeypatch
     (e.g. the result being computed but never applied/saved)."""
     def fake_run_stitch_with_offsets(manifest, source_dir, output_path,
                                      work_dir=None, prober=None,
-                                     runner=None, on_stage=None, max_workers=1):
+                                     runner=None, on_stage=None, max_workers=1,
+                                     crf=18):
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_bytes(b"fake output video")
         from pipeline.stitch import StitchResult
@@ -1197,7 +1199,8 @@ def test_export_persists_real_output_offsets_onto_manifest(tmp_path, monkeypatch
         # not just leave the value from the first export in place
         def fake_run_stitch_second_export(manifest, source_dir, output_path,
                                           work_dir=None, prober=None,
-                                          runner=None, on_stage=None, max_workers=1):
+                                          runner=None, on_stage=None, max_workers=1,
+                                          crf=18):
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(b"fake output video 2")
             from pipeline.stitch import StitchResult
