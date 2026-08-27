@@ -3042,6 +3042,74 @@ is reported here rather than hidden, exactly the kind of danger this
 project's standing process exists to catch before anything goes near
 production.**
 
+**2026-08-27 follow-up: the Type-A guard threshold (N, recent-departure
+guard) swept across the full 9-clip reference set, same rigor as every
+other threshold sweep in this document -- the safety question is now
+resolved with real margin, not the thin 2-datapoint bracket the entry
+above shipped with.** The entry above explicitly flagged N=5.0 as NOT
+YET SHIPPABLE on exactly this basis; this closes that gap.
+
+**1. Real safe bracket, all 9 clips.** Swept N=1.0-15.0 at 0.5s
+resolution, then fine-swept the boundary at 0.05s resolution. Result:
+**N=4.15-6.0s is safe, zero violations against any required event on
+any of the 9 reference clips, 7 gates / 26.57s total savings flat
+across that entire range** -- there is no cost anywhere in this window
+to picking a larger N within it. Above 6.0s savings start eroding (6.5s
+drops to 22.81s/6 gates; 7.0s+ drops to and holds at 20.52s/5 gates
+through 15.0s) for zero additional safety benefit, so nothing above
+~6.0s is worth choosing. N=5.0, the value already logged above, sits
+inside this confirmed plateau -- not merely carried over from the
+earlier 3-clip estimate, independently reconfirmed against all 9.
+
+**2. Correction to the earlier bracket estimate.** The entry above
+reported "N must be >=3.13s" from manual arithmetic on the raw
+departure/open timestamps (`clip_300`'s e6 case). Running the actual
+guard implementation at fine resolution shows the real measured minimum
+is **4.15s**, not 3.13s -- the earlier number undersold the true
+constraint. The exact knife-edge between 4.10 (unsafe) and 4.15 (safe)
+is itself an artifact of RF-DETR's ~1Hz detection sampling grid (the
+departure sample that trips the guard sits right at the lookback
+window's boundary at that exact N) -- flagged as thin/sampling-bound,
+not a robust physical margin, the same honesty standard this document
+applies to every other margin derivation (`enter_thresh`,
+`clip_540`'s e4 real-margin investigation, etc.).
+
+**3. Three new gates, on clips outside the original 3-clip sample,
+frame-verified rather than trusted from the automated check alone.**
+At N=5.0: `clip_base1` [2.71-7.40]->5.00 (2.29s -- frames show the
+plate area empty, only a distant fielder, well before the required
+event at t=8); `clip_base2` [0.00-3.23]->4.00 (4.00s -- a bystander at
+the cage and a second figure walking toward the plate, no bat/ball
+action, required event at t=11); `clip_foul1` [0.00-3.23]->5.00 (5.00s
+-- batter still settling into position, no pitch visible, required
+event at t=12). All three read as genuine walkup on direct frame
+inspection, matching what the automated required-window check already
+showed. `clip_300`, `clip_base3`, `clip_base4`, and `clip_whiff1`
+produce zero gates at N=5.0 -- nothing to verify there.
+
+**4. `full_game.mkv` numbers unchanged.** N=5.0 was already inside the
+now-confirmed 4.15-6.0s safe/max-savings bracket, so the full-game run
+already reported above (232 raw segments, 34 real gates, 4 correctly
+guard-blocked, 136.37s total savings) remains valid at the
+newly-validated threshold -- re-running at the same N would only
+reproduce it, so it wasn't re-run.
+
+**5. Explicit status: the safety question is resolved, integration is
+still open.** The specific hard-rule question -- does N=5.0 ever risk a
+real required event, on any clip -- is now answered NO, with real
+margin (a 1.85s-wide safe plateau, not a razor edge), checked against
+all 9 reference clips rather than 3. This is a materially different
+result from the entry above's own explicit "not yet shippable" flag,
+and does not join the closed investigations. But "shippable" in the
+full sense is still open: this was validated via a standalone script
+re-implementing only the required-event-overlap criterion, not the
+actual `scripts/regression.py` suite, which also checks continuity and
+at-bat fire/no-fire expectations this gate has never been run against
+-- because it isn't wired into `pipeline/segments.py` or
+`pipeline/run.py` at all. The real next step, if this gets picked back
+up, is wiring the gate into the actual pipeline and running the full
+regression harness, not just this standalone safety check.
+
 
 ## Architecture overview
 
