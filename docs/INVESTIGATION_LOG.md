@@ -2855,6 +2855,193 @@ achievable by searching harder within this project's current reference
 clips and review-queue data, which is a real, checked limit, not an
 assumption.
 
+**2026-08-27: walkup time investigated as its own problem category,
+deliberately scoped apart from the 11 closed practice-swing
+investigations -- those ask "is this real play or FAKE/practice play,"
+this asks "is this real-but-uneventful time between one real play ending
+and the next batter's first meaningful pitch." Decomposed into two
+structurally distinct sub-problems on real, hand-verified footage: one
+new signal that works (guarded), one that reproduces the same closed
+wall from a different angle.** Went in explicitly not assuming either
+sub-problem inherited the earlier investigations' failure mode --
+verified from scratch.
+
+**1. Real definition, from frame-by-frame review, not trusted labels.**
+Pulled three real inter-play gaps (`clip_300` ~t79-97, `clip_540`
+~t89-174, `clip_60` ~t125-170) and reviewed them via ffmpeg contact
+sheets (1fps, and higher-fps/full-resolution single frames wherever a
+sheet read was ambiguous) rather than trusting `tests/ground_truth`'s
+own window boundaries for anything finer than "which play." Two
+structurally different real things showed up:
+- **Type A -- batter physically approaching the plate.** Cleanest
+  instance: `clip_60` t~147-165 -- plate reads empty 8+ continuous
+  seconds (near-zero zone velocity throughout), then a real person
+  visibly walks in from off-frame (confirmed on the contact sheet),
+  registering as a genuine 0.75/0.46 box-heights/sec velocity spike
+  (`pipeline.fusion.compute_zone_velocity`) immediately before settling
+  occupied at t=165.16.
+- **Type B -- batter already established at the plate, loading/waiting.**
+  `clip_300` t~79-96 (new batter's ready-stance/load motions before the
+  real swing at 97), `clip_60` t~127-137 (SAME batter, between an
+  already-required pitch and the next required swing), `clip_540`
+  t~158-174 (established since ~148, load motions before contact
+  ~183-184).
+A third, related-but-distinct thing was found and deliberately NOT
+folded into either category: general field milling with **nobody at the
+plate at all** (`clip_540` t~95-119, t~138-149 -- confirmed via contact
+sheet, players scattered around the infield, no one in the batter's
+box). Real, uneventful, but doesn't match "batter approaching" or
+"batter loading" -- flagged as its own separate open question, not
+assumed to share either sub-problem's answer.
+
+**2. Current pipeline behavior, confirmed by actually running it, not
+assumed from reading the code.** Walkup has no dedicated handling
+anywhere today. It leaks into kept output through three existing
+mechanisms, none built for it: raw hysteresis + the 3.0s `merge_gap_s`
+silently welds walkup motion onto the adjacent play's own raw segment
+before extension logic ever runs (directly confirmed: `clip_540`'s real
+required play `[79,91]` raw-extends to 110.84 with zero extension logic
+involved yet -- matches this same document's own "RAW motion segment
+already covers 30-64% of a given gap" walk-up-gap note above); Stage 3
+extension/padding, built for a play's genuine tail, has no way to tell
+"real aftermath" from "next batter's walkup already starting"; and
+walkup motion (a load motion, an approach step) independently crosses
+`enter_thresh` and opens its own short kept segment, entirely apart from
+extension (`clip_300`'s 92.59-94.57s segment, `clip_60`'s
+133.99-145.35s segment -- this one MERGES the walkup blip and the real
+swing into one raw segment, non-separable by any enter-side timing fix).
+`apply_hard_cuts`, the one existing safety net, only removes near-total
+silence (`HardCutConfig.quiet_thresh=0.002`, far below `enter_thresh`'s
+0.006) -- moderate walkup motion (a step, a load) clears that trivially,
+so hard-cut barely touches this. The already-closed enter-side
+ambient-motion-discount investigation is a different question (a
+generic motion discount across the whole enter side, closed because
+nothing separates real slow play from ambient milling *in general*) --
+this investigation is narrower and asks something that idea never tried:
+whether the already-shipped, already-validated zone-occupancy/velocity
+machinery (proven on the *exit* side, Stage 11 tier 1) works as an
+*enter*-side gate instead.
+
+**3. Signals tested against 7 hand-verified instances (3 confirmed
+Type-A/walkup-only opens, 4 confirmed required-event opens) -- two real
+negatives, reported honestly rather than discarded, one real positive
+that needed a second iteration to be safe.**
+- **Time-since-occupancy-established (`since_rise`)**: does NOT separate
+  them. Walkup-only instances measured 18.6-20.9s; two of the four real
+  required-event opens measured HIGHER (32.0s, 25.2s) than every
+  walkup-only instance. Honest negative, not assumed away.
+- **Zone-velocity spike magnitude alone**: also fails, and in the
+  counter-intuitive direction -- real swing opens averaged LOWER zone
+  velocity (0.03 bh/s) than walkup-only opens (0.08 bh/s), because a
+  swing barely moves the batter's own box centroid while a load/stance
+  shift or a step does more. `compute_zone_velocity` was built to catch
+  arrivals, not swings, and behaves exactly that way here.
+- **Occupancy state-transition, order-sensitive (vacant -> arrival-spike
+  -> settled), reusing `compute_occupancy`/`compute_zone_velocity` and
+  the already-shipped `zone_arrival_thresh=0.20`**: this is the one
+  signal that works -- but the first, naive version of it is UNSAFE, a
+  real near-miss caught before it went anywhere near being proposed as
+  safe. A forward-looking rule ("segment opens while occupancy reads
+  False, and occupancy becomes True again within 10s -> gate the open to
+  that settle time") delays `clip_300`'s REQUIRED hit-and-run event
+  (e6) from its real open at 98.22s to 107.11s -- 8.88s past the
+  required window's own start at t=95. Root cause: at t=98.22 the plate
+  reads vacant not because nobody has arrived, but because the
+  *previous* batter just sprinted off after contact (a departure, not a
+  pre-arrival vacancy) -- occupancy alone can't tell those apart without
+  also checking the trend immediately before it. Fixed with a
+  **recent-departure guard**: refuse to gate if a real
+  occupied-then-vacant transition, preceded by a velocity spike at or
+  above `zone_arrival_thresh`, happened within the last N seconds.
+  Real, checked bracket for N on the 3 reference clips: must be >=3.13s
+  to protect `clip_300`'s e6, and <5.86s to keep `clip_60`'s own two
+  real gate opportunities -- landed on N=5.0s, a real but thin ~2.7s
+  margin derived from exactly two bracketing data points, not a swept
+  or robustly validated constant. At N=5.0s: 4 real gates fire across
+  the 3 reference clips, 15.27s total savings, **zero safety violations
+  checked against all 9 required events across the 3 clips** (the
+  earlier unguarded version's violation does not reproduce).
+
+**4. Type B (established-batter load/practice motion) independently
+reproduces the same wall the 11 closed content-classification
+investigations already hit -- reached from a completely different
+(timing/gating) angle, not a repeat of the same test.** Neither
+signal tested (occupancy duration, zone velocity) separates a real
+pitch/swing from a load/practice motion once the batter is already
+established in the box -- every candidate scalar overlapped in both
+directions on the verified sample (point 3 above). Worth stating
+plainly since it was tested fresh rather than assumed: X-CLIP, pose,
+audio, and a local VLM all failed to classify practice-swing *content*;
+this failed to find any *timing* signal either, on the same underlying
+footage, independently.
+
+**5. Full-game cross-validation, guarded gate only (N=5.0s), spot-checked
+by hand since `full_game.mkv` has no ground truth.** Detection had to
+be fully re-run (not reused from the existing cache) because the recent
+`DetectionConfig.model_variant` default flip invalidated the prior
+cache entries -- real wall-clock cost, ~2000s (~33 min) of RF-DETR
+inference over the full 67.5-minute game, run in the background.
+232 raw segments total; the guarded rule fired **34 real gates**, and
+the recent-departure guard correctly blocked 4 more that would otherwise
+have been gated; **136.37s (~2.27 min) total savings**. Against the
+already-shipped full-game numbers (53.19 min kept / 14.31 min cut, see
+README), this would move kept time down ~4.3% and cut time up ~16%
+relative, if shipped as-is at this exact threshold.
+
+Three instances (spanning early/mid/late in the game: t~286-295,
+t~1545-1552, t~3400-3408) were hand-verified via frame extraction rather
+than trusted from the numbers alone. Two were unambiguous on a 1fps
+contact sheet (a player walking in from off-frame and settling into the
+box, plate empty beforehand, no ball or swing visible in the gated
+sliver). The third (t~1545-1552) looked genuinely concerning on the
+1fps sheet -- bat-like motions and what read as a possible throwing
+release inside the gated window. Pulled full-resolution single frames
+at the ambiguous instants and resolved it cleanly: a person standing
+near the backstop fence, OUTSIDE the plate area, tossing a ball back --
+this project's own already-established `warmup_throws` category (see
+`clip_300#e5`, `clip_60#e2`), not a live pitch -- while the actual
+batter stood outside the box the entire gated window, bat down at their
+side. Confirmed safe, but only after the closer look; the 1fps read
+alone would not have been enough to trust it.
+
+**6. Explicitly NOT YET SHIPPABLE -- flagging this now rather than
+letting the full-game numbers above read as a green light.** The N=5.0s
+guard threshold is bracketed by exactly two reference-clip data points,
+a first real result, not a swept or robustly validated constant --
+this project's own standard (every other threshold in this document,
+`enter_thresh`, `exit_thresh`, both padding ceilings, the zone-velocity
+thresholds) went through a real sweep and the full 9-clip
+`scripts/regression.py` gate before shipping, and this margin was
+already shown to be thin once (a 2.7s bracket from n=2). This
+investigation's own scripts were never committed to `pipeline/` or
+`backend/` -- they lived in an agent scratchpad only, same convention as
+the pitcher-windup investigation above. No cutting decision anywhere in
+this project currently depends on any signal from this entry.
+
+**7. Product judgment surfaced, not decided here.** Type A's savings
+come from delaying/potentially cutting the batter's real, visible WALK
+to the plate -- not noise, not silence. Whether a highlight video should
+keep or cut that walk is a real call: this project's own stated
+definition of dead time argues for cutting it (it isn't itself the
+play), but it's real, visible activity some viewers may want as
+scene-setting, and the per-instance savings are small (single-digit
+seconds to ~9s per instance). This is the same kind of tradeoff the
+project's owner has made explicitly elsewhere (see this document's
+Priority rule section) -- surfaced for an explicit decision, not assumed
+either way here.
+
+**Honest bottom line: one new, real, safely-guardable-but-thin signal
+found (Type A) and cross-validated on real full-length footage, not
+just the reference clips; one sub-problem (Type B) confirmed as a
+genuine dead end from a fresh angle, not assumed. No guaranteed
+real-play loss was found in the mechanism that shipped promise, checked
+against all 9 required events on the reference clips it was tested
+against and hand-verified on 3 real full-game instances -- but a
+concrete near-miss WAS found along the way (the unguarded version) and
+is reported here rather than hidden, exactly the kind of danger this
+project's standing process exists to catch before anything goes near
+production.**
+
 
 ## Architecture overview
 
