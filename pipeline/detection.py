@@ -28,13 +28,24 @@ class DetectionConfig:
     # Investigated 2026-08-25 (real detect-stage speed profiling): on this
     # project's Apple Silicon/MPS hardware, inference is 99.3% of real
     # detect-stage wall clock (frame grab/convert/postprocess are all
-    # <1% combined), so this is the one lever worth exposing. "base"
-    # (default, unchanged) stays the shipped, fully-verified choice --
-    # smaller variants trade real accuracy for speed and need the full
-    # scripts/regression.py gate before ever becoming the default; see
-    # that investigation's writeup in docs/INVESTIGATION_LOG.md before
-    # changing this default.
-    model_variant: str = "base"   # base | medium | small | nano
+    # <1% combined), so this is the one lever worth exposing.
+    #
+    # Flipped to "small" 2026-08-27, real evidence, not a guess: RFDETRSmall
+    # measures a real 1.34x inference speedup and passed the FULL 9-clip
+    # regression suite both ways (ALL PASS, 100% required recall on every
+    # clip, hard-cut exclusion validated, every stitch clean). The one
+    # flagged difference (clip_base3's kept segment +2.4s under Small)
+    # was frame-verified directly before flipping this default, not just
+    # gate-passed: the extra window (t=18.6-21.0) is confirmed post-play
+    # downtime (the next batter's walkup, matching this event's own
+    # ground-truth note that "defense relaxed... by ~18s") -- not real
+    # play content at risk, and the hard-cut mechanism trims most of the
+    # difference back out regardless (final kept duration differs by
+    # <1s after hard-cut). See docs/INVESTIGATION_LOG.md for the full
+    # writeup of both the 2026-08-25 investigation and the 2026-08-27
+    # frame-verification that preceded this flip. Revert to "base" only
+    # with the same rigor (full 9-clip regression, not a guess).
+    model_variant: str = "small"   # base | medium | small | nano
 
 
 @dataclass

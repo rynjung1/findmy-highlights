@@ -98,15 +98,26 @@ def recall_line(tag, segments, truth, duration):
 
 
 def main() -> None:
+    # Real default, not a hardcoded second copy that could silently drift
+    # from what production actually ships -- importing just the dataclass
+    # is cheap (no torch/rfdetr import, see pipeline.detection's own
+    # docstring on why the model import stays lazy).
+    from pipeline.detection import DetectionConfig as _DC
+    default_model_variant = _DC().model_variant
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--clips-dir", default=str(ROOT / "reference_clips"))
     ap.add_argument("--motion-only", action="store_true",
                     help="skip the fused pipeline (Stage 1 baseline only)")
-    ap.add_argument("--model-variant", default="base",
+    ap.add_argument("--model-variant", default=default_model_variant,
                     help="RF-DETR variant to test (base|medium|small|nano) -- "
                          "see the 2026-08-25 detect-speed investigation. "
                          "Uses a separate cache key, so this never reads or "
-                         "pollutes the default 'base' cache.")
+                         "pollutes any other variant's own cache. Defaults "
+                         f"to whatever pipeline.detection.DetectionConfig "
+                         f"itself defaults to ({default_model_variant!r} "
+                         "right now), so this script always tests what "
+                         "production actually ships unless overridden.")
     args = ap.parse_args()
     clips_dir = Path(args.clips_dir)
 

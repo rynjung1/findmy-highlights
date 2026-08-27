@@ -5701,6 +5701,71 @@ a non-visual/non-audio signal source (e.g. a companion sensor).
   changes image compression quality only, never which content is kept
   or cut.
 
+- **2026-08-27: `DetectionConfig.model_variant` flipped from "base" to
+  "small" -- explicit decision, real frame-verification of the one
+  flagged difference done FIRST, not skipped in favor of "the gate
+  already passed."**
+
+  **1. Real frame-verification of the `clip_base3` difference, before
+  flipping anything.** The 2026-08-25 investigation found Small's kept
+  segment for `clip_base3` runs to 21.0s vs. Base's 18.6s (+2.4s), with
+  hard-cut then trimming more of it back out (2 windows/-1.75s vs. 1
+  window/-0.25s). Rather than trust "both configurations still pass the
+  gate" as sufficient, pulled real frames across t=16-22s and looked
+  directly, same rigor as every other borderline check tonight. The
+  clip's own ground truth (`tests/ground_truth/clip_base3.json`)
+  already states the real play resolves and "defense relaxed... by
+  ~18s" -- the frames confirm this exactly: t=17-18 shows the defensive
+  play winding down, and t=19-21 (the extra window Small keeps) shows
+  players casually walking, then the **next batter approaching the
+  plate with a bat raised at t=21** -- genuine post-play transition
+  content, not real defensive action tied to this required event. Real
+  answer to the actual question asked: this is **not a detection
+  improvement** (Small isn't catching more of the real play) and **not
+  a real risk** either (no real content anywhere near being lost -- the
+  required event's actual content, resolved by ~18s per the clip's own
+  ground truth, is fully captured under both configurations, and
+  `hard_cut_overlaps_required` already validated neither Base nor Small
+  produces a hard-cut that overlaps it). It's a benign difference in how
+  much non-essential walkup footage gets included before hard-cut trims
+  it back -- final kept duration differs by under 1 second either way
+  once hard-cut is applied (Base: 12.4s - 0.25s = 12.15s; Small: 14.8s -
+  1.75s = 13.05s).
+
+  **2. Flipped for real.** `DetectionConfig.model_variant` default
+  changed `"base"` -> `"small"`. Added `tests/test_detection_config.py`
+  (3 new tests: the default value itself, the real `_MODEL_CLASSES`
+  mapping, and that an unknown variant raises) specifically so a future
+  change to this default is a visible, deliberate diff against a real
+  assertion, not silently unnoticed. `scripts/regression.py`'s own
+  `--model-variant` flag was hardcoded to `"base"` separately from
+  `DetectionConfig`'s real default -- a real, found drift risk (this
+  script exists to validate what production ships; a stale hardcoded
+  default would silently stop doing that the moment the two diverged).
+  Fixed to read `DetectionConfig().model_variant` directly so it always
+  tracks the real default unless explicitly overridden.
+
+  **3. Re-verified for real, not assumed from the earlier run.** Full
+  pytest suite: **484 passed** (481 + the 3 new tests), 0 failed. Full
+  9-clip `scripts/regression.py`, now defaulting to `small` with no
+  flag needed: **ALL PASS** -- 100% required recall on every clip,
+  hard-cut exclusion mechanism validated, every stitch decode clean.
+  Aggregate totals matched the 2026-08-25 investigation's own Small run
+  exactly (612.73s kept before hard-cut / 580.39s after), confirming
+  this is the same, already-verified real behavior now running by
+  default, not a fresh unverified path.
+
+  **Honest bottom line: real evidence, checked directly rather than
+  inferred, supports the flip.** The one flagged behavioral difference
+  is confirmed benign by direct frame inspection (post-play walkup
+  content, not real play content, and not a hard-cut-safety risk
+  either way) -- not just "the aggregate gate happened to still pass."
+  `model_variant="small"` now ships as the real default. No guaranteed
+  real-play loss risk: both configurations were independently verified
+  to fully cover every required event across all 9 reference clips, and
+  the flagged difference was confirmed, by direct visual inspection, to
+  never touch real play content.
+
 
 ## Testing
 
