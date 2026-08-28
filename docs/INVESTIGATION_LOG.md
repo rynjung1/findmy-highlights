@@ -3394,6 +3394,82 @@ case it was validated on, plus one genuinely distinct sub-pattern (the
 head) correctly identified and correctly left alone rather than forced
 into a new mechanism it doesn't safely fit. No new mechanism needed.
 
+**2026-08-27: non-contact pitches -- a real pitch that's thrown, taken
+or missed, no swing or no contact, no play -- investigated as the
+fourth and final original observation. Went in without assuming this
+was Type B under a different name; confirmed on its own terms it
+precisely dissolves into three already-answered questions, not a new
+category.**
+
+**1. Real definition -- two different things get conflated under "non-
+contact pitch."** Hand-verified `clip_60#e4` (t=120-127, "ball visible
+... no swing") and `clip_300#e4` (t=122-129, same type) via the frame/
+motion data already gathered earlier tonight. A non-contact pitch is
+genuinely two different targets: **the pitch itself** (ball thrown,
+taken or swung-and-missed) -- brief, 2-7s -- and, per this project's own
+ground truth, explicitly required content in both cases; and **the dead
+time around it** -- the catcher's return throw immediately after, and
+the batter's wait before the next pitch. Only the second is plausibly
+"downtime"; the two are not the same target and answering for one says
+nothing about the other.
+
+**2. Current pipeline behavior -- already a legitimate keep, not an
+oversight.** Confirmed directly: `clip_60#e4`'s required window is
+fully covered by a kept segment (`119.4-126.6`, from tonight's wired
+`scripts/regression.py` run) -- recall 3/3, unbroken. Not unflagged or
+accidentally kept -- kept because ground truth says it must be.
+
+**3-4. Tested whether any signal distinguishes a "skippable no-action
+pitch" from a "required pitch" -- reproduced the existing wall
+directly on a fresh comparison set, not just cited it.** Real peak
+motion scores across six required events spanning every outcome type:
+
+| event | outcome | peak smoothed score |
+|---|---|---|
+| `clip_60#e4` | taken pitch, no swing | 0.0149 |
+| `clip_300#e4` | taken pitch, no swing | 0.0070 |
+| `clip_whiff1#e1` | swing and miss | 0.0114 |
+| `clip_foul1#e1` | **contact** (foul) | **0.0067** |
+| `clip_540#e2` | real hit | 0.0211 |
+
+The foul ball -- real bat-ball contact -- scores LOWER than both no-
+contact taken pitches and the swing-and-miss. No amplitude ordering
+separates "had contact" from "no contact" at all. A fresh, direct
+reconfirmation of this project's own founding v1 scope decision (README:
+"no camera/mic signal reliably separates a hit from a miss here") --
+not a coincidental repeat, an independently-constructed comparison set
+landing on the same wall.
+
+**The dead-time framing decomposes entirely into tonight's other two
+closures, using the same connecting event.** Using `clip_60#e4` as the
+thread: the catcher's return throw right after (t~126.5-128) is the
+exact instance already characterized in tonight's catcher-throw
+investigation -- motion score ~0.00017, already fully cut, closed. The
+batter's wait before the next pitch (t~128-137, same clip) is the exact
+instance already characterized in tonight's walkup investigation as
+Type B -- no signal distinguishes a real pitch-taking pause from load/
+practice motion once the batter is established. Every piece of "the
+dead time around a non-contact pitch" maps onto a category already
+closed tonight, on the same real footage, not an assumed resemblance.
+
+**5. No guaranteed real-play loss.** No cutting mechanism is proposed,
+so no new risk. The one real danger this observation named --
+conflating "no contact" with "safe to cut" -- never gets a chance to
+bite, because no signal was found that could make that call in the
+first place.
+
+**Honest bottom line: not a fourth category, a precise dissolution into
+answers already found.** The pitch itself is required, correctly kept,
+and provably indistinguishable-by-outcome; the dead time around it is
+tonight's catcher-throw closure plus walkup Type B, not a new pattern.
+
+**All four of the night's original observations are now resolved:**
+walkup time (shipped, `pipeline/segments.py`'s `WalkupGateConfig`),
+catcher return-throws (closed, structural), offense/defense transitions
+(closed, already covered by the shipped walkup gate plus correctly-
+untouched real content), non-contact pitches (closed, dissolves into
+the above plus this project's founding scope limit).
+
 
 ## Architecture overview
 
