@@ -3244,6 +3244,88 @@ now genuinely exercised by that suite rather than a standalone
 reimplementation of one safety property. **Shippable** -- the specific
 gap the previous entry's own "not yet shippable" flag named is closed.
 
+**2026-08-27: catcher return-throws investigated as a new problem
+category, deliberately scoped apart from every closed content-
+classification investigation -- closer in kind to walkup Type A (a
+distinct spatial/motion pattern) than to the practice-swing/audio/
+embedding work. Closed: not a viable cutting category on this footage,
+for a structural reason distinct from both the closed content-
+classification wall and walkup Type A's shippable result.**
+
+**1. Real definition, hand-verified via frame inspection, not trusted
+labels.** One clean instance found via fine-grained (4fps) frame review:
+`clip_60`, right after the required pitch e4 (ball arrives ~124, taken,
+no swing) -- the catcher becomes visible and makes a clear, sharp
+throwing motion in **t~126.5-128.0, ~1.5s total**. That's the real
+duration -- far shorter than walkup's 2-30+ second range, over almost
+as soon as it starts. `clip_540`'s ~t89-95 window (already examined
+during the walkup investigation) shows a related pattern -- a fielder
+throwing back toward the mound -- but it's the tail of a real defensive
+play resolving, not an isolated between-pitch return; kept as a second,
+structurally different real instance rather than folded into the first.
+Cross-checked two more real, independently-documented pitch instants
+directly in `full_game.mkv` (the exact global timestamps `clip_foul1`/
+`clip_whiff1`'s own ground-truth notes cite, ~411s and ~495s): the
+second shows the ball clearly visible in the catcher's glove, but the
+actual throw-back is too fast to land cleanly even at 3fps -- consistent
+with the same brevity found in `clip_60`, not a contradicting data
+point.
+
+**2. Current pipeline behavior, checked directly, not assumed.** For
+the clean `clip_60` instance, pulled the real per-sample motion score
+during the throw window: it never exceeds **0.00017** -- three orders
+of magnitude below `enter_thresh` (0.006), below `exit_thresh` too. This
+time is already fully cut as ordinary gap time: no raw segment ever
+opens there, so hard-cut has nothing to trim and the walkup gate (which
+only ever delays a raw segment's *open*) has nothing to act on either.
+For the `clip_540` case, the opposite: embedded inside one continuous
+raw segment covering the real required play, already kept, untouched by
+hard-cut (real sustained motion there, not the near-total silence
+`HardCutConfig.quiet_thresh` requires).
+
+**3-4. Two candidate signals tested, both hit real, distinct walls --
+neither a repeat of "no signal exists," each diagnosed to a specific,
+different cause.**
+- **Detectable throw trajectory (motion/ball):** tested directly against
+  real spatial grid data (`pipeline.motion`'s 16x9 per-block grid) during
+  the verified throw. Frame-score ~0 throughout; no coherent
+  catcher-toward-pitcher directional streak in the grid either -- a few
+  low-amplitude, flickering cells, not a trajectory. Not a
+  sensitivity-tuning gap: the throw is essentially invisible to
+  frame-differencing at this camera's distance/contrast/speed.
+- **Catcher-position occupancy (walkup Type A's own signal, mirrored to
+  the opposite end of the throw):** pulled real RF-DETR boxes during the
+  same window. Only one detected box ever falls inside the calibrated
+  plate zone (280px radius) -- almost certainly the batter; every other
+  nearby box sits 300-410px away, just outside it. No catcher-specific
+  zone exists anywhere in this project's calibration data model (only
+  plate + first/second/third base) -- a real missing-infrastructure gap,
+  not a failed signal or an untried idea.
+
+n=2 verified instances (plus the two full_game.mkv qualitative
+cross-checks) -- explicitly too small for a real accuracy number,
+reported as exactly that rather than forced, the same discipline the
+closed acoustic-bat-crack investigation applied at its own n=1.
+
+**5. No guaranteed real-play loss -- not applicable in the way it was
+for walkup, since nothing found here actually opens a cuttable window
+to threat-model in the first place.** The one real risk (cutting into
+the `clip_540`-style embedded case) is avoided by construction: that
+time is already inseparable from a required event's own kept segment,
+same as it would be under any mechanism.
+
+**Honest bottom line: a different kind of wall from both the closed
+content-classification investigations and from walkup Type A's
+shippable result.** Not "no signal exists to classify real vs. fake"
+(the closed wall) and not "a real, guardable timing signal exists"
+(walkup Type A) -- structural: when genuinely isolated, the event is
+too brief and low-contrast to ever register as kept content in the
+first place, so there is nothing to gain by cutting it; when connected
+to real play, it's inseparable from required content. **Closed.**
+
+
+## Architecture overview
+
 Built so far:
 
 - **Motion detection** (`pipeline/motion.py`) — scans a video at ~10
