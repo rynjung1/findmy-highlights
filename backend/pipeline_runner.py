@@ -45,7 +45,7 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list,
         for path in ordered_paths:
             zone = resolve_zone(path)
             calibrated_scale_px = resolve_calibrated_scale_px(path)
-            segments, vetoed, duration, motion, hard_cut_windows = process_video(
+            segments, vetoed, duration, motion, hard_cut_windows, walkup_gate_windows = process_video(
                 path, zone, motion_only=False, cache_dir=DEFAULT_CACHE_DIR,
                 warn=lambda msg: job["warnings"].append(msg),
                 on_stage=lambda s, p=path: on_stage(s, p),
@@ -73,6 +73,7 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list,
                 "source_file": Path(path).name, "duration": duration,
                 "kept_segments": segments, "score_fn": peak_score,
                 "skip_fn": skip_fn, "hard_cut_windows": hard_cut_windows,
+                "walkup_gate_windows": walkup_gate_windows,
             })
 
         on_stage("building manifest")
@@ -82,7 +83,8 @@ def run_detect_job(batch_dir, job: dict, ordered_paths: list,
                                       f["kept_segments"],
                                       score_fn=f["score_fn"],
                                       skip_fn=f["skip_fn"],
-                                      hard_cut_windows=f["hard_cut_windows"])
+                                      hard_cut_windows=f["hard_cut_windows"],
+                                      walkup_gate_windows=f["walkup_gate_windows"])
         else:
             manifest = build_multi_file_manifest(files_for_manifest)
 

@@ -70,7 +70,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.motion import compute_motion
 from pipeline.manifest import build_manifest
-from pipeline.segments import (SegmentConfig, apply_hard_cuts,
+from pipeline.segments import (SegmentConfig, apply_hard_cuts, apply_walkup_gate,
                                hard_cut_overlaps_required, scores_to_segments,
                                smooth_scores, segment_covers, total_duration)
 from pipeline.fusion import (FusionConfig, apply_veto, fuse, occupancy_near_times,
@@ -183,14 +183,29 @@ def main() -> None:
         # debounce -- kept in sync deliberately, same reason as the scale
         # boost above.
         occupancy_near = None
+        zvel_plate = None
         if zone is not None:
             occ_det_enter = compute_occupancy(det.times, det.boxes, zone,
                                               FusionConfig().stationary_v)
             occupancy_near = occupancy_near_times(
                 motion.times, det.times, occ_det_enter, seg_cfg.enter_occupancy_window_s)
+            zvel_plate = compute_zone_velocity(det.times, det.boxes, zone)
         raw = scores_to_segments(motion.times, enter_scores, seg_cfg,
                                  sustain_scores=motion.scores,
                                  occupancy_near=occupancy_near)
+        # mirrors pipeline.run.process_video's walkup gate -- kept in
+        # sync deliberately, same reason as the scale boost/debounce
+        # above: this script must test the SAME pipeline production
+        # actually ships, not a stale reimplementation that predates the
+        # gate.
+        walkup_gate_windows = []
+        if zone is not None:
+            raw, walkup_gate_windows = apply_walkup_gate(
+                raw, det.times, occ_det_enter, zvel_plate)
+            if walkup_gate_windows:
+                gate_savings = sum(b - a for a, b in walkup_gate_windows)
+                print(f"    walkup gate: {len(walkup_gate_windows)} window(s), "
+                     f"-{gate_savings:.2f}s from raw open time")
         raw_kept, vetoed = apply_veto(raw, fused)
         if boost > 1.0:
             print(f"    scale boost: {boost:.3f}x (linear), "
@@ -214,7 +229,7 @@ def main() -> None:
                           for name, z in base_zones.items()}
         # Stage 11 tier 1: same mechanism, plate zone -- see pipeline/run.py.
         if zone is not None:
-            zone_velocities["plate"] = (det.times, compute_zone_velocity(det.times, det.boxes, zone))
+            zone_velocities["plate"] = (det.times, zvel_plate)
         kept = refine_segments(raw_kept, motion.times, sm_motion, det.times,
                                occ, fires, motion.duration,
                                RefineConfig(settle=settle_cfg), zone_velocities,

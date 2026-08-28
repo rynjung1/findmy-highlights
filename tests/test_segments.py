@@ -8,7 +8,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.segments import (HardCutConfig, SegmentConfig, SkipSuggestionConfig,
-                               apply_hard_cuts, find_boundary_crossings,
+                               WalkupGateConfig, apply_hard_cuts, apply_walkup_gate,
+                               find_boundary_crossings,
                                find_cut_windows, find_skip_suggestions,
                                hard_cut_overlaps_required, merge_segments,
                                scores_to_segments, segment_covers,
@@ -540,3 +541,127 @@ def test_boundary_crossings_never_closes_a_segment_left_open_at_end():
     s = np.full_like(t, 1.0)
     crossings = find_boundary_crossings(t, s, cfg())
     assert [x["kind"] for x in crossings] == ["enter"]
+
+
+# ---- walkup gate (WalkupGateConfig / apply_walkup_gate) ----
+
+def test_walkup_gate_config_defaults_match_what_was_validated():
+    # see docs/INVESTIGATION_LOG.md's 2026-08-27 walkup-time entries --
+    # 4.15-6.0s is the real safe bracket measured across all 9 reference
+    # clips; 5.0s sits in the middle of that plateau, not at either edge.
+    cfg = WalkupGateConfig()
+    assert cfg.departure_guard_s == 5.0
+    assert cfg.lookahead_s == 10.0
+    assert cfg.arrival_thresh == 0.20
+    assert cfg.staleness_s == 2.0
+
+
+def test_walkup_gate_delays_open_until_the_zone_actually_settles():
+    # plate vacant the whole time up to and including the raw open at
+    # t=5, settles occupied at t=15 -- a genuine "still approaching"
+    # pattern, gate should delay the open to the real settle time
+    det_t = np.arange(0.0, 21.0, 1.0)
+    occ = det_t >= 15.0
+    zvel = np.zeros_like(det_t)
+    out, windows = apply_walkup_gate([(5.0, 20.0)], det_t, occ, zvel)
+    assert out == [(15.0, 20.0)]
+    assert windows == [(5.0, 15.0)]
+
+
+def test_walkup_gate_drops_the_whole_segment_when_gate_time_reaches_its_end():
+    # same vacant-then-settle pattern, but the raw segment's own end
+    # (6.0) is well before the real settle (15.0) -- confirmed to
+    # happen on real reference-clip data (clip_base2): the entire raw
+    # segment was walkup-only motion, so it's dropped, not clamped.
+    det_t = np.arange(0.0, 21.0, 1.0)
+    occ = det_t >= 15.0
+    zvel = np.zeros_like(det_t)
+    out, windows = apply_walkup_gate([(5.0, 6.0)], det_t, occ, zvel)
+    assert out == []
+    assert windows == [(5.0, 6.0)]
+
+
+def test_walkup_gate_leaves_an_already_occupied_open_untouched():
+    # the plate is already occupied at the raw open instant -- not an
+    # approach in progress (this is the established-batter/Type-B case,
+    # which this mechanism deliberately does not touch)
+    det_t = np.arange(0.0, 10.0, 1.0)
+    occ = det_t >= 3.0   # occupied well before the raw open at t=5
+    zvel = np.zeros_like(det_t)
+    out, windows = apply_walkup_gate([(5.0, 8.0)], det_t, occ, zvel)
+    assert out == [(5.0, 8.0)]
+    assert windows == []
+
+
+def test_walkup_gate_recent_departure_guard_blocks_gating():
+    # occupied through t=9, a real departure (occupied -> vacant) at
+    # t=10 preceded by a genuine velocity spike at t=9 -- the raw open
+    # at t=12 sits vacant, but this is a just-resolved departure, not a
+    # not-yet-arrived vacancy. This is the exact near-miss pattern found
+    # on clip_300's e6 (see docs/INVESTIGATION_LOG.md) -- must NOT gate.
+    det_t = np.arange(0.0, 25.0, 1.0)
+    occ = (det_t < 10.0)          # True for t<10, False from t=10 on
+    zvel = np.zeros_like(det_t)
+    zvel[det_t == 9.0] = 0.86     # the departure-instant velocity spike
+    out, windows = apply_walkup_gate([(12.0, 13.0)], det_t, occ, zvel)
+    assert out == [(12.0, 13.0)]
+    assert windows == []
+
+
+def test_walkup_gate_departure_guard_expires_outside_departure_guard_s():
+    # identical departure as above, but the raw open now sits well
+    # outside departure_guard_s (5.0s default) from the departure at
+    # t=10 -- old enough that a genuine new arrival should be trusted
+    # again. Zone settles occupied at t=15 within this open's lookahead.
+    det_t = np.arange(0.0, 25.0, 1.0)
+    occ = (det_t < 10.0) | (det_t >= 15.0)
+    zvel = np.zeros_like(det_t)
+    zvel[det_t == 9.0] = 0.86
+    out, windows = apply_walkup_gate([(16.0, 20.0)], det_t, occ, zvel)
+    # open at t=16 is already occupied (occ True from t=15) -- untouched
+    # by construction (nothing to gate, the zone is already settled)
+    assert out == [(16.0, 20.0)]
+    assert windows == []
+
+
+def test_walkup_gate_no_change_when_zone_never_settles_within_lookahead():
+    # plate vacant everywhere, never becomes occupied at all -- nothing
+    # for this mechanism to gate against (matches a real defensive-play/
+    # general-milling raw segment with no plate arrival anywhere nearby)
+    det_t = np.arange(0.0, 30.0, 1.0)
+    occ = np.zeros_like(det_t, dtype=bool)
+    zvel = np.zeros_like(det_t)
+    out, windows = apply_walkup_gate([(5.0, 8.0)], det_t, occ, zvel)
+    assert out == [(5.0, 8.0)]
+    assert windows == []
+
+
+def test_walkup_gate_stale_nearest_sample_leaves_segment_untouched():
+    # nearest det sample to the raw open is farther than staleness_s --
+    # no trustworthy occupancy reading at all, so no gate (same
+    # protective default as pipeline.fusion.fuse's own staleness check)
+    det_t = np.array([0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0])
+    occ = np.array([False, False, False, False, True, True, True])
+    zvel = np.zeros_like(det_t)
+    out, windows = apply_walkup_gate([(6.0, 7.0)], det_t, occ, zvel)
+    assert out == [(6.0, 7.0)]
+    assert windows == []
+
+
+def test_walkup_gate_multiple_segments_handled_independently():
+    det_t = np.arange(0.0, 21.0, 1.0)
+    occ = det_t >= 15.0
+    zvel = np.zeros_like(det_t)
+    segments = [(1.0, 2.0), (5.0, 20.0)]
+    out, windows = apply_walkup_gate(segments, det_t, occ, zvel)
+    # first segment: raw open at t=1 -- the real settle at t=15 is
+    # OUTSIDE this open's own lookahead_s=10 window (1, 11], so this
+    # segment is untouched by construction (lookahead_s is the natural
+    # cap on how far forward any single gate can look, per
+    # WalkupGateConfig's docstring) -- confirms segments are gated
+    # independently, each against its own lookahead window, not a
+    # shared one.
+    # second segment: raw open at t=5 -- t=15 IS within (5, 15], so this
+    # one gates exactly as in the single-segment drop test above.
+    assert out == [(1.0, 2.0), (15.0, 20.0)]
+    assert windows == [(5.0, 15.0)]

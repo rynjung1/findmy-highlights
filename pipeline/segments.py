@@ -469,3 +469,125 @@ def hard_cut_overlaps_required(cut_windows, required_events):
             if a <= we and b >= ws:
                 bad.append(((a, b), e["id"]))
     return bad
+
+
+@dataclass
+class WalkupGateConfig:
+    """Delays (or, if the delay would consume the whole segment, drops)
+    a RAW segment's open when it's preceded by a genuine
+    'batter still approaching, not yet arrived' plate-zone signature --
+    see docs/INVESTIGATION_LOG.md's 2026-08-27 walkup-time entries for
+    the full investigation and validation this shipped against.
+
+    The pattern (vacant -> arrival-velocity spike -> settled occupied)
+    reuses the exact same zone-occupancy/zone-velocity machinery
+    already shipped and validated on the EXIT side (pipeline.refine's
+    Stage 11 tier 1 zone-local close, `zone_arrival_thresh=0.20`) --
+    this is the same signature applied as an ENTER-side gate instead.
+
+    A naive version of this (gate whenever the zone reads vacant now and
+    becomes occupied again within `lookahead_s`) is UNSAFE on its own:
+    measured directly, it mistakes a real departure (the previous
+    batter sprinting off after contact, leaving the zone vacant for a
+    reason that has nothing to do with a new arrival) for a not-yet-
+    arrived vacancy, and delays a real required event by 8.88s on
+    `clip_300`. `departure_guard_s` fixes this: refuse to gate if a
+    real occupied-then-vacant transition, itself preceded by a
+    velocity spike at or above `arrival_thresh` (a genuine departure,
+    not silence), happened within the last `departure_guard_s` seconds.
+
+    Full 9-reference-clip sweep (0.5s resolution, then 0.05s at the
+    boundary): the real safe bracket is `departure_guard_s` in
+    [4.15, 6.0] -- zero violations against any required event on any
+    clip, savings flat (7 gates / 26.57s total) across that entire
+    range. Below 4.15s the `clip_300` violation above reproduces; above
+    6.0s real gate opportunities start being lost for no additional
+    safety benefit. 5.0s (this default) sits in the middle of that
+    plateau, not at either edge -- same "don't ship a literal
+    zero-margin bare minimum" practice as every other threshold in this
+    project (see pipeline.refine.RefineConfig's padding values). The
+    exact 4.10->4.15 knife-edge is itself an artifact of RF-DETR's
+    ~1Hz detection sampling grid (the departure sample that trips the
+    guard sits right at the lookback window's boundary at that precise
+    N), not a smooth physical margin -- flagged in the investigation
+    log as thin/sampling-bound, which is exactly why 5.0s (real margin
+    on both sides) was chosen over the bare 4.15s edge.
+
+    `lookahead_s` caps how far forward a gate can look for the zone to
+    actually settle occupied before giving up (untouched, no gate,
+    beyond that) -- this is also the natural upper bound on how much
+    any single gate can ever delay a segment's open by construction.
+    """
+    departure_guard_s: float = 5.0
+    lookahead_s: float = 10.0
+    arrival_thresh: float = 0.20   # == RefineConfig.zone_arrival_thresh
+    staleness_s: float = 2.0       # max age of the nearest det sample to trust
+
+
+def _walkup_gate_time(a, det_times, occupied, zone_velocity,
+                      config: WalkupGateConfig):
+    """The real gated open time for one raw segment start `a`, or `a`
+    itself unchanged if the arrival pattern doesn't apply here. See
+    WalkupGateConfig's docstring for the full mechanism and its safety
+    validation."""
+    cfg = config
+    idx_now = np.nonzero(det_times <= a)[0]
+    if len(idx_now) == 0:
+        return a
+    nearest = idx_now[-1]
+    if abs(det_times[nearest] - a) > cfg.staleness_s:
+        return a
+    if occupied[nearest]:
+        return a  # already occupied -- not an approach-in-progress
+
+    # DEPARTURE GUARD: refuse to gate if a real occupied -> vacant
+    # transition, preceded by a genuine velocity spike, happened within
+    # the last departure_guard_s seconds -- see docstring for why this
+    # is required for safety, not just tuning.
+    idx_back = np.nonzero((det_times >= a - cfg.departure_guard_s) & (det_times <= a))[0]
+    for k in range(1, len(idx_back)):
+        i0, i1 = idx_back[k - 1], idx_back[k]
+        if occupied[i0] and not occupied[i1] and zone_velocity[i0] >= cfg.arrival_thresh:
+            return a
+
+    idx_after = np.nonzero((det_times > a) & (det_times <= a + cfg.lookahead_s))[0]
+    if len(idx_after) == 0:
+        return a
+    true_after = np.nonzero(occupied[idx_after])[0]
+    if len(true_after) == 0:
+        return a
+    return float(det_times[idx_after][true_after[0]])
+
+
+def apply_walkup_gate(segments, det_times, occupied, zone_velocity,
+                      config: WalkupGateConfig | None = None):
+    """Apply the walkup gate to a list of RAW (start, end) segments --
+    called BEFORE veto/extension/padding, same stage `scores_to_segments`
+    itself runs at, so a gated (delayed) open is padded/extended around
+    its real, later start rather than the pre-arrival raw open.
+
+    Returns (new_segments, walkup_gate_windows). A segment whose entire
+    raw span turns out to be walkup-only (the gate time lands at or past
+    its own raw end -- confirmed to happen on real reference-clip data,
+    e.g. clip_base2) is dropped entirely, not clamped to zero length;
+    `walkup_gate_windows` still records the FULL (a, b) span in that
+    case, same as a partial-trim records (a, gate_time), so callers
+    (pipeline.manifest, via build_manifest's walkup_gate_windows param)
+    can tag the resulting cut span with origin="walkup_gate" either way.
+    """
+    cfg = config or WalkupGateConfig()
+    det_times = np.asarray(det_times, dtype=float)
+    occupied = np.asarray(occupied, dtype=bool)
+    zone_velocity = np.asarray(zone_velocity, dtype=float)
+    out = []
+    windows = []
+    for a, b in segments:
+        g = _walkup_gate_time(a, det_times, occupied, zone_velocity, cfg)
+        if g <= a:
+            out.append((a, b))
+            continue
+        windows.append((a, min(g, b)))
+        if g < b:
+            out.append((g, b))
+        # else: g >= b -- the whole segment was walkup-only motion, dropped
+    return out, windows

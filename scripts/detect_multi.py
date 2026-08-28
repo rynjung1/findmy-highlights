@@ -91,7 +91,7 @@ def main() -> None:
     for path in ordered_paths:
         zone = None if args.motion_only else resolve_zone(path)
         warn = (lambda msg, p=path: print(f"warning: {msg}", file=sys.stderr))
-        segments, vetoed, duration, motion, hard_cut_windows = process_video(
+        segments, vetoed, duration, motion, hard_cut_windows, walkup_gate_windows = process_video(
             path, zone, args.motion_only, cache_dir=CACHE_DIR, warn=warn)
 
         print(f"{path}: {duration:.1f}s, {len(segments)} segments, "
@@ -114,6 +114,7 @@ def main() -> None:
             "source_file": Path(path).name, "duration": duration,
             "kept_segments": segments, "score_fn": peak_score,
             "skip_fn": skip_fn, "hard_cut_windows": hard_cut_windows,
+            "walkup_gate_windows": walkup_gate_windows,
         })
 
     if args.manifest:

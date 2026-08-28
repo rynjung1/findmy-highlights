@@ -33,7 +33,7 @@ def fmt_ts(seconds: float) -> str:
 def run(video: str, motion_only: bool):
     """Thin CLI wrapper: resolve calibration, run the shared pipeline.
     Returns (final_segments, vetoed, duration, motion_result,
-    hard_cut_windows)."""
+    hard_cut_windows, walkup_gate_windows)."""
     zone = None if motion_only else resolve_zone(video)
     warn = (lambda msg: print(f"warning: {msg}", file=sys.stderr))
     return process_video(video, zone, motion_only, cache_dir=CACHE_DIR,
@@ -50,7 +50,7 @@ def main() -> None:
                     help="write a manifest JSON of kept segments and cut gaps")
     args = ap.parse_args()
 
-    segments, vetoed, duration, motion, hard_cut_windows = run(
+    segments, vetoed, duration, motion, hard_cut_windows, walkup_gate_windows = run(
         args.video, args.motion_only)
 
     if args.manifest:
@@ -69,7 +69,8 @@ def main() -> None:
 
         manifest = build_manifest(Path(args.video).name, duration, segments,
                                   score_fn=peak_score, skip_fn=skip_fn,
-                                  hard_cut_windows=hard_cut_windows)
+                                  hard_cut_windows=hard_cut_windows,
+                                  walkup_gate_windows=walkup_gate_windows)
         save_manifest(manifest, args.manifest)
         print(f"manifest written to {args.manifest}", file=sys.stderr)
 

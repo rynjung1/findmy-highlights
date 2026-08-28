@@ -10,14 +10,20 @@ regenerated from the current kept set — video files are never mutated.
 Timestamps are stored both as "HH:MM:SS.mmm" strings (the spec format,
 human-readable) and as float seconds (lossless for tooling). The `origin`
 field records how an entry came to be: "detected" (kept), "gap" (cut,
-never flagged as action), or "hard_cut" (cut, real content that a
+never flagged as action), "hard_cut" (cut, real content that a
 kept segment's own quiet stretch was destructively trimmed from -- see
-pipeline.segments.HardCutConfig). A "hard_cut" entry is restorable
-through the Edit Log exactly like a "gap" one (same untouched source,
-same set_status()/re-export flow) but flagged more prominently there,
-since it's the higher-risk kind: unlike an ordinary "gap" (motion never
-crossed the enter threshold at all), a "hard_cut" span sat inside
-content the pipeline already confirmed was worth keeping.
+pipeline.segments.HardCutConfig), or "walkup_gate" (cut, a raw
+segment's own opening motion that the walkup gate determined was a
+batter still approaching the plate, not yet part of the play -- see
+pipeline.segments.WalkupGateConfig). Both "hard_cut" and "walkup_gate"
+entries are restorable through the Edit Log exactly like a "gap" one
+(same untouched source, same set_status()/re-export flow) but flagged
+more prominently there, since both are the higher-risk kind: unlike an
+ordinary "gap" (motion never crossed the enter threshold at all), a
+"hard_cut" span sat inside content the pipeline already confirmed was
+worth keeping, and a "walkup_gate" span sat at the very front of a
+segment the pipeline was about to keep, before the gate delayed (or,
+if the gate consumed the whole raw segment, cancelled) that open.
 
 Every "kept" entry also carries `skip_suggestions`: a list of
 {"start_s", "end_s"} spans (source-file-local, same timeline as the
@@ -79,25 +85,37 @@ def _overlaps_any(a, b, windows) -> bool:
     return any(a <= wb and b >= wa for wa, wb in windows)
 
 
-def _spans_with_gaps(kept_segments, duration, hard_cut_windows=None):
+def _spans_with_gaps(kept_segments, duration, hard_cut_windows=None,
+                     walkup_gate_windows=None):
     hard_cut_windows = hard_cut_windows or []
+    walkup_gate_windows = walkup_gate_windows or []
+
+    def origin_for(lo, hi):
+        # hard_cut checked first: purely a tie-break for the (unobserved
+        # in practice, since the two mechanisms trim different stages)
+        # case of a cut span that happens to overlap both window lists.
+        if _overlaps_any(lo, hi, hard_cut_windows):
+            return "hard_cut"
+        if _overlaps_any(lo, hi, walkup_gate_windows):
+            return "walkup_gate"
+        return "gap"
+
     spans = []
     cursor = 0.0
     for a, b in sorted(kept_segments):
         a, b = max(0.0, float(a)), min(float(duration), float(b))
         if a > cursor:
-            origin = "hard_cut" if _overlaps_any(cursor, a, hard_cut_windows) else "gap"
-            spans.append((cursor, a, "cut", origin))
+            spans.append((cursor, a, "cut", origin_for(cursor, a)))
         spans.append((a, b, "kept", "detected"))
         cursor = b
     if cursor < duration:
-        origin = "hard_cut" if _overlaps_any(cursor, duration, hard_cut_windows) else "gap"
-        spans.append((cursor, float(duration), "cut", origin))
+        spans.append((cursor, float(duration), "cut", origin_for(cursor, duration)))
     return spans
 
 
 def build_manifest(source_file: str, duration: float, kept_segments,
-                   score_fn=None, skip_fn=None, hard_cut_windows=None) -> dict:
+                   score_fn=None, skip_fn=None, hard_cut_windows=None,
+                   walkup_gate_windows=None) -> dict:
     """Build a single-file manifest from final kept segments. Gaps become
     cut entries. For multiple files, use build_multi_file_manifest.
 
@@ -117,10 +135,18 @@ def build_manifest(source_file: str, duration: float, kept_segments,
     which cut spans are real destructive trims rather than ordinary
     never-flagged dead time -- purely a labeling input, origin="gap"
     everywhere if omitted, existing callers unaffected.
+
+    walkup_gate_windows, optional: (start_s, end_s) spans (see
+    pipeline.segments.apply_walkup_gate's second return value) marking
+    which cut spans are a raw segment's own gated-off approach motion
+    rather than ordinary never-flagged dead time -- same purely-additive
+    labeling input as hard_cut_windows, origin="gap" everywhere if
+    omitted.
     """
     segments = _segments_for_file(source_file, 0, duration, kept_segments,
                                   score_fn, skip_fn, start_id=1,
-                                  hard_cut_windows=hard_cut_windows)
+                                  hard_cut_windows=hard_cut_windows,
+                                  walkup_gate_windows=walkup_gate_windows)
     return {
         "version": MANIFEST_VERSION,
         "source_files": [source_file],
@@ -131,10 +157,11 @@ def build_manifest(source_file: str, duration: float, kept_segments,
 
 def _segments_for_file(source_file, source_file_index, duration,
                        kept_segments, score_fn, skip_fn, start_id,
-                       hard_cut_windows=None):
+                       hard_cut_windows=None, walkup_gate_windows=None):
     segments = []
     for i, (a, b, status, origin) in enumerate(
-            _spans_with_gaps(kept_segments, duration, hard_cut_windows),
+            _spans_with_gaps(kept_segments, duration, hard_cut_windows,
+                             walkup_gate_windows),
             start=start_id):
         if score_fn is not None:
             score = round(float(score_fn(a, b)), 3)
@@ -169,7 +196,8 @@ def build_multi_file_manifest(files) -> dict:
         {"source_file": str, "duration": float, "kept_segments": [...],
          "score_fn": callable or None (optional),
          "skip_fn": callable or None (optional),
-         "hard_cut_windows": [...] or None (optional)}
+         "hard_cut_windows": [...] or None (optional),
+         "walkup_gate_windows": [...] or None (optional)}
 
     Each file's segments are local to that file (see module docstring);
     `source_file_index` is each file's position in this list, which also
@@ -182,7 +210,8 @@ def build_multi_file_manifest(files) -> dict:
         file_segments = _segments_for_file(
             f["source_file"], idx, f["duration"], f["kept_segments"],
             f.get("score_fn"), f.get("skip_fn"), start_id=next_id,
-            hard_cut_windows=f.get("hard_cut_windows"))
+            hard_cut_windows=f.get("hard_cut_windows"),
+            walkup_gate_windows=f.get("walkup_gate_windows"))
         segments.extend(file_segments)
         next_id += len(file_segments)
     return {
@@ -274,19 +303,26 @@ def kept_spans_by_file(manifest: dict):
     return out
 
 
+_SHORT_DESTRUCTIVE_ORIGINS = ("hard_cut", "walkup_gate")
+
+
 def hard_cut_boundary_starts_by_file(manifest: dict):
     """For each file (by source_file_index), the start_s of every kept
     segment whose immediately preceding manifest entry is a cut segment
-    with origin=="hard_cut". These mark real destructive-cut boundaries:
-    pipeline.stitch.merge_overlapping_spans must never silently bridge
-    one back together, even when the gap is shorter than the source's
-    own GOP -- hard-cut windows are deliberately short by design (see
-    pipeline.segments.HardCutConfig), which is exactly the gap size that
-    module's duplicate-frame-avoidance merge otherwise treats as safe to
-    re-join. A restored hard_cut entry (status flipped to "kept") no
-    longer matches "prev status == cut", so it stops being flagged here
-    automatically -- correct, since there's no cut left at that boundary
-    to protect.
+    with origin in ("hard_cut", "walkup_gate"). These mark real
+    deliberately-short cut boundaries: pipeline.stitch.merge_overlapping_spans
+    must never silently bridge one back together, even when the gap is
+    shorter than the source's own GOP -- both hard-cut windows (see
+    pipeline.segments.HardCutConfig) and walkup-gate windows (see
+    pipeline.segments.WalkupGateConfig) are deliberately short by design,
+    exactly the gap size that module's duplicate-frame-avoidance merge
+    otherwise treats as safe to re-join. Kept under this original name
+    (not renamed when walkup_gate was added) since pipeline.stitch and
+    its own tests already reference it by this name and both origins
+    need the identical protection for the identical reason. A restored
+    entry of either origin (status flipped to "kept") no longer matches
+    "prev status == cut", so it stops being flagged here automatically
+    -- correct, since there's no cut left at that boundary to protect.
 
     Segments are assumed to already be in per-file cursor order (true for
     every manifest this module builds, since _spans_with_gaps constructs
@@ -300,7 +336,8 @@ def hard_cut_boundary_starts_by_file(manifest: dict):
             if seg["source_file_index"] != idx:
                 continue
             if (seg["status"] == "kept" and prev is not None
-                    and prev["status"] == "cut" and prev["origin"] == "hard_cut"):
+                    and prev["status"] == "cut"
+                    and prev["origin"] in _SHORT_DESTRUCTIVE_ORIGINS):
                 protected.add(seg["start_s"])
             prev = seg
         out[idx] = protected

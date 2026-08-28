@@ -3110,8 +3110,139 @@ at-bat fire/no-fire expectations this gate has never been run against
 up, is wiring the gate into the actual pipeline and running the full
 regression harness, not just this standalone safety check.
 
+**2026-08-27 closing entry: the Type-A walkup gate wired into production
+(`pipeline/segments.py`, `pipeline/run.py`), full `scripts/regression.py`
+suite run for real across all 9 clips, real `full_game.mkv` before/after
+-- ALL PASS, shippable.** Closes the "integration/shippability still
+open" gap the entry above left explicitly flagged.
 
-## Architecture overview
+**1. Wiring, same pattern as `apply_hard_cuts`.** `WalkupGateConfig`/
+`apply_walkup_gate()` added to `pipeline/segments.py`; called in
+`pipeline/run.py` right after raw segment formation (`scores_to_segments`
+on the real, boosted+debounced `enter_scores`) and before veto -- so a
+gated (delayed) open is padded/extended around its real, later start,
+not the pre-arrival raw one. Reuses the plate occupancy and zone-velocity
+arrays `process_video` already computes for the enter-side debounce and
+Stage 11 tier 1 (`compute_zone_velocity` was previously called twice for
+the same plate zone at two different points in the function; now
+computed once and reused, a small real cleanup that fell out of this
+work). Shipped default `departure_guard_s=5.0` -- the value validated
+across all 9 reference clips in the entry above. Manifest entries get
+`origin="walkup_gate"` (`pipeline/manifest.py`'s `_spans_with_gaps`
+extended to check both `hard_cut_windows` and the new
+`walkup_gate_windows`, hard_cut checked first as a tie-break for the
+unobserved-in-practice case of a cut span overlapping both). A real gap
+caught while wiring this, not assumed away: `hard_cut_boundary_starts_by_file`
+(the function `pipeline.stitch.merge_overlapping_spans` uses to know
+which cut boundaries are too deliberately-short to silently re-bridge)
+only checked `origin=="hard_cut"` -- a walkup-gate window is exactly as
+short by design and exactly as vulnerable to the same re-bridging bug,
+so this now checks both origins. Kept the function's original name
+(not renamed) since `pipeline.stitch` and its own tests already
+reference it by that name and both origins need identical protection
+for the identical reason.
+
+`process_video`'s return tuple grew a 6th element
+(`walkup_gate_windows`), threaded through all 3 real callers
+(`scripts/detect.py`, `scripts/detect_multi.py`,
+`backend/pipeline_runner.py`) and into `scripts/regression.py`, which
+reimplements the pipeline's stages inline rather than calling
+`process_video` (deliberately, so it can mirror production exactly --
+see that script's own comments on the scale boost and occupancy
+debounce) -- without mirroring the gate there too, the regression suite
+would have silently kept testing the pre-gate pipeline and "ALL PASS"
+would have meant nothing about this specific mechanism.
+
+**2. Real `scripts/regression.py`, all 9 clips: ALL PASS -- every check
+it runs, not just the required-event-overlap criterion the standalone
+sweep validated.** Recall unchanged at 3/3, 3/3, 3/3, and 1/1 on the
+six single-play clips (100% throughout, same as before this shipped);
+every `check_continuity` window contiguously covered, zero coverage
+gaps; every at-bat fire/no-fire expectation held; the hard-cut exclusion
+mechanism clean; **stitch decode clean on all 9 real stitched outputs**.
+The gate itself fired on 5 of the 9 clips -- `clip_540` (1 window,
+4.90s), `clip_60` (3 windows, 8.30s), `clip_base1` (1 window, 2.29s),
+`clip_base2` (1 window, 3.44s), `clip_foul1` (1 window, 3.23s), 22.16s
+combined -- and stayed correctly silent on `clip_300`, the one clip
+with the near-miss case that motivated the departure guard in the first
+place. Real numbers, not a repeat of the standalone sweep's own count:
+same 7 gates in the same 5 clips as the standalone check found, but
+smaller total savings (22.16s here vs. 26.57s standalone) -- the real,
+production `enter_scores` (boost + debounce applied) shifts raw open
+times slightly earlier than the standalone script's unboosted
+reimplementation, leaving less genuinely-vacant time before some opens
+for the gate to trim. Same direction and same underlying explanation as
+finding 3 below on `full_game.mkv`, at a smaller scale here.
+
+**3. Real `full_game.mkv`, run twice for a true apples-to-apples
+comparison -- gate on, and gate monkeypatched off, identical code
+otherwise -- rather than trusting a possibly-stale README baseline.**
+
+| | kept | cut |
+|---|---|---|
+| gate off (true baseline) | 50.82 min | 16.67 min |
+| gate on (shipped default) | 47.51 min | 19.99 min |
+
+**36 gates, 118.99s direct savings.** A real, explained difference from
+the earlier standalone figure (34 gates, 136.37s): that number came
+from a standalone script that never applied the enter-side scale boost
+or occupancy debounce production actually uses before raw segments
+form -- the same class of discrepancy as finding 2 above, just larger
+here since `full_game.mkv` is real long-form footage with more varied
+camera-distance/occupancy conditions than the short reference clips.
+The wired run is the methodologically correct one. All 3 previously
+frame-verified-safe instances from the earlier entry are still present
+and nearly unchanged (2 of 3 identical to the decimal, e.g.
+`1544.98-1551.55` and `3399.85-3407.15`; the third differs by 0.11s).
+Two tiny new gates appeared that weren't in the earlier list (1.04s and
+0.25s) -- the larger one frame-verified fresh: a clean batter walking
+in from off-frame and picking up a bat, no ball or pitch visible in the
+gated window, same pattern as every other verified instance.
+
+The total kept-time delta (198.94s) exceeds the direct gate savings
+(118.99s) by ~80s -- traced to real, already-validated downstream
+effects, not new or unaccounted-for risk: dynamic pre-padding
+(`pipeline.refine`'s shrink-only mechanism) shrinks further around a
+gated segment's new, genuinely-quieter start than it would have around
+the old, earlier one, and `apply_hard_cuts` finds fewer quiet dips left
+to trim inside a kept segment once the walkup gate has already removed
+some of that material upstream (206 hard-cut windows with the gate off,
+189 with it on). Exactly the interaction the 9-clip regression suite
+above exercises directly and passed clean on -- not a new mechanism,
+the existing ones just have less material to act on.
+
+**4. Edit-Log restorability confirmed on real data, not just synthetic
+test fixtures.** Built an actual manifest from `clip_540.mkv`'s real
+walkup-gate window (`(141.60, 146.50)`, from a genuine production run):
+confirmed via `pipeline.manifest.kept_spans()` that the span is excluded
+while cut and correctly included after `set_status(..., "kept")`. Also
+added a real backend integration test
+(`test_walkup_gate_windows_from_process_video_reach_the_manifest_as_origin`)
+that exercises the identical restore flow through the actual FastAPI
+PATCH endpoint, not just the pure manifest functions -- both pass.
+
+**5. Test coverage added:** 9 new unit tests directly on
+`WalkupGateConfig`/`apply_walkup_gate` (defaults, the genuine-arrival
+delay case, the whole-segment-dropped case, the already-occupied
+no-op, the departure-guard block, the departure-guard expiring outside
+its own window, no-settle-within-lookahead, a stale-detection-sample
+no-op, and multiple segments gated independently against their own
+lookahead windows -- one of these caught a real mistake in the test's
+own first-draft expectation, not the code: `lookahead_s` correctly
+capped a distant gate opportunity the test wrongly expected to fire,
+fixed by correcting the test, not the implementation), 8 manifest-layer
+tests mirroring the existing `hard_cut_windows` suite (including one new
+test the mirrored suite never needed: `hard_cut` and `walkup_gate`
+windows coexisting in the same manifest without interfering), and the
+backend wiring+restore test above. **501 tests pass** (up from 466 at
+the start of tonight's session).
+
+**6. No guaranteed real-play loss -- held at every step, including full
+integration.** No required-event miss, no continuity gap, no
+exclusion-mechanism bug, anywhere in the 9-clip suite, with the gate
+now genuinely exercised by that suite rather than a standalone
+reimplementation of one safety property. **Shippable** -- the specific
+gap the previous entry's own "not yet shippable" flag named is closed.
 
 Built so far:
 

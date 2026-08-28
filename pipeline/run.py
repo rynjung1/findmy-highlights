@@ -1,6 +1,7 @@
-"""The core single-file detection pipeline: motion -> veto -> play
-extension -> padding -> real hard cuts of quiet stretches (see
-pipeline/segments.py's HardCutConfig). Shared by scripts/detect.py
+"""The core single-file detection pipeline: motion -> walkup gate ->
+veto -> play extension -> padding -> real hard cuts of quiet stretches
+(see pipeline/segments.py's WalkupGateConfig and HardCutConfig). Shared
+by scripts/detect.py
 (one file) and
 scripts/detect_multi.py (many files) so there is exactly one
 implementation of "process one video" — a multi-file run is this
@@ -24,8 +25,8 @@ from pipeline.fusion import (FusionConfig, apply_veto, calibrated_scale_boost_fa
                              occupancy_near_times, scale_boost_factor)
 from pipeline.motion import compute_motion
 from pipeline.refine import RefineConfig, refine_segments
-from pipeline.segments import (SegmentConfig, apply_hard_cuts, scores_to_segments,
-                               smooth_scores)
+from pipeline.segments import (SegmentConfig, apply_hard_cuts, apply_walkup_gate,
+                               scores_to_segments, smooth_scores)
 from pipeline.settle import SettleConfig
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,9 +81,12 @@ def process_video(video: str, zone, motion_only: bool = False,
     real labeling batch.
 
     Returns (final_segments, vetoed, duration, motion_result,
-    hard_cut_windows). hard_cut_windows is always [] for the
-    motion-only baseline (no real cutting happens there, it's a raw
-    diagnostic).
+    hard_cut_windows, walkup_gate_windows). Both hard_cut_windows and
+    walkup_gate_windows are always [] for the motion-only baseline (no
+    real cutting happens there, it's a raw diagnostic) and
+    walkup_gate_windows is also always [] whenever zone is None (see
+    pipeline.segments.WalkupGateConfig -- no occupancy signal available
+    to gate against).
     """
     cache_dir = cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR
     if on_stage:
@@ -110,7 +114,7 @@ def process_video(video: str, zone, motion_only: bool = False,
     motion = compute_motion(video, progress_cb=_motion_progress if on_stage else None)
     if motion_only:
         segs = scores_to_segments(motion.times, motion.scores, SegmentConfig())
-        return segs, [], motion.duration, motion, []
+        return segs, [], motion.duration, motion, [], []
 
     if zone is None and warn is not None:
         warn(f"no calibration for {video}; plate-occupancy signals disabled")
@@ -172,16 +176,37 @@ def process_video(video: str, zone, motion_only: bool = False,
     # whenever zone is None, identical to every prior behavior (no
     # occupancy signal available to debounce against).
     occupancy_near = None
+    zvel_plate = None
     if zone is not None:
         occ_det_enter = compute_occupancy(det.times, det.boxes, zone,
                                           FusionConfig().stationary_v)
         occupancy_near = occupancy_near_times(
             motion.times, det.times, occ_det_enter, seg_cfg.enter_occupancy_window_s)
+        # computed once here, reused below for zone_velocities["plate"] --
+        # compute_zone_velocity is a pure function of (det.times,
+        # det.boxes, zone), which don't change between the two use sites.
+        zvel_plate = compute_zone_velocity(det.times, det.boxes, zone)
     # motion alone owns segment open AND raw exit (Stage 3 replaced the
     # Stage 2 score-sustain with the explicit play-extension below)
     raw = scores_to_segments(motion.times, enter_scores, seg_cfg,
                              sustain_scores=motion.scores,
                              occupancy_near=occupancy_near)
+    # Walkup gate (see pipeline/segments.py's WalkupGateConfig): delays
+    # (or, if the delay would consume the whole raw segment, drops) a
+    # raw segment's open when it's preceded by a batter-still-approaching
+    # occupancy/zone-velocity signature, using the SAME plate occupancy
+    # and zone-velocity readings the enter-side debounce and Stage 11
+    # tier 1 already compute above/below -- no new signal, only a new use
+    # of ones already validated elsewhere in this pipeline. Runs on the
+    # RAW segments, before veto/extension/padding, so a gated (delayed)
+    # open is padded/extended around its real, later start rather than
+    # the pre-arrival raw one. None whenever zone is None, identical to
+    # every other zone-gated mechanism in this pipeline (no occupancy
+    # signal available to gate against).
+    walkup_gate_windows = []
+    if zone is not None:
+        raw, walkup_gate_windows = apply_walkup_gate(
+            raw, det.times, occ_det_enter, zvel_plate)
     kept, vetoed = apply_veto(raw, fused)
 
     sm = smooth_scores(motion.times, motion.scores, seg_cfg.smooth_window_s)
@@ -214,7 +239,7 @@ def process_video(video: str, zone, motion_only: bool = False,
     # bigger raw-segment-level fix -- is deliberately not started here;
     # see pipeline/refine.py's WALK-UP GAP note.)
     if zone is not None:
-        zone_velocities["plate"] = (det.times, compute_zone_velocity(det.times, det.boxes, zone))
+        zone_velocities["plate"] = (det.times, zvel_plate)
     final = refine_segments(kept, motion.times, sm, det.times, occ, fires,
                             motion.duration, RefineConfig(settle=settle_cfg),
                             zone_velocities, motion_scores=motion.scores)
@@ -242,4 +267,4 @@ def process_video(video: str, zone, motion_only: bool = False,
             extra_source_info=training_data_source_info,
             review_cfg=review_cfg)
 
-    return final, vetoed, motion.duration, motion, hard_cut_windows
+    return final, vetoed, motion.duration, motion, hard_cut_windows, walkup_gate_windows

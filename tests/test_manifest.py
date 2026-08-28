@@ -13,6 +13,10 @@ from pipeline.manifest import (build_manifest, build_multi_file_manifest,
                                save_manifest, set_status)
 
 
+def _origins(m):
+    return {(s["start_s"], s["end_s"]): s["origin"] for s in m["segments"]}
+
+
 def test_ts_round_trip():
     for v in (0.0, 12.5, 61.001, 3671.25):
         assert abs(parse_ts(fmt_ts(v)) - v) < 0.002
@@ -222,5 +226,82 @@ def test_multi_file_hard_cut_boundaries_are_per_file():
 
 def test_hard_cut_boundary_never_flags_the_very_first_segment():
     m = build_manifest("g.mp4", 10.0, [(0.0, 5.0)], hard_cut_windows=[(0.0, 0.0)])
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert boundaries[0] == set()
+
+
+# ---- walkup_gate_windows / origin="walkup_gate" labeling ----
+# Mirrors the hard_cut_windows suite above -- same mechanism (a purely
+# additive labeling input over cut spans), same reason both need the
+# identical treatment (see pipeline/segments.py's WalkupGateConfig).
+
+def test_walkup_gate_window_labels_matching_gap_as_walkup_gate():
+    m = build_manifest("g.mp4", 40.0, [(0.0, 10.0), (15.0, 25.0), (30.0, 40.0)],
+                       walkup_gate_windows=[(11.0, 14.0)])
+    origins = _origins(m)
+    assert origins[(10.0, 15.0)] == "walkup_gate"
+    assert origins[(25.0, 30.0)] == "gap"   # untouched by any walkup-gate window
+
+
+def test_walkup_gate_window_never_labels_a_kept_segment():
+    m = build_manifest("g.mp4", 30.0, [(10.0, 20.0)], walkup_gate_windows=[(12.0, 14.0)])
+    kept = next(s for s in m["segments"] if s["status"] == "kept")
+    assert kept["origin"] == "detected"
+
+
+def test_walkup_gate_windows_purely_additive_when_omitted():
+    m1 = build_manifest("g.mp4", 30.0, [(10.0, 20.0)])
+    m2 = build_manifest("g.mp4", 30.0, [(10.0, 20.0)], walkup_gate_windows=None)
+    assert m1 == m2
+
+
+def test_multi_file_manifest_walkup_gate_windows_are_per_file():
+    m = build_multi_file_manifest([
+        {"source_file": "part1.mp4", "duration": 30.0,
+         "kept_segments": [(0.0, 10.0), (15.0, 25.0)],
+         "walkup_gate_windows": [(11.0, 14.0)]},
+        {"source_file": "part2.mp4", "duration": 30.0,
+         "kept_segments": [(0.0, 10.0), (15.0, 25.0)]},
+    ])
+    part1_gap = next(s for s in m["segments"]
+                     if s["source_file"] == "part1.mp4" and s["status"] == "cut"
+                     and s["start_s"] == 10.0)
+    part2_gap = next(s for s in m["segments"]
+                     if s["source_file"] == "part2.mp4" and s["status"] == "cut"
+                     and s["start_s"] == 10.0)
+    assert part1_gap["origin"] == "walkup_gate"
+    assert part2_gap["origin"] == "gap"
+
+
+def test_hard_cut_and_walkup_gate_windows_coexist_without_interference():
+    # a real manifest can have both kinds of trim in different gaps --
+    # each gets its own origin, neither leaks into the other's span
+    m = build_manifest(
+        "g.mp4", 60.0, [(0.0, 10.0), (15.0, 25.0), (30.0, 40.0), (45.0, 55.0)],
+        hard_cut_windows=[(11.0, 14.0)],
+        walkup_gate_windows=[(41.0, 44.0)])
+    origins = _origins(m)
+    assert origins[(10.0, 15.0)] == "hard_cut"
+    assert origins[(40.0, 45.0)] == "walkup_gate"
+    assert origins[(25.0, 30.0)] == "gap"
+
+
+# ---- hard_cut_boundary_starts_by_file also protects walkup_gate ----
+# Same real stitch-safety requirement as a hard-cut window (see that
+# function's docstring): a walkup-gate window is just as deliberately
+# short by design and just as vulnerable to being silently re-bridged.
+
+def test_hard_cut_boundary_flags_the_kept_span_right_after_a_walkup_gate():
+    m = build_manifest("g.mp4", 40.0, [(0.0, 10.0), (15.0, 25.0), (30.0, 40.0)],
+                       walkup_gate_windows=[(11.0, 14.0)])
+    boundaries = hard_cut_boundary_starts_by_file(m)
+    assert boundaries[0] == {15.0}
+
+
+def test_walkup_gate_boundary_cleared_once_restored():
+    m = build_manifest("g.mp4", 40.0, [(0.0, 10.0), (15.0, 25.0), (30.0, 40.0)],
+                       walkup_gate_windows=[(11.0, 14.0)])
+    gap = next(s for s in m["segments"] if s["start_s"] == 10.0)
+    set_status(m, gap["id"], "kept")
     boundaries = hard_cut_boundary_starts_by_file(m)
     assert boundaries[0] == set()
