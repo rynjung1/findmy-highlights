@@ -3323,6 +3323,77 @@ too brief and low-contrast to ever register as kept content in the
 first place, so there is nothing to gain by cutting it; when connected
 to real play, it's inseparable from required content. **Closed.**
 
+**2026-08-27: offense/defense transition time (between half-innings, or
+after the third out, before the next half-inning's action begins)
+investigated on `full_game.mkv` -- the only real source for this
+pattern, since no reference clip spans multiple half-innings. Went in
+genuinely open on whether this overlaps with the shipped walkup Type A
+mechanism or is structurally distinct. Confirmed: substantially
+overlaps, with one genuinely distinct piece left deliberately
+untouched, and no new mechanism found worth building.**
+
+**1. Real definition, hand frame-verified, not inferred from gap size
+alone.** Found the largest gaps across all 313 gaps in `full_game.mkv`'s
+final kept segments, then frame-verified the top 3 by hand rather than
+trusting duration as a proxy for "real transition." The clearest
+confirmed instance (t~1545-1663, ~26-27.7 min into the game) shows a
+real three-phase structure: a **head** (~1549-1614, ~65s) of the last
+play's aftermath -- players visibly gathering and talking near the
+plate, sustained but modest motion; a **core** (~1614-1658, ~44s) that
+is genuinely quiet, sparse, mostly-static field; and a **tail**
+(~1658-1664, ~6s) of the next batter arriving, matching walkup Type A's
+own pattern. Two other candidates (~44s and ~40s cores elsewhere in the
+game) show the same three-phase shape, noisier.
+
+**2-3. Current behavior and walkup-gate overlap, traced exactly, not
+assumed.** The **core** (the genuinely quiet ~44s) is already fully
+cut: real motion score there drops to 0.00077-0.00096 mean per 5s
+bucket, the same "already below `enter_thresh`, no segment ever opens"
+pattern the closed catcher-throw investigation found -- nothing to
+gain. The **tail** is already covered by the shipped walkup Type-A
+gate: traced the exact mechanics -- raw open at 1655.72 gated to
+1660.66, dynamic pre-padding (full 2.8s ceiling, unshrunk) pulls the
+final kept start back to 1657.86, a real, quantified **4.94s savings**
+matching the gate's own reported window exactly. This confirms Type A
+already generalizes to this context -- it was validated on isolated
+at-bat walkups, but the same vacant-to-settled plate-zone pattern fires
+correctly here too, with no changes needed. The **head** (~65s of
+post-play gathering/dispersing) is currently kept in full (one trivial
+0.46s hard-cut aside) -- structurally distinct from walkup's own
+pattern: multiple people already present and dispersing/regrouping, not
+one person arriving at an empty zone. Left untouched deliberately: real
+sustained motion here (max scores 0.014-0.038 in 5s buckets, well above
+the hard-cut quiet threshold) means a naive new threshold would risk
+cutting into legitimate last-play/next-play adjacent content -- the
+same class of risk `WalkupGateConfig`'s departure guard exists to
+prevent on the other side of an at-bat.
+
+**4. New signal tested: field-wide person-occupancy count, not scoped
+to the plate zone.** Real and cheap to check directly (cached
+detections, no recompute needed). In the cleanest instance, total
+detected person count drops from a sustained 12-17 down to 6-10 almost
+exactly during the core quiet window, recovering as the next play sets
+up -- a real, measurable "field clearing" effect. Two honest problems
+found before it went any further: **non-additive** -- the low-count
+window is the same window already cut by motion threshold, so even the
+best case identifies no time beyond what's already excluded, a
+confirmatory signal, not a new lever; and **non-reproducible** -- checked
+against the other two candidate transitions, where person count dips
+only modestly (12->7.6) and partially recovers mid-gap rather than
+staying low throughout, too noisy to threshold safely as an independent
+mechanism. Not pursued further.
+
+**5-6. No guaranteed real-play loss.** No new mechanism is proposed, so
+no new risk introduced. The one ambiguous region (the head) is left
+untouched on purpose rather than forced into a cut.
+
+**Honest bottom line: this category substantially overlaps with
+already-shipped mechanisms.** Not a forced negative -- a real
+confirmation that walkup Type A generalizes beyond the isolated-at-bat
+case it was validated on, plus one genuinely distinct sub-pattern (the
+head) correctly identified and correctly left alone rather than forced
+into a new mechanism it doesn't safely fit. No new mechanism needed.
+
 
 ## Architecture overview
 
