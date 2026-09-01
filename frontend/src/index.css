@@ -460,6 +460,82 @@ button.pill {
   color: var(--color-text-muted);
 }
 
+/* ---------- multi-game queue ---------- */
+
+.queue-list {
+  margin-top: 28px;
+  gap: 8px;
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.queue-item.focused {
+  background: var(--color-bg);
+}
+
+.queue-item-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-item-name:disabled {
+  color: var(--color-text-faint);
+  cursor: default;
+}
+
+.queue-status-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.queue-status-queued {
+  color: var(--color-text-faint);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+}
+
+.queue-status-active {
+  color: var(--color-accent-text);
+  background: rgba(0, 96, 223, 0.08);
+}
+
+.queue-status-done {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.queue-status-error {
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+}
+
+.queue-recalibrate-toggle {
+  flex-basis: 100%;
+  font-size: 11px !important;
+  padding: 3px 8px !important;
+}
+
 .step-eyebrow {
   display: block;
   font-size: 11px;

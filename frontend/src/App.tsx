@@ -6,12 +6,28 @@ import ProcessingStep from './components/ProcessingStep'
 import ResultStep from './components/ResultStep'
 import EditLogView from './components/EditLogView'
 import ReviewQueueView from './components/ReviewQueueView'
-import { AppError, type AppErrorKind, getJob, triggerProcess } from './api'
+import QueueList, { type QueueItem } from './components/QueueList'
+import AdvancingNotice from './components/AdvancingNotice'
+import {
+  AppError,
+  type AppErrorKind,
+  getCalibration,
+  getJob,
+  setCalibrationFile,
+  triggerProcess,
+} from './api'
 
-const STORAGE_KEY = 'fmh_batch_id'
+// Was a single string (one batch id) before the multi-game queue --
+// now an array so the whole queue (not just "the current one") survives
+// a reload, same "resume from wherever the server actually says, never
+// assume" philosophy the single-batch version already had, generalized
+// to N items instead of 1.
+const STORAGE_KEY = 'fmh_batch_queue'
 
 // Stages: loading -> upload -> calibrate -> [order_confirm ->] processing -> done
 //                                                                        \-> error
+// Unchanged from the single-batch version -- these describe the FOCUSED
+// queue item's state; the queue array (below) tracks every item.
 type Stage =
   | 'loading'
   | 'upload'
@@ -73,6 +89,21 @@ function SidebarSteps({ stage }: { stage: Stage }) {
   )
 }
 
+function loadQueue(): QueueItem[] {
+  const raw = localStorage.getItem(STORAGE_KEY)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function saveQueue(items: QueueItem[]): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
+}
+
 export default function App() {
   const [view, setView] = useState<View>('home') // independent of the stage machine below
   const [stage, setStage] = useState<Stage>('loading')
@@ -88,19 +119,51 @@ export default function App() {
   // behavior for those rather than silently dropping the option.
   const [errorKind, setErrorKind] = useState<AppErrorKind>('server')
 
-  // On mount: resume from wherever the batch actually is on the server,
-  // never assume a fresh client. Job state is durable server-side (see
-  // backend/jobs.py) specifically so a reload or a closed tab mid-run
-  // doesn't lose the user's place -- this is the other half of that:
-  // the client has to actually ask, not just start over at "upload".
+  // The multi-game queue. `stage`/`batchId` above always describe the
+  // FOCUSED item (whichever one is currently on screen); `queue` tracks
+  // every item's own status so the sidebar can show all of them and so
+  // a finished/failed item stays reachable after the app has moved on.
+  const [queue, setQueue] = useState<QueueItem[]>([])
+  const [showAddGame, setShowAddGame] = useState(false)
+  // Set only while startNextQueuedItem's calibration-reuse-and-trigger
+  // call is in flight for the item right after `batchId` -- lets the
+  // just-finished item's ResultStep/error card keep showing (unchanged,
+  // per the queue's own design) with a brief explanatory line under it,
+  // rather than the screen silently jumping to the next item.
+  const [advancingToName, setAdvancingToName] = useState<string | null>(null)
+
+  function markQueueItem(id: string, patch: Partial<QueueItem>) {
+    setQueue((prev) => {
+      const next = prev.map((item) => (item.batchId === id ? { ...item, ...patch } : item))
+      saveQueue(next)
+      return next
+    })
+  }
+
+  function addQueueItem(item: QueueItem) {
+    setQueue((prev) => {
+      const next = [...prev, item]
+      saveQueue(next)
+      return next
+    })
+  }
+
+  // On mount: resume from wherever the FOCUSED batch actually is on the
+  // server, never assume a fresh client -- same reasoning as before,
+  // now applied to whichever queue item was active (or, if none was,
+  // the last one added) when the tab was last open. Job state is
+  // durable server-side (see backend/jobs.py) specifically so a reload
+  // or a closed tab mid-run doesn't lose the user's place.
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (!saved) {
+    const saved = loadQueue()
+    if (saved.length === 0) {
       setStage('upload')
       return
     }
-    setBatchId(saved)
-    resumeFromServer(saved)
+    setQueue(saved)
+    const focus = saved.find((i) => i.status === 'active') ?? saved[saved.length - 1]
+    setBatchId(focus.batchId)
+    resumeFromServer(focus.batchId)
   }, [])
 
   async function resumeFromServer(id: string) {
@@ -139,7 +202,8 @@ export default function App() {
   }
 
   function handleUploaded(id: string) {
-    localStorage.setItem(STORAGE_KEY, id)
+    const item: QueueItem = { batchId: id, name: `Game ${queue.length + 1}`, status: 'active' }
+    addQueueItem(item)
     setBatchId(id)
     setStage('calibrate')
   }
@@ -148,11 +212,88 @@ export default function App() {
   // server-side in one call (see backend/demo.py) -- unlike a real
   // upload, this jumps straight to 'processing', skipping 'calibrate'
   // entirely, since there's nothing left for the user to do before the
-  // job that's already running.
+  // job that's already running. Still joins the queue as item 1 so a
+  // real game can be queued up after trying the demo.
   function handleDemoStarted(id: string) {
-    localStorage.setItem(STORAGE_KEY, id)
+    const item: QueueItem = { batchId: id, name: 'Demo', status: 'active' }
+    addQueueItem(item)
     setBatchId(id)
     setStage('processing')
+  }
+
+  // "Add another game": uses the SAME UploadStep component (compact
+  // mode) as the first upload, but only ever appends a new queued item
+  // -- it never touches the focused stage/batchId, so whatever the user
+  // is currently looking at (the active item's calibrate/processing/
+  // done screen) is completely undisturbed.
+  function handleAddedToQueue(id: string) {
+    addQueueItem({ batchId: id, name: `Game ${queue.length + 1}`, status: 'queued' })
+    setShowAddGame(false)
+  }
+
+  function handleToggleRecalibrate(id: string) {
+    const current = queue.find((i) => i.batchId === id)
+    markQueueItem(id, { forceRecalibrate: !current?.forceRecalibrate })
+  }
+
+  function handleFocus(id: string) {
+    setBatchId(id)
+    setStage('loading')
+    setOrderInfo(null)
+    setErrorMessage(null)
+    resumeFromServer(id)
+  }
+
+  // The queue's outer loop: called once the focused item reaches a
+  // terminal state (done/error, from onDone/onError below). Advances to
+  // the next 'queued' item WITHOUT a manual click in the common case
+  // (reusing the just-finished item's calibration -- see api.ts's
+  // setCalibrationFile), automatically. Reaching a triggered detect job
+  // at all already requires a calibration.json to exist (the backend
+  // rejects /process otherwise unless allow_uncalibrated is explicitly
+  // passed, which this app never does -- confirmed live: even a demo
+  // run seeds a real one, see backend/demo.py), so in normal use the
+  // reuse lookup below essentially always succeeds. The two real ways
+  // to land on the normal CalibrateStep instead are the explicit,
+  // user-driven forceRecalibrate toggle (a real camera change,
+  // QueueList's per-item control) and, defensively, a genuinely missing
+  // calibration.json if this app is ever driven partly through the raw
+  // API outside this UI -- both handled the same way, without guessing.
+  async function startNextQueuedItem(finishedBatchId: string) {
+    const next = queue.find((i) => i.status === 'queued')
+    if (!next) return
+
+    setAdvancingToName(next.name)
+    markQueueItem(next.batchId, { status: 'active' })
+    try {
+      let reused = false
+      if (!next.forceRecalibrate) {
+        const prevCalibration = await getCalibration(finishedBatchId)
+        if (prevCalibration) {
+          await setCalibrationFile(next.batchId, prevCalibration)
+          await triggerProcess(next.batchId)
+          reused = true
+        }
+      }
+      setBatchId(next.batchId)
+      setOrderInfo(null)
+      setStage(reused ? 'processing' : 'calibrate')
+    } catch (err) {
+      // A failure here (e.g. the reuse call itself hit a network blip)
+      // still needs to land the new item somewhere real rather than
+      // hang silently -- same error-classification path every other
+      // handler in this file already uses.
+      markQueueItem(next.batchId, {
+        status: 'error',
+        forceRecalibrate: next.forceRecalibrate,
+      })
+      setBatchId(next.batchId)
+      setErrorMessage(err instanceof Error ? err.message : String(err))
+      setErrorKind(err instanceof AppError ? err.kind : 'server')
+      setStage('error')
+    } finally {
+      setAdvancingToName(null)
+    }
   }
 
   async function handleCalibrated() {
@@ -199,9 +340,11 @@ export default function App() {
 
   function handleStartOver() {
     localStorage.removeItem(STORAGE_KEY)
+    setQueue([])
     setBatchId(null)
     setOrderInfo(null)
     setErrorMessage(null)
+    setShowAddGame(false)
     setStage('upload')
   }
 
@@ -237,6 +380,27 @@ export default function App() {
         {view === 'home' && stage !== 'loading' && stage !== 'error' && (
           <SidebarSteps stage={stage} />
         )}
+
+        {view === 'home' && (
+          <>
+            <QueueList
+              queue={queue}
+              focusedBatchId={batchId}
+              onFocus={handleFocus}
+              onToggleRecalibrate={handleToggleRecalibrate}
+            />
+            {queue.length > 0 && !showAddGame && (
+              <button
+                type="button"
+                className="secondary"
+                style={{ marginTop: 14 }}
+                onClick={() => setShowAddGame(true)}
+              >
+                + Add another game
+              </button>
+            )}
+          </>
+        )}
       </aside>
 
       <main className="main-content">
@@ -246,6 +410,23 @@ export default function App() {
 
         {view === 'home' && (
         <>
+          {showAddGame && (
+            <div className="card" style={{ marginBottom: 20 }}>
+              <h2 style={{ marginTop: 0 }}>Add another game to the queue</h2>
+              <p className="muted">
+                Uploads now and joins the queue -- it'll start automatically once
+                the current game finishes, reusing this session's calibration if
+                the camera hasn't moved.
+              </p>
+              <UploadStep onUploaded={handleAddedToQueue} onDemoStarted={() => {}} compact />
+              <p style={{ marginTop: 12 }}>
+                <button className="secondary" onClick={() => setShowAddGame(false)}>
+                  Cancel
+                </button>
+              </p>
+            </div>
+          )}
+
           {stage === 'loading' && (
             <div className="card">
               <span className="spinner" aria-hidden="true" />
@@ -269,15 +450,26 @@ export default function App() {
           {stage === 'processing' && batchId && (
             <ProcessingStep
               batchId={batchId}
-              onDone={() => setStage('done')}
+              onDone={() => {
+                markQueueItem(batchId, { status: 'done' })
+                setStage('done')
+                void startNextQueuedItem(batchId)
+              }}
               onError={(msg: string, kind: AppErrorKind = 'server') => {
+                markQueueItem(batchId, { status: 'error' })
                 setErrorMessage(msg)
                 setErrorKind(kind)
                 setStage('error')
+                void startNextQueuedItem(batchId)
               }}
             />
           )}
-          {stage === 'done' && batchId && <ResultStep batchId={batchId} />}
+          {stage === 'done' && batchId && (
+            <>
+              <ResultStep batchId={batchId} />
+              {advancingToName && <AdvancingNotice nextName={advancingToName} />}
+            </>
+          )}
           {stage === 'error' && (
             <div className="card">
               <h2>
@@ -300,6 +492,7 @@ export default function App() {
                   </p>
                 )
               )}
+              {advancingToName && <AdvancingNotice nextName={advancingToName} />}
             </div>
           )}
 

@@ -191,6 +191,29 @@ export async function setCalibrationCoords(
   return res.json()
 }
 
+// Re-uploads an already-fetched Calibration (e.g. from a previous batch
+// in the same session) onto a new batch, via the same calibration_file
+// path scripts/calibrate.py's non-interactive mode and the multipart
+// upload branch of POST /batches/{id}/calibration already support --
+// no new backend endpoint needed. Built for the multi-game queue's
+// "reuse the previous game's calibration" fast path (same physical
+// camera setup, several games in one session): round-trips the exact
+// JSON the server already validated once, so it satisfies the same
+// plate_xy/zone_radius_px checks trivially.
+export async function setCalibrationFile(
+  batchId: string,
+  calibration: Calibration,
+): Promise<Calibration> {
+  const form = new FormData()
+  const blob = new Blob([JSON.stringify(calibration)], { type: 'application/json' })
+  form.append('calibration_file', blob, 'calibration.json')
+  const res = await request(`/batches/${batchId}/calibration`, {
+    method: 'POST',
+    body: form,
+  })
+  return res.json()
+}
+
 export function previewUrl(batchId: string): string {
   // cache-bust: a retry after an error shouldn't ever show a stale
   // cached preview from a previous attempt

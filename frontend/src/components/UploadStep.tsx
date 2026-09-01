@@ -15,9 +15,17 @@ function isVideoFile(file: File): boolean {
 interface UploadStepProps {
   onUploaded: (batchId: string) => void
   onDemoStarted: (batchId: string) => void
+  // Multi-game queue's "add another game" affordance reuses this exact
+  // component (same drag-drop/validation/upload logic) rather than a
+  // second copy -- `compact` just drops the demo card and the tips
+  // panel, which only make sense for the very first upload, not for
+  // adding game 2+ to an already-running queue. Defaults to false/
+  // unset, so every existing render site (the first-upload screen) is
+  // byte-for-byte unaffected.
+  compact?: boolean
 }
 
-export default function UploadStep({ onUploaded, onDemoStarted }: UploadStepProps) {
+export default function UploadStep({ onUploaded, onDemoStarted, compact = false }: UploadStepProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -73,21 +81,23 @@ export default function UploadStep({ onUploaded, onDemoStarted }: UploadStepProp
 
   return (
     <>
-      <div className="card demo-card">
-        <h2 style={{ marginTop: 0 }}>New here? Try it in one click</h2>
-        <p className="muted">
-          Runs a real ~45-second sample clip through the full pipeline --
-          detection, highlight extraction, and export -- so you can see a
-          finished result before uploading your own footage. Takes well
-          under a minute.
-        </p>
-        {demoError && <p className="alert alert-danger">{demoError}</p>}
-        <button onClick={handleTryDemo} disabled={demoStarting || uploading}>
-          {demoStarting ? 'Starting demo...' : 'Try the demo'}
-        </button>
-      </div>
+      {!compact && (
+        <div className="card demo-card">
+          <h2 style={{ marginTop: 0 }}>New here? Try it in one click</h2>
+          <p className="muted">
+            Runs a real ~45-second sample clip through the full pipeline --
+            detection, highlight extraction, and export -- so you can see a
+            finished result before uploading your own footage. Takes well
+            under a minute.
+          </p>
+          {demoError && <p className="alert alert-danger">{demoError}</p>}
+          <button onClick={handleTryDemo} disabled={demoStarting || uploading}>
+            {demoStarting ? 'Starting demo...' : 'Try the demo'}
+          </button>
+        </div>
+      )}
 
-      <div className="content-grid">
+      <div className={compact ? undefined : 'content-grid'}>
       <div className="card">
         <h2 style={{ marginTop: 0 }}>Upload game recording(s)</h2>
         <div
@@ -151,24 +161,26 @@ export default function UploadStep({ onUploaded, onDemoStarted }: UploadStepProp
         </p>
       </div>
 
-      <div className="tip-panel">
-        <h3>Before you start</h3>
-        <ul>
-          <li>
-            <strong>Multiple files?</strong> Upload every recording from the
-            same game at once — they're stitched together in order
-            automatically.
-          </li>
-          <li>
-            <strong>Can't tell the order?</strong> If filenames don't make it
-            obvious, you'll be asked to confirm the order before processing.
-          </li>
-          <li>
-            <strong>Next up:</strong> you'll click home plate on a preview
-            frame so detection knows where to look.
-          </li>
-        </ul>
-      </div>
+      {!compact && (
+        <div className="tip-panel">
+          <h3>Before you start</h3>
+          <ul>
+            <li>
+              <strong>Multiple files?</strong> Upload every recording from the
+              same game at once — they're stitched together in order
+              automatically.
+            </li>
+            <li>
+              <strong>Can't tell the order?</strong> If filenames don't make it
+              obvious, you'll be asked to confirm the order before processing.
+            </li>
+            <li>
+              <strong>Next up:</strong> you'll click home plate on a preview
+              frame so detection knows where to look.
+            </li>
+          </ul>
+        </div>
+      )}
       </div>
     </>
   )
