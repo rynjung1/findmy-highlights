@@ -302,6 +302,150 @@ def test_upload_rejects_traversal_batch_atomically(tmp_path):
             (tmp_path / "uploads").exists() else True
 
 
+# ---- batch_id path traversal (real, demonstrated vulnerability -- see
+# docs/INVESTIGATION_LOG.md's security review entries) ----
+#
+# Distinct from the upload-filename traversal above: this is about the
+# batch_id URL path SEGMENT itself, resolved by _batch_dir() -- the one
+# function all 11 real batch-scoped endpoints funnel through. A batch_id
+# of ".." (sent URL-encoded as "%2e%2e" -- FastAPI's default string path
+# converter can't smuggle a literal "/" through this parameter, so
+# multi-level traversal via encoded slashes is already blocked by
+# Starlette's own routing, confirmed live against a real server before
+# writing these) made the pre-fix _batch_dir() resolve to uploads_root's
+# own parent directory, which very much exists. Live, pre-fix
+# confirmation (not simulated here, actually done against a real running
+# server): GET .../output served back a planted file from one directory
+# above uploads_root, and POST .../calibration wrote a real file there.
+
+def test_batch_id_dotdot_would_have_escaped_pre_fix(tmp_path):
+    """Same proof pattern as test_upload_traversal_filename_would_have_
+    escaped_pre_fix above, for the batch_id case: the exact join the
+    pre-fix _batch_dir() did (root / batch_id, existence-checked but
+    never containment-checked) really does resolve outside uploads_root
+    for batch_id="..", not just in theory."""
+    root = (tmp_path / "uploads")
+    root.mkdir()
+    escaped = (root / "..").resolve()
+    assert not escaped.is_relative_to(root.resolve())
+    assert escaped.exists()  # the real, structural reason the old
+    # existence-only check let this through: the parent directory is
+    # always real
+
+
+def test_batch_read_endpoint_rejects_dotdot_batch_id_404(tmp_path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    # Plant a real file one level above uploads_root, exactly like the
+    # live pre-fix demonstration, so this test would fail LOUDLY (serve
+    # real planted content) if the fix ever regressed, not just silently
+    # pass on an absent file.
+    planted = tmp_path / "output.mp4"
+    planted.write_bytes(b"secret content outside uploads_root")
+
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.get("/batches/%2e%2e/output")
+        assert r.status_code == 404
+        assert r.content != b"secret content outside uploads_root"
+
+
+def test_batch_write_endpoint_rejects_dotdot_batch_id_404_and_writes_nothing(tmp_path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post(
+            "/batches/%2e%2e/calibration",
+            files={"calibration_file": (
+                "calibration.json", b'{"plate_xy":[1,2],"zone_radius_px":50,'
+                                    b'"created_from":"attacker"}',
+                "application/json")})
+        assert r.status_code == 404
+        # the real check: nothing was written one level above uploads_root
+        assert not (tmp_path / "calibration.json").exists()
+
+
+def test_batch_calibration_coords_path_rejects_dotdot_batch_id_cleanly(tmp_path):
+    """This specific branch (x/y coordinates, not a calibration_file
+    upload) is what produced a real unhandled FileNotFoundError -> 500
+    pre-fix, live-confirmed against a running server -- it calls
+    _batch_file_names() (reads a files.json that never exists at an
+    attacker-chosen path) before _batch_dir()'s containment check
+    existed to stop it. Must now be a clean 404 from the containment
+    check itself, never reaching that read at all."""
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/batches/%2e%2e/calibration", data={"x": 999, "y": 888})
+        assert r.status_code == 404
+        assert r.json()["detail"] == "no such batch: .."
+
+
+def test_batch_id_of_bare_dot_also_rejected(tmp_path):
+    # "." resolves to uploads_root ITSELF -- never a real batch (every
+    # real one is a subdirectory of it), so this must be rejected too,
+    # not just genuine ".." traversal.
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.get("/batches/%2e/jobs/detect")
+        assert r.status_code == 404
+
+
+def test_real_batch_id_still_works_after_the_containment_fix(tmp_path):
+    # the fix must not collaterally break the real, legitimate case
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        batch_id = upload(client, [("clip.mkv", b"video bytes")])
+        r = client.get(f"/batches/{batch_id}/jobs/detect")
+        # no detect job triggered yet -- 404 is correct here, the point
+        # is that it's THIS 404 ("no detect job"), not "no such batch"
+        assert r.status_code == 404
+        assert "no detect job" in r.json()["detail"]
+
+
+# ---- unhandled-exception handling (defense in depth, see
+# docs/INVESTIGATION_LOG.md's security review entries) ----
+
+def test_unhandled_exception_returns_clean_json_not_a_stack_trace(tmp_path, monkeypatch):
+    """Real, deliberate defense in depth, not a fix for an observed
+    client-facing leak: live-confirmed before this handler existed, this
+    app's default (debug=False, never overridden) already kept a
+    traceback out of the HTTP response body on an unhandled exception --
+    only this process's own log saw it. This handler makes that safe
+    behavior this app's own explicit code (and its own {"detail": ...}
+    shape) rather than a reliance on Starlette's default staying that
+    way forever."""
+    app = make_app(tmp_path)
+
+    @app.get("/__boom")
+    def _boom():
+        raise RuntimeError(f"leaking a real path: {tmp_path}")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        r = client.get("/__boom")
+        assert r.status_code == 500
+        assert r.json() == {"detail": "internal server error"}
+        assert str(tmp_path) not in r.text
+        assert "RuntimeError" not in r.text
+        assert "Traceback" not in r.text
+
+
+def test_existing_http_exceptions_are_unaffected_by_the_new_handler(tmp_path):
+    # the new Exception-level handler must not shadow FastAPI's own,
+    # more specific HTTPException handling -- every existing
+    # {"detail": "..."} error response (400s, 404s, 409s throughout this
+    # file) must still carry its own real, specific message.
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.get("/batches/nonexistent-batch/jobs/detect")
+        assert r.status_code == 404
+        assert r.json()["detail"] == "no such batch: nonexistent-batch"
+
+
 # ---- preview frame ----
 
 def test_preview_jpg_matches_video_native_resolution(tmp_path):

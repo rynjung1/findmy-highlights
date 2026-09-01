@@ -19,6 +19,7 @@ limitations) — that's a deliberate scope cut, not an oversight.
 
 import errno
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -30,9 +31,9 @@ from pathlib import Path
 
 import cv2
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from pipeline.calibration import (build_calibration, grab_preview_frame,
@@ -99,6 +100,12 @@ _REVIEW_ID_RE = re.compile(r"^[a-z0-9_]+$")
 # already handled gracefully further downstream by the pipeline's
 # existing corrupt-file handling, not re-validated here.
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+
+# For the unhandled-exception handler below -- real tracebacks still go
+# somewhere (this process's own stderr/log, exactly where they already
+# went via Starlette's default handler), just never into the HTTP
+# response body a caller receives.
+logger = logging.getLogger("findmy_highlights.backend")
 
 
 def _is_unsafe_filename(name: str) -> bool:
@@ -171,6 +178,44 @@ def create_app(uploads_root=None, run_in_background=None,
         app.add_middleware(
             CORSMiddleware, allow_origins=origins, allow_credentials=False,
             allow_methods=["*"], allow_headers=["*"])
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):
+        """Defense in depth, not a fix for an active leak: FastAPI's own
+        HTTPException handling (every deliberate `raise HTTPException(...)`
+        in this file) is a SEPARATE, more specific registration and is
+        unaffected by this -- Starlette's handler lookup matches the exact
+        exception type before falling back to a registered ancestor-class
+        handler like this one, so every existing {"detail": ...} error
+        response is unchanged. This only ever catches a genuinely
+        unhandled exception (e.g. the real FileNotFoundError the pre-fix
+        path-traversal bug could trigger, see docs/INVESTIGATION_LOG.md)
+        that would otherwise fall through to Starlette's own
+        ServerErrorMiddleware default.
+
+        That default, confirmed live before this handler existed, was
+        already NOT leaking a traceback to the client -- with debug=False
+        (this app's default, never overridden), it already returned a
+        bare "Internal Server Error" with no file paths or stack frames
+        in the response body; only this process's own log saw the real
+        traceback, exactly as intended. So this handler isn't closing an
+        observed client-facing leak -- it removes this app's reliance on
+        that Starlette default (and on debug staying off) by making the
+        safe behavior this app's own explicit code, in this app's own
+        {"detail": ...} shape instead of Starlette's differently-shaped
+        generic response, and it guarantees the same safe shape even if a
+        future change (e.g. a debug flag flipped on for local
+        troubleshooting and left on) would otherwise have exposed one.
+        The real traceback is logged here explicitly so a genuine bug
+        (like the one that motivated this) is still fully diagnosable
+        from the server's own log, exactly as before.
+        """
+        logger.exception(
+            "unhandled exception on %s %s", request.method, request.url.path,
+            exc_info=exc,
+        )
+        return JSONResponse(status_code=500, content={"detail": "internal server error"})
+
     app.state.uploads_root = (Path(uploads_root) if uploads_root is not None
                               else storage.DEFAULT_UPLOADS_ROOT)
     app.state.run_in_background = run_in_background or _default_run_in_background
@@ -179,7 +224,36 @@ def create_app(uploads_root=None, run_in_background=None,
         else DEFAULT_TRAINING_DATA_DIR)
 
     def _batch_dir(batch_id: str) -> Path:
-        bdir = storage.batch_dir(app.state.uploads_root, batch_id)
+        """Resolves batch_id to a real directory under uploads_root -- the
+        one function every real batch-scoped endpoint funnels through (11
+        call sites), so this is the single, correct place to enforce
+        containment rather than re-deriving the check per endpoint.
+
+        Real, demonstrated vulnerability (see docs/INVESTIGATION_LOG.md's
+        security review entry), fixed here: the previous version only
+        checked existence, not containment. A batch_id of ".." (as a
+        single URL path segment, e.g. `%2e%2e` -- FastAPI's default
+        string path converter can't smuggle a literal "/" through this
+        parameter, so multi-level traversal via encoded slashes is
+        already blocked by Starlette's own routing, confirmed live) made
+        `storage.batch_dir()` resolve to uploads_root's own parent
+        directory, which very much exists -- letting every downstream
+        batch-scoped endpoint read and write files ONE level outside
+        uploads_root under attacker-chosen names (confirmed live: a
+        planted file one level up was served back via GET .../output,
+        and POST .../calibration wrote a real file to that same
+        location). Fixed by resolving both paths to their real,
+        symlink-free absolute form and requiring the batch directory to
+        actually be uploads_root or a real descendant of it -- not just
+        "some directory that happens to exist" -- before anything else
+        touches it. A batch_id resolving to uploads_root itself (e.g. a
+        literal ".") is also rejected: every real batch is a subdirectory
+        of it, never the root itself.
+        """
+        root = app.state.uploads_root.resolve()
+        bdir = (root / batch_id).resolve()
+        if bdir == root or not bdir.is_relative_to(root):
+            raise HTTPException(404, f"no such batch: {batch_id}")
         if not bdir.exists():
             raise HTTPException(404, f"no such batch: {batch_id}")
         return bdir
