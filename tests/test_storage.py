@@ -63,3 +63,22 @@ def test_save_upload_empty_file(tmp_path):
     assert written == 0
     assert dest.exists()
     assert dest.read_bytes() == b""
+
+
+def test_batch_dir_is_org_scoped(tmp_path):
+    bdir = storage.batch_dir(tmp_path, "orgA", "batch1")
+    assert bdir == tmp_path / "orgA" / "batch1"
+
+
+def test_batch_dir_different_orgs_never_collide(tmp_path):
+    # same batch_id, two different orgs -- must resolve to two distinct
+    # directories, since org_id is the real isolation boundary
+    a = storage.batch_dir(tmp_path, "orgA", "same_batch_id")
+    b = storage.batch_dir(tmp_path, "orgB", "same_batch_id")
+    assert a != b
+    assert a.parent.name == "orgA"
+    assert b.parent.name == "orgB"
+
+
+def test_org_dir(tmp_path):
+    assert storage.org_dir(tmp_path, "orgA") == tmp_path / "orgA"

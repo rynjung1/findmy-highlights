@@ -104,6 +104,11 @@ describe('App.tsx multi-game queue', () => {
     vi.spyOn(api, 'setCalibrationFile').mockResolvedValue(fakeCalibration())
     vi.spyOn(api, 'triggerProcess').mockResolvedValue(completedJob({ status: 'pending' }))
     vi.spyOn(api, 'getManifest').mockResolvedValue(null)
+    // App's mount-time login check (see App.tsx's authState effect) --
+    // these tests are about the queue's own behavior, not auth, so
+    // start every test already "logged in" rather than stubbing out a
+    // real login flow none of them exercise.
+    vi.spyOn(api, 'listBatches').mockResolvedValue([])
   })
 
   afterEach(() => {

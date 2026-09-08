@@ -31,7 +31,7 @@ from pathlib import Path
 
 import cv2
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
@@ -44,7 +44,7 @@ from pipeline.multifile import order_infos, probe_file, resolve_order
 from pipeline.review import review_priority_key
 from pipeline.run import DEFAULT_CACHE_DIR
 
-from backend import demo, jobs, storage
+from backend import auth, demo, jobs, storage
 from backend.pipeline_runner import run_detect_then_export_job, run_export_job
 
 # Tier 1 review queue (see pipeline/review.py): off by default, and only
@@ -83,6 +83,16 @@ DEFAULT_TRAINING_DATA_DIR = os.environ.get("FMH_TRAINING_DATA_DIR")
 def _cors_origins() -> list[str]:
     raw = os.environ.get("FMH_CORS_ORIGINS", "")
     return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+# Session cookie's Secure (HTTPS-only) and SameSite=None (required for a
+# cross-origin frontend, see FMH_CORS_ORIGINS above, to receive it at
+# all) only make sense together, and only once a real deployment is
+# actually served over HTTPS -- local dev (http://localhost) needs
+# neither. One explicit opt-in flag for both, same "safe local default,
+# a real deployment sets it" pattern as FMH_CORS_ORIGINS.
+def _cookie_secure() -> bool:
+    return os.environ.get("FMH_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes")
 
 
 VALID_REVIEW_LABELS = ("downtime", "real_action")
@@ -146,6 +156,11 @@ class ReviewLabelBody(BaseModel):
     note: str | None = None
 
 
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
 def _default_run_in_background(fn, *args):
     """Real dispatch: a daemon thread, so a 30-60+ minute job doesn't
     block the event loop that serves progress-polling requests. Tests
@@ -157,7 +172,7 @@ def _default_run_in_background(fn, *args):
 
 
 def create_app(uploads_root=None, run_in_background=None,
-              training_data_dir=None) -> FastAPI:
+              training_data_dir=None, auth_root=None) -> FastAPI:
     """App factory, not a module-level singleton — tests point each app
     instance at its own tmp_path uploads root with a synchronous
     run_in_background, fully isolated from other tests and from a real
@@ -166,7 +181,11 @@ def create_app(uploads_root=None, run_in_background=None,
     `training_data_dir`, if given (or if unset, from DEFAULT_TRAINING_DATA_DIR
     -- see that constant's docstring for why this is env-var-gated),
     opts every real detect job this app runs into the Tier 1 review
-    queue."""
+    queue.
+
+    `auth_root`, if given (or if unset, from backend.auth.DEFAULT_AUTH_ROOT),
+    is where orgs.json/users.json/sessions.json live -- separate from
+    uploads_root, see backend/auth.py."""
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
         jobs.sweep_interrupted_jobs(app.state.uploads_root)
@@ -175,8 +194,15 @@ def create_app(uploads_root=None, run_in_background=None,
     app = FastAPI(title="Find My Highlights", lifespan=_lifespan)
     origins = _cors_origins()
     if origins:
+        # allow_credentials=True: the session cookie (see backend/auth.py)
+        # has to actually reach this server from a cross-origin frontend,
+        # which requires this. Still safe by the same reasoning as
+        # before -- allow_origins is never "*" (see this function's own
+        # docstring above _cors_origins), so this never grants a
+        # credentialed request to an origin that wasn't explicitly
+        # listed.
         app.add_middleware(
-            CORSMiddleware, allow_origins=origins, allow_credentials=False,
+            CORSMiddleware, allow_origins=origins, allow_credentials=True,
             allow_methods=["*"], allow_headers=["*"])
 
     @app.exception_handler(Exception)
@@ -222,12 +248,17 @@ def create_app(uploads_root=None, run_in_background=None,
     app.state.training_data_dir = (
         training_data_dir if training_data_dir is not None
         else DEFAULT_TRAINING_DATA_DIR)
+    app.state.auth_root = (Path(auth_root) if auth_root is not None
+                           else auth.DEFAULT_AUTH_ROOT)
 
-    def _batch_dir(batch_id: str) -> Path:
-        """Resolves batch_id to a real directory under uploads_root -- the
-        one function every real batch-scoped endpoint funnels through (11
-        call sites), so this is the single, correct place to enforce
-        containment rather than re-deriving the check per endpoint.
+    def _batch_dir(batch_id: str, org_id: str) -> Path:
+        """Resolves batch_id to a real directory under
+        uploads_root/org_id -- the one function every real batch-scoped
+        endpoint funnels through (11 call sites), so this is the single,
+        correct place to enforce containment rather than re-deriving the
+        check per endpoint. org_id always comes from the caller's session
+        (see auth.require_login), never from a URL path parameter, so
+        unlike batch_id it's never attacker-controlled input.
 
         Real, demonstrated vulnerability (see docs/INVESTIGATION_LOG.md's
         security review entry), fixed here: the previous version only
@@ -244,13 +275,18 @@ def create_app(uploads_root=None, run_in_background=None,
         and POST .../calibration wrote a real file to that same
         location). Fixed by resolving both paths to their real,
         symlink-free absolute form and requiring the batch directory to
-        actually be uploads_root or a real descendant of it -- not just
-        "some directory that happens to exist" -- before anything else
-        touches it. A batch_id resolving to uploads_root itself (e.g. a
-        literal ".") is also rejected: every real batch is a subdirectory
-        of it, never the root itself.
+        actually be uploads_root/org_id or a real descendant of it -- not
+        just "some directory that happens to exist" -- before anything
+        else touches it. A batch_id resolving to uploads_root/org_id
+        itself (e.g. a literal ".") is also rejected: every real batch is
+        a subdirectory of it, never the root itself. This same check now
+        also rejects a batch_id that resolves into a DIFFERENT org's
+        directory (e.g. "../other_org/some_batch") -- the org-scoped
+        root, not uploads_root itself, is what containment is checked
+        against, so cross-org access fails exactly like the original
+        cross-uploads_root traversal did.
         """
-        root = app.state.uploads_root.resolve()
+        root = (app.state.uploads_root / org_id).resolve()
         bdir = (root / batch_id).resolve()
         if bdir == root or not bdir.is_relative_to(root):
             raise HTTPException(404, f"no such batch: {batch_id}")
@@ -261,11 +297,12 @@ def create_app(uploads_root=None, run_in_background=None,
     def _batch_file_names(bdir: Path) -> list:
         return json.loads((bdir / "files.json").read_text())["files"]
 
-    def _reject_if_busy(bdir: Path, batch_id: str, job_type: str,
+    def _reject_if_busy(bdir: Path, batch_id: str, org_id: str, job_type: str,
                         block_if_completed: bool = True) -> None:
         """Blocks a second trigger while one is pending/in_progress
-        anywhere, and (for detect, not export) also blocks re-triggering
-        once already completed. Export is deliberately exempted from the
+        anywhere in this ORG (not globally -- see jobs.find_active_job),
+        and (for detect, not export) also blocks re-triggering once
+        already completed. Export is deliberately exempted from the
         completed-blocks-retrigger rule: re-stitching is idempotent
         against whatever the manifest currently says, so it's the
         correct way to regenerate the output after a Stage 8 restore —
@@ -280,14 +317,28 @@ def create_app(uploads_root=None, run_in_background=None,
                 raise HTTPException(
                     409, f"{job_type} already triggered for this batch "
                          f"(status={existing['status']})")
-        active = jobs.find_active_job(app.state.uploads_root)
+        active = jobs.find_active_job(app.state.uploads_root, org_id)
         if active and active["batch_id"] != batch_id:
             raise HTTPException(
                 409, f"another job is already running: "
                      f"batch_id={active['batch_id']} job_id={active['job_id']}")
 
+    @app.get("/batches")
+    def list_batches(session: dict = Depends(auth.require_login)):
+        org_root = storage.org_dir(app.state.uploads_root, session["org_id"])
+        out = []
+        if org_root.exists():
+            for bdir in sorted(p for p in org_root.iterdir() if p.is_dir()):
+                try:
+                    names = _batch_file_names(bdir)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    continue  # a partially-written or corrupt batch dir
+                out.append({"batch_id": bdir.name, "files": names})
+        return {"batches": out}
+
     @app.post("/batches")
-    def upload_batch(files: list[UploadFile] = File(...)):
+    def upload_batch(files: list[UploadFile] = File(...),
+                     session: dict = Depends(auth.require_login)):
         if not files:
             raise HTTPException(400, "no files provided")
         # validate every filename BEFORE writing anything to disk, so one
@@ -305,7 +356,7 @@ def create_app(uploads_root=None, run_in_background=None,
                      f"{sorted(ALLOWED_VIDEO_EXTENSIONS)}")
 
         batch_id = storage.new_batch_id()
-        bdir = storage.batch_dir(app.state.uploads_root, batch_id)
+        bdir = storage.batch_dir(app.state.uploads_root, session["org_id"], batch_id)
         names = []
         try:
             for f in files:
@@ -338,8 +389,28 @@ def create_app(uploads_root=None, run_in_background=None,
         the process is up and serving requests."""
         return {"status": "ok"}
 
+    @app.post("/login")
+    def login(body: LoginBody, response: Response):
+        user = auth.authenticate(app.state.auth_root, body.username, body.password)
+        if user is None:
+            raise HTTPException(401, "invalid username or password")
+        token = auth.create_session(app.state.auth_root, user["user_id"], user["org_id"])
+        secure = _cookie_secure()
+        response.set_cookie(
+            auth.SESSION_COOKIE_NAME, token, httponly=True,
+            samesite="none" if secure else "lax", secure=secure,
+            max_age=int(auth.SESSION_TTL.total_seconds()))
+        return {"username": user["username"], "org_id": user["org_id"]}
+
+    @app.post("/logout")
+    def logout(request: Request, response: Response,
+              session: dict = Depends(auth.require_login)):
+        auth.delete_session(app.state.auth_root, request.cookies.get(auth.SESSION_COOKIE_NAME))
+        response.delete_cookie(auth.SESSION_COOKIE_NAME)
+        return {"status": "ok"}
+
     @app.post("/demo/run")
-    def run_demo():
+    def run_demo(session: dict = Depends(auth.require_login)):
         """Creates a fresh batch from the bundled demo clip
         (backend/demo.py), already calibrated, and immediately triggers
         real detect-then-export processing on it -- one call, no upload,
@@ -358,14 +429,14 @@ def create_app(uploads_root=None, run_in_background=None,
         fixed clip every single time, so repeat demo runs would only
         ever mine exact duplicate candidates, not real new label data.
         """
-        active = jobs.find_active_job(app.state.uploads_root)
+        active = jobs.find_active_job(app.state.uploads_root, session["org_id"])
         if active:
             raise HTTPException(
                 409, f"another job is already running: "
                      f"batch_id={active['batch_id']} job_id={active['job_id']}")
 
         batch_id = storage.new_batch_id()
-        bdir = storage.batch_dir(app.state.uploads_root, batch_id)
+        bdir = storage.batch_dir(app.state.uploads_root, session["org_id"], batch_id)
         bdir.mkdir(parents=True, exist_ok=True)
         demo.seed_demo_batch(bdir, DEFAULT_CACHE_DIR)
         (bdir / "files.json").write_text(
@@ -378,13 +449,14 @@ def create_app(uploads_root=None, run_in_background=None,
         return {"batch_id": batch_id, **job}
 
     @app.get("/batches/{batch_id}/preview.jpg")
-    def get_preview(batch_id: str, at_seconds: float | None = None):
+    def get_preview(batch_id: str, at_seconds: float | None = None,
+                    session: dict = Depends(auth.require_login)):
         """`at_seconds`, if given, overrides grab_preview_frame's fixed
         20.0s default -- purely additive, existing callers (the real
         frontend calibration UI) omit it and are unaffected. Added for
         the multi-pass redundant calibration diagnostic, which needs
         genuinely different real frames of the same clip per pass."""
-        bdir = _batch_dir(batch_id)
+        bdir = _batch_dir(batch_id, session["org_id"])
         names = _batch_file_names(bdir)
         try:
             if at_seconds is not None:
@@ -413,8 +485,8 @@ def create_app(uploads_root=None, run_in_background=None,
         return FileResponse(path, media_type="text/html")
 
     @app.get("/batches/{batch_id}/calibration")
-    def get_calibration(batch_id: str):
-        bdir = _batch_dir(batch_id)
+    def get_calibration(batch_id: str, session: dict = Depends(auth.require_login)):
+        bdir = _batch_dir(batch_id, session["org_id"])
         p = bdir / "calibration.json"
         if not p.exists():
             raise HTTPException(404, "no calibration set for this batch")
@@ -434,7 +506,8 @@ def create_app(uploads_root=None, run_in_background=None,
                         second_radius: float | None = Form(None),
                         third_x: float | None = Form(None),
                         third_y: float | None = Form(None),
-                        third_radius: float | None = Form(None)):
+                        third_radius: float | None = Form(None),
+                        session: dict = Depends(auth.require_login)):
         """Sets the plate zone for every file in this batch (one
         calibration.json covers the whole batch, same shared-by-default
         rule pipeline.calibration.resolve_zone already applies). Two
@@ -468,7 +541,7 @@ def create_app(uploads_root=None, run_in_background=None,
         already-running job or silently do nothing for one that's
         already done, which is more confusing than a clear error telling
         the caller it's too late."""
-        bdir = _batch_dir(batch_id)
+        bdir = _batch_dir(batch_id, session["org_id"])
         dest = bdir / "calibration.json"
 
         existing_detect = jobs.load_job(bdir, "detect")
@@ -556,12 +629,13 @@ def create_app(uploads_root=None, run_in_background=None,
         return calibration
 
     @app.post("/batches/{batch_id}/process")
-    def trigger_process(batch_id: str, body: ProcessBody | None = None):
-        bdir = _batch_dir(batch_id)
+    def trigger_process(batch_id: str, body: ProcessBody | None = None,
+                        session: dict = Depends(auth.require_login)):
+        bdir = _batch_dir(batch_id, session["org_id"])
         names = _batch_file_names(bdir)
         paths = [str(bdir / n) for n in names]
 
-        _reject_if_busy(bdir, batch_id, "detect")
+        _reject_if_busy(bdir, batch_id, session["org_id"], "detect")
 
         allow_uncalibrated = body.allow_uncalibrated if body is not None else False
         if not (bdir / "calibration.json").exists() and not allow_uncalibrated:
@@ -608,8 +682,9 @@ def create_app(uploads_root=None, run_in_background=None,
         return job
 
     @app.post("/batches/{batch_id}/order")
-    def confirm_order(batch_id: str, body: OrderBody):
-        bdir = _batch_dir(batch_id)
+    def confirm_order(batch_id: str, body: OrderBody,
+                      session: dict = Depends(auth.require_login)):
+        bdir = _batch_dir(batch_id, session["org_id"])
         names = _batch_file_names(bdir)
         paths = [str(bdir / n) for n in names]
 
@@ -633,18 +708,19 @@ def create_app(uploads_root=None, run_in_background=None,
         return existing
 
     @app.get("/batches/{batch_id}/jobs/{job_type}")
-    def get_job(batch_id: str, job_type: str):
+    def get_job(batch_id: str, job_type: str,
+               session: dict = Depends(auth.require_login)):
         if job_type not in jobs.JOB_TYPES:
             raise HTTPException(404, f"unknown job type: {job_type}")
-        bdir = _batch_dir(batch_id)
+        bdir = _batch_dir(batch_id, session["org_id"])
         job = jobs.load_job(bdir, job_type)
         if job is None:
             raise HTTPException(404, f"no {job_type} job for this batch")
         return job
 
     @app.get("/batches/{batch_id}/manifest")
-    def get_manifest(batch_id: str):
-        bdir = _batch_dir(batch_id)
+    def get_manifest(batch_id: str, session: dict = Depends(auth.require_login)):
+        bdir = _batch_dir(batch_id, session["org_id"])
         p = bdir / "manifest.json"
         if not p.exists():
             raise HTTPException(404, "no manifest yet for this batch")
@@ -652,8 +728,9 @@ def create_app(uploads_root=None, run_in_background=None,
 
     @app.patch("/batches/{batch_id}/manifest/segments/{segment_id}")
     def update_segment(batch_id: str, segment_id: str,
-                       body: SegmentStatusBody):
-        bdir = _batch_dir(batch_id)
+                       body: SegmentStatusBody,
+                       session: dict = Depends(auth.require_login)):
+        bdir = _batch_dir(batch_id, session["org_id"])
         p = bdir / "manifest.json"
         if not p.exists():
             raise HTTPException(404, "no manifest yet for this batch")
@@ -670,20 +747,20 @@ def create_app(uploads_root=None, run_in_background=None,
         return seg
 
     @app.post("/batches/{batch_id}/export")
-    def trigger_export(batch_id: str):
-        bdir = _batch_dir(batch_id)
+    def trigger_export(batch_id: str, session: dict = Depends(auth.require_login)):
+        bdir = _batch_dir(batch_id, session["org_id"])
         if not (bdir / "manifest.json").exists():
             raise HTTPException(404, "no manifest yet for this batch")
 
-        _reject_if_busy(bdir, batch_id, "export", block_if_completed=False)
+        _reject_if_busy(bdir, batch_id, session["org_id"], "export", block_if_completed=False)
 
         job = jobs.create_job(bdir, batch_id, "export", status="pending")
         app.state.run_in_background(run_export_job, bdir, job)
         return job
 
     @app.get("/batches/{batch_id}/output")
-    def get_output(batch_id: str):
-        bdir = _batch_dir(batch_id)
+    def get_output(batch_id: str, session: dict = Depends(auth.require_login)):
+        bdir = _batch_dir(batch_id, session["org_id"])
         p = bdir / "output.mp4"
         if not p.exists():
             raise HTTPException(404, "no exported output yet for this batch")
@@ -692,7 +769,8 @@ def create_app(uploads_root=None, run_in_background=None,
         return FileResponse(p, media_type="video/mp4", filename="highlights.mp4")
 
     @app.get("/batches/{batch_id}/source/{filename}")
-    def get_source(batch_id: str, filename: str):
+    def get_source(batch_id: str, filename: str,
+                   session: dict = Depends(auth.require_login)):
         """Serves one of the batch's own original uploaded source files,
         for the Edit Log's cut-segment preview (seek within the source
         file rather than exporting a physical clip per candidate
@@ -704,7 +782,7 @@ def create_app(uploads_root=None, run_in_background=None,
         one directory level, so this can't be a suffix/character
         blocklist. The resolved-parent check is defense in depth on top
         of that allowlist, not a substitute for it."""
-        bdir = _batch_dir(batch_id)
+        bdir = _batch_dir(batch_id, session["org_id"])
         if filename not in _batch_file_names(bdir):
             raise HTTPException(404, f"no such source file in this batch: {filename}")
         p = (bdir / filename).resolve()
@@ -768,8 +846,14 @@ def create_app(uploads_root=None, run_in_background=None,
             "remaining": remaining,
         }
 
+    # Review queue endpoints require login but are deliberately NOT
+    # org-scoped: this is an internal Tier 1 training-data tool (off by
+    # default, see _reviews_dir -- FMH_TRAINING_DATA_DIR unset means
+    # 404 regardless of login), not a customer-facing surface, so any
+    # authenticated user can access it rather than only their own org's
+    # candidates.
     @app.get("/review/next")
-    def get_next_review():
+    def get_next_review(session: dict = Depends(auth.require_login)):
         """Returns the lowest-margin unlabeled record (control samples
         last), or {"done": true} once the queue is empty -- a normal 200
         either way, since an empty queue isn't an error condition."""
@@ -779,7 +863,7 @@ def create_app(uploads_root=None, run_in_background=None,
         return _review_response(pending[0], remaining=len(pending))
 
     @app.get("/review/{review_id}/clip")
-    def get_review_clip(review_id: str):
+    def get_review_clip(review_id: str, session: dict = Depends(auth.require_login)):
         reviews_dir = _reviews_dir()
         p = _safe_review_path(reviews_dir, review_id, ".mp4")
         if not p.exists():
@@ -787,7 +871,8 @@ def create_app(uploads_root=None, run_in_background=None,
         return FileResponse(p, media_type="video/mp4", filename=f"{review_id}.mp4")
 
     @app.post("/review/{review_id}/label")
-    def label_review(review_id: str, body: ReviewLabelBody):
+    def label_review(review_id: str, body: ReviewLabelBody,
+                     session: dict = Depends(auth.require_login)):
         """Writes the label and returns the next pending item (same
         shape as GET /review/next), so the frontend can label one after
         another without a round trip back to /next each time."""

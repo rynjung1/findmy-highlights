@@ -6,6 +6,7 @@ import ProcessingStep from './components/ProcessingStep'
 import ResultStep from './components/ResultStep'
 import EditLogView from './components/EditLogView'
 import ReviewQueueView from './components/ReviewQueueView'
+import LoginView from './components/LoginView'
 import QueueList, { type QueueItem } from './components/QueueList'
 import AdvancingNotice from './components/AdvancingNotice'
 import {
@@ -13,6 +14,8 @@ import {
   type AppErrorKind,
   getCalibration,
   getJob,
+  listBatches,
+  logout,
   setCalibrationFile,
   triggerProcess,
 } from './api'
@@ -105,6 +108,19 @@ function saveQueue(items: QueueItem[]): void {
 }
 
 export default function App() {
+  // Every real endpoint now requires login (see backend/auth.py) --
+  // checked once on mount via a cheap real call (listBatches) rather
+  // than a dedicated "am I logged in" endpoint that doesn't otherwise
+  // exist. 'checking' briefly shows a spinner instead of flashing the
+  // login form for an already-logged-in return visit.
+  const [authState, setAuthState] = useState<'checking' | 'loggedOut' | 'loggedIn'>('checking')
+
+  useEffect(() => {
+    listBatches()
+      .then(() => setAuthState('loggedIn'))
+      .catch(() => setAuthState('loggedOut'))
+  }, [])
+
   const [view, setView] = useState<View>('home') // independent of the stage machine below
   const [stage, setStage] = useState<Stage>('loading')
   const [batchId, setBatchId] = useState<string | null>(null)
@@ -155,6 +171,7 @@ export default function App() {
   // durable server-side (see backend/jobs.py) specifically so a reload
   // or a closed tab mid-run doesn't lose the user's place.
   useEffect(() => {
+    if (authState !== 'loggedIn') return
     const saved = loadQueue()
     if (saved.length === 0) {
       setStage('upload')
@@ -164,7 +181,7 @@ export default function App() {
     const focus = saved.find((i) => i.status === 'active') ?? saved[saved.length - 1]
     setBatchId(focus.batchId)
     resumeFromServer(focus.batchId)
-  }, [])
+  }, [authState])
 
   async function resumeFromServer(id: string) {
     try {
@@ -348,6 +365,35 @@ export default function App() {
     setStage('upload')
   }
 
+  // A full reload rather than resetting each piece of local state by
+  // hand: simplest way to guarantee nothing from the previous session
+  // (queue, focused batch, in-flight polling) survives into whatever
+  // account logs in next, and it's a rare action, not a hot path worth
+  // optimizing away the reload for.
+  async function handleLogout() {
+    await logout()
+    window.location.reload()
+  }
+
+  if (authState === 'checking') {
+    return (
+      <div className="app-layout">
+        <main className="main-content">
+          <div className="app-shell">
+            <div className="card">
+              <span className="spinner" aria-hidden="true" />
+              Loading...
+            </div>
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  if (authState === 'loggedOut') {
+    return <LoginView onLoggedIn={() => setAuthState('loggedIn')} />
+  }
+
   return (
     <div className="app-layout">
       <aside className="sidebar">
@@ -374,6 +420,9 @@ export default function App() {
             onClick={() => setView('review')}
           >
             Review Queue
+          </button>
+          <button className="secondary" onClick={() => void handleLogout()}>
+            Log out
           </button>
         </nav>
 

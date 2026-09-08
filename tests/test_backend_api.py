@@ -17,6 +17,7 @@ thing worth verifying for real.
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient
 
 import backend.pipeline_runner as pipeline_runner
-from backend import storage
+from backend import auth, storage
 from backend.app import create_app
 from pipeline.manifest import build_manifest, save_manifest
 
@@ -35,8 +36,31 @@ from pipeline.manifest import build_manifest, save_manifest
 def make_app(tmp_path, training_data_dir=None):
     app = create_app(uploads_root=tmp_path / "uploads",
                      run_in_background=lambda fn, *args: fn(*args),
-                     training_data_dir=training_data_dir)
+                     training_data_dir=training_data_dir,
+                     auth_root=tmp_path / "auth")
     return app
+
+
+@contextmanager
+def authed_client(app, org_name="Test Org", username="testuser",
+                  password="testpass", **testclient_kwargs):
+    """Drop-in replacement for `with authed_client(app) as client:` now that
+    every real endpoint requires login: creates one real org + user (via
+    backend.auth directly, not through the CLI scripts, since those are
+    the deployment-time path, not the test path) and logs in through the
+    real POST /login endpoint, so the returned client carries a real
+    session cookie exercising the real auth.require_login path on every
+    subsequent request — not a bypass, just moved the one-time login
+    step out of every individual test body."""
+    with TestClient(app, **testclient_kwargs) as client:
+        org = auth.create_org(app.state.auth_root, org_name)
+        auth.create_user(app.state.auth_root, org["org_id"], username, password)
+        r = client.post("/login", json={"username": username, "password": password})
+        assert r.status_code == 200, r.text
+        # exposed for tests that assert on the real on-disk path
+        # (uploads/<org_id>/<batch_id>/...) rather than only the API
+        client.test_org_id = org["org_id"]
+        yield client
 
 
 def upload(client, names_and_content):
@@ -143,7 +167,7 @@ def test_health_returns_ok(tmp_path):
     # healthcheck (e.g. railway.json's deploy.healthcheckPath) hits this,
     # not a real endpoint that touches the filesystem or a model.
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         res = client.get("/health")
         assert res.status_code == 200
         assert res.json() == {"status": "ok"}
@@ -153,22 +177,22 @@ def test_health_returns_ok(tmp_path):
 
 def test_upload_creates_batch_with_files_on_disk(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"fake video bytes")])
-        assert (tmp_path / "uploads" / batch_id / "clip.mkv").read_bytes() \
+        assert (tmp_path / "uploads" / client.test_org_id / batch_id / "clip.mkv").read_bytes() \
             == b"fake video bytes"
 
 
 def test_upload_no_files_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[])
         assert r.status_code in (400, 422)  # FastAPI 422s an empty required list
 
 
 def test_upload_unsupported_extension_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("notes.txt", b"hello", "text/plain"))])
         assert r.status_code == 400
@@ -179,7 +203,7 @@ def test_upload_rejects_whole_batch_if_any_file_is_bad(tmp_path):
     # a mix of one good + one bad file must reject atomically -- no
     # partial write of the good file left behind
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("good.mkv", b"video bytes", "video/x-matroska")),
             ("files", ("bad.txt", b"not a video", "text/plain"))])
@@ -191,7 +215,7 @@ def test_upload_rejects_whole_batch_if_any_file_is_bad(tmp_path):
 
 def test_upload_extension_check_is_case_insensitive(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("CLIP.MP4", b"video bytes", "video/mp4"))])
         assert r.status_code == 200
@@ -212,7 +236,7 @@ def test_upload_disk_full_gives_clear_507_not_generic_500(tmp_path, monkeypatch)
 
     monkeypatch.setattr("backend.app.storage.save_upload", fake_save_upload)
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("clip.mkv", b"video bytes", "video/x-matroska"))])
         assert r.status_code == 507
@@ -235,7 +259,7 @@ def test_upload_other_os_error_gives_real_detail_not_generic_500(tmp_path, monke
 
     monkeypatch.setattr("backend.app.storage.save_upload", fake_save_upload)
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("clip.mkv", b"video bytes", "video/x-matroska"))])
         assert r.status_code == 500
@@ -251,14 +275,14 @@ def test_upload_traversal_filename_would_have_escaped_pre_fix(tmp_path):
     batch's own directory for this filename, the same join the pre-fix
     code would have written through. This is what makes the 400s below
     a real fix, not a check against an already-harmless string."""
-    bdir = storage.batch_dir(tmp_path / "uploads", "some_batch_id")
+    bdir = storage.batch_dir(tmp_path / "uploads", "some_org_id", "some_batch_id")
     escaped = (bdir / "../../evil.mkv").resolve()
     assert not str(escaped).startswith(str(bdir.resolve()))
 
 
 def test_upload_rejects_path_traversal_filename_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("../../evil.mkv", b"video bytes", "video/x-matroska"))])
         assert r.status_code == 400
@@ -270,7 +294,7 @@ def test_upload_rejects_path_traversal_filename_400(tmp_path):
 
 def test_upload_rejects_backslash_filename_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("..\\evil.mkv", b"video bytes", "video/x-matroska"))])
         assert r.status_code == 400
@@ -281,7 +305,7 @@ def test_upload_rejects_bare_dotdot_segment_400(tmp_path):
     # a single ".." component needs no slash at all to climb one
     # directory when joined with Path(bdir) / name
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("..", b"video bytes", "video/x-matroska"))])
         assert r.status_code == 400
@@ -293,7 +317,7 @@ def test_upload_rejects_traversal_batch_atomically(tmp_path):
     # unsafe filename in a multi-file batch must block the whole batch,
     # not just skip the bad file
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches", files=[
             ("files", ("good.mkv", b"video bytes", "video/x-matroska")),
             ("files", ("../evil.mkv", b"video bytes", "video/x-matroska"))])
@@ -344,7 +368,7 @@ def test_batch_read_endpoint_rejects_dotdot_batch_id_404(tmp_path):
     planted.write_bytes(b"secret content outside uploads_root")
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/batches/%2e%2e/output")
         assert r.status_code == 404
         assert r.content != b"secret content outside uploads_root"
@@ -354,7 +378,7 @@ def test_batch_write_endpoint_rejects_dotdot_batch_id_404_and_writes_nothing(tmp
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post(
             "/batches/%2e%2e/calibration",
             files={"calibration_file": (
@@ -377,7 +401,7 @@ def test_batch_calibration_coords_path_rejects_dotdot_batch_id_cleanly(tmp_path)
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches/%2e%2e/calibration", data={"x": 999, "y": 888})
         assert r.status_code == 404
         assert r.json()["detail"] == "no such batch: .."
@@ -390,7 +414,7 @@ def test_batch_id_of_bare_dot_also_rejected(tmp_path):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/batches/%2e/jobs/detect")
         assert r.status_code == 404
 
@@ -398,7 +422,7 @@ def test_batch_id_of_bare_dot_also_rejected(tmp_path):
 def test_real_batch_id_still_works_after_the_containment_fix(tmp_path):
     # the fix must not collaterally break the real, legitimate case
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"video bytes")])
         r = client.get(f"/batches/{batch_id}/jobs/detect")
         # no detect job triggered yet -- 404 is correct here, the point
@@ -425,7 +449,7 @@ def test_unhandled_exception_returns_clean_json_not_a_stack_trace(tmp_path, monk
     def _boom():
         raise RuntimeError(f"leaking a real path: {tmp_path}")
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with authed_client(app, raise_server_exceptions=False) as client:
         r = client.get("/__boom")
         assert r.status_code == 500
         assert r.json() == {"detail": "internal server error"}
@@ -440,7 +464,7 @@ def test_existing_http_exceptions_are_unaffected_by_the_new_handler(tmp_path):
     # {"detail": "..."} error response (400s, 404s, 409s throughout this
     # file) must still carry its own real, specific message.
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/batches/nonexistent-batch/jobs/detect")
         assert r.status_code == 404
         assert r.json()["detail"] == "no such batch: nonexistent-batch"
@@ -460,7 +484,7 @@ def test_preview_jpg_matches_video_native_resolution(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)  # 64x48
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.get(f"/batches/{batch_id}/preview.jpg")
         assert r.status_code == 200
@@ -472,13 +496,14 @@ def test_preview_jpg_matches_video_native_resolution(tmp_path):
                                cv2.IMREAD_COLOR)
         jpeg_h, jpeg_w = decoded.shape[:2]
 
-        native_w, native_h = probe_frame_size(tmp_path / "uploads" / batch_id / "clip.mp4")
+        native_w, native_h = probe_frame_size(
+            tmp_path / "uploads" / client.test_org_id / batch_id / "clip.mp4")
         assert (jpeg_w, jpeg_h) == (native_w, native_h)
 
 
 def test_preview_jpg_unknown_batch_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/batches/does-not-exist/preview.jpg")
         assert r.status_code == 404
 
@@ -498,7 +523,7 @@ def test_preview_jpg_uses_a_frame_past_the_start(tmp_path):
         "-y", str(clip)], check=True)
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.get(f"/batches/{batch_id}/preview.jpg")
         assert r.status_code == 200
@@ -527,7 +552,7 @@ def test_preview_jpg_at_seconds_overrides_default_offset(tmp_path):
         "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0",
         "-y", str(clip)], check=True)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
 
         r = client.get(f"/batches/{batch_id}/preview.jpg", params={"at_seconds": 0.2})
@@ -546,7 +571,7 @@ def test_preview_jpg_at_seconds_overrides_default_offset(tmp_path):
 
 def test_get_calibration_before_set_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.get(f"/batches/{batch_id}/calibration")
         assert r.status_code == 404
@@ -557,7 +582,7 @@ def test_set_calibration_from_coordinates_against_real_video(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)  # 64x48, from write_clip's default
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "32", "y": "24"})
@@ -578,7 +603,7 @@ def test_set_calibration_with_explicit_radius(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "10", "y": "10", "radius": "5"})
@@ -595,7 +620,7 @@ def test_set_calibration_coordinates_with_no_bases_omits_bases_key(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "32", "y": "24"})
@@ -611,7 +636,7 @@ def test_set_calibration_with_one_base(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)  # 64x48
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "32", "y": "24",
@@ -631,7 +656,7 @@ def test_set_calibration_with_all_bases(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)  # 64x48
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration", data={
             "x": "32", "y": "24",
@@ -655,7 +680,7 @@ def test_set_calibration_base_missing_half_coordinate_400(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "32", "y": "24", "first_x": "50"})
@@ -668,7 +693,7 @@ def test_set_calibration_base_out_of_bounds_400(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)  # 64x48
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "32", "y": "24",
@@ -682,7 +707,7 @@ def test_set_calibration_base_negative_radius_400(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "32", "y": "24", "third_x": "10",
@@ -696,7 +721,7 @@ def test_set_calibration_base_fields_with_file_upload_400(tmp_path):
     `bases` key in the uploaded JSON through unchanged, so combining
     both is ambiguous, not additive."""
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(
             f"/batches/{batch_id}/calibration",
@@ -718,7 +743,7 @@ def test_resolve_base_zones_reads_back_what_was_submitted(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)  # 64x48
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration", data={
             "x": "32", "y": "24",
@@ -727,7 +752,7 @@ def test_resolve_base_zones_reads_back_what_was_submitted(tmp_path):
         })
         assert r.status_code == 200
 
-    bdir = storage.batch_dir(tmp_path / "uploads", batch_id)
+    bdir = storage.batch_dir(tmp_path / "uploads", client.test_org_id, batch_id)
     zones = resolve_base_zones(bdir / "clip.mp4", calib_dir=bdir)
 
     assert set(zones.keys()) == {"first", "third"}  # second never submitted
@@ -740,7 +765,7 @@ def test_resolve_base_zones_reads_back_what_was_submitted(tmp_path):
 
 def test_set_calibration_by_uploading_existing_file(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         existing = json.dumps({
             "frame_size": [1920, 1080], "plate_xy": [900.0, 700.0],
@@ -758,7 +783,7 @@ def test_set_calibration_by_uploading_existing_file(tmp_path):
 
 def test_set_calibration_file_and_coordinates_together_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(
             f"/batches/{batch_id}/calibration",
@@ -769,7 +794,7 @@ def test_set_calibration_file_and_coordinates_together_400(tmp_path):
 
 def test_set_calibration_neither_file_nor_coordinates_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(f"/batches/{batch_id}/calibration")
         assert r.status_code == 400
@@ -777,7 +802,7 @@ def test_set_calibration_neither_file_nor_coordinates_400(tmp_path):
 
 def test_set_calibration_invalid_json_file_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(
             f"/batches/{batch_id}/calibration",
@@ -788,7 +813,7 @@ def test_set_calibration_invalid_json_file_400(tmp_path):
 
 def test_set_calibration_file_missing_fields_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(
             f"/batches/{batch_id}/calibration",
@@ -805,7 +830,7 @@ def test_no_calibration_means_process_video_gets_a_none_zone(tmp_path, process_v
     wired through. (Without the opt-in, this is now a 400 at trigger
     time — see the calibration-gate tests below.)"""
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = post_process(client, batch_id)
         job = r.json()
@@ -820,7 +845,7 @@ def test_calibration_is_actually_picked_up_by_detection(tmp_path, process_video_
     the warnings list being empty — a fake that ignores zone entirely
     would make that inference false), and no "no calibration" warning."""
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         cal_resp = client.post(
             f"/batches/{batch_id}/calibration",
@@ -850,7 +875,7 @@ def test_calibration_is_actually_picked_up_by_detection(tmp_path, process_video_
 
 def test_set_calibration_unknown_batch_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches/does-not-exist/calibration",
                         data={"x": "1", "y": "1"})
         assert r.status_code == 404
@@ -861,7 +886,7 @@ def test_set_calibration_out_of_bounds_coordinates_400(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)  # 64x48
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "9999", "y": "24"})
@@ -878,7 +903,7 @@ def test_set_calibration_negative_radius_400(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
         r = client.post(f"/batches/{batch_id}/calibration",
                         data={"x": "10", "y": "10", "radius": "-5"})
@@ -887,7 +912,7 @@ def test_set_calibration_negative_radius_400(tmp_path):
 
 def test_set_calibration_file_negative_radius_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(
             f"/batches/{batch_id}/calibration",
@@ -899,7 +924,7 @@ def test_set_calibration_file_negative_radius_400(tmp_path):
 
 def test_set_calibration_file_malformed_plate_xy_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(
             f"/batches/{batch_id}/calibration",
@@ -911,7 +936,7 @@ def test_set_calibration_file_malformed_plate_xy_400(tmp_path):
 
 def test_set_calibration_after_detect_completed_409(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = post_process(client, batch_id)
         assert r.json()["status"] == "completed"
@@ -928,9 +953,9 @@ def test_set_calibration_while_detect_in_progress_409(tmp_path):
     from backend import jobs
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
-        bdir = tmp_path / "uploads" / batch_id
+        bdir = tmp_path / "uploads" / client.test_org_id / batch_id
         jobs.create_job(bdir, batch_id, "detect", status="in_progress")
 
         r = client.post(f"/batches/{batch_id}/calibration",
@@ -946,9 +971,9 @@ def test_set_calibration_still_allowed_after_failed_detect(tmp_path):
     clip = tmp_path / "src.mp4"
     write_clip(clip, seconds=1, fps=5)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mp4", clip.read_bytes())])
-        bdir = tmp_path / "uploads" / batch_id
+        bdir = tmp_path / "uploads" / client.test_org_id / batch_id
         jobs.create_job(bdir, batch_id, "detect", status="failed")
 
         r = client.post(f"/batches/{batch_id}/calibration",
@@ -960,7 +985,7 @@ def test_set_calibration_still_allowed_after_failed_detect(tmp_path):
 
 def test_process_without_calibration_is_blocked_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(f"/batches/{batch_id}/process")
         assert r.status_code == 400
@@ -972,7 +997,7 @@ def test_process_without_calibration_is_blocked_400(tmp_path):
 
 def test_process_allow_uncalibrated_opt_in_proceeds(tmp_path, process_video_calls):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(f"/batches/{batch_id}/process",
                         json={"allow_uncalibrated": True})
@@ -983,7 +1008,7 @@ def test_process_allow_uncalibrated_opt_in_proceeds(tmp_path, process_video_call
 
 def test_process_with_calibration_set_proceeds_without_flag(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         client.post(f"/batches/{batch_id}/calibration",
                    files={"calibration_file": ("c.json", json.dumps({
@@ -998,14 +1023,14 @@ def test_process_with_calibration_set_proceeds_without_flag(tmp_path):
 
 def test_process_unknown_batch_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/batches/does-not-exist/process")
         assert r.status_code == 404
 
 
 def test_process_single_file_completes_with_manifest(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = post_process(client, batch_id)
         assert r.status_code == 200
@@ -1037,7 +1062,7 @@ def test_hard_cut_windows_from_process_video_reach_the_manifest_as_origin(
                             hard_cut_windows_by_file={"clip.mkv": [(4.0, 5.0)]}))
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = post_process(client, batch_id)
         assert r.status_code == 200
@@ -1065,7 +1090,7 @@ def test_walkup_gate_windows_from_process_video_reach_the_manifest_as_origin(
                             walkup_gate_windows_by_file={"clip.mkv": [(4.0, 5.0)]}))
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = post_process(client, batch_id)
         assert r.status_code == 200
@@ -1095,7 +1120,7 @@ def test_walkup_gate_windows_from_process_video_reach_the_manifest_as_origin(
 
 def test_process_triggered_twice_on_same_batch_409(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r1 = post_process(client, batch_id)
         assert r1.status_code == 200
@@ -1106,14 +1131,14 @@ def test_process_triggered_twice_on_same_batch_409(tmp_path):
 
 def test_process_rejected_while_another_batch_is_active(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_a = upload(client, [("clip.mkv", b"x")])
         batch_b = upload(client, [("clip2.mkv", b"y")])
 
         # simulate batch A's job still running (don't actually run it —
         # write the state directly so this test isn't racing a thread)
         from backend import jobs
-        bdir_a = tmp_path / "uploads" / batch_a
+        bdir_a = tmp_path / "uploads" / client.test_org_id / batch_a
         jobs.create_job(bdir_a, batch_a, "detect", status="in_progress")
 
         r = post_process(client, batch_b)
@@ -1140,7 +1165,7 @@ def test_ambiguous_order_returns_needs_confirmation(tmp_path):
     write_clip(clip_a)  # no creation_time on either -> ambiguous
     write_clip(clip_b)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
         r = post_process(client, batch_id)
@@ -1158,7 +1183,7 @@ def test_needs_order_confirmation_does_not_block_other_batch(tmp_path):
     write_clip(clip_a)
     write_clip(clip_b)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         stuck_batch = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
         r1 = post_process(client, stuck_batch)
@@ -1177,7 +1202,7 @@ def test_confirm_order_starts_processing(tmp_path):
     write_clip(clip_a)
     write_clip(clip_b)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
         post_process(client, batch_id)
@@ -1199,7 +1224,7 @@ def test_confirm_order_mismatched_files_400(tmp_path):
     write_clip(clip_a)
     write_clip(clip_b)
 
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [
             ("a.mp4", clip_a.read_bytes()), ("b.mp4", clip_b.read_bytes())])
         post_process(client, batch_id)
@@ -1211,7 +1236,7 @@ def test_confirm_order_mismatched_files_400(tmp_path):
 
 def test_confirm_order_without_pending_confirmation_409(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(f"/batches/{batch_id}/order", json={"order": ["clip.mkv"]})
         assert r.status_code == 409
@@ -1221,7 +1246,7 @@ def test_confirm_order_without_pending_confirmation_409(tmp_path):
 
 def test_get_job_unknown_type_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.get(f"/batches/{batch_id}/jobs/bogus")
         assert r.status_code == 404
@@ -1229,7 +1254,7 @@ def test_get_job_unknown_type_404(tmp_path):
 
 def test_get_job_none_yet_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.get(f"/batches/{batch_id}/jobs/detect")
         assert r.status_code == 404
@@ -1239,7 +1264,7 @@ def test_get_job_none_yet_404(tmp_path):
 
 def test_get_manifest_before_ready_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.get(f"/batches/{batch_id}/manifest")
         assert r.status_code == 404
@@ -1248,7 +1273,7 @@ def test_get_manifest_before_ready_404(tmp_path):
 def test_update_manifest_before_manifest_exists_404(tmp_path):
     # explicitly requested malformed-request case
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.patch(f"/batches/{batch_id}/manifest/segments/seg_001",
                          json={"status": "kept"})
@@ -1257,7 +1282,7 @@ def test_update_manifest_before_manifest_exists_404(tmp_path):
 
 def test_update_manifest_unknown_segment_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)
         r = client.patch(f"/batches/{batch_id}/manifest/segments/seg_999",
@@ -1267,7 +1292,7 @@ def test_update_manifest_unknown_segment_404(tmp_path):
 
 def test_update_manifest_invalid_status_400(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)
         m = client.get(f"/batches/{batch_id}/manifest").json()
@@ -1279,7 +1304,7 @@ def test_update_manifest_invalid_status_400(tmp_path):
 
 def test_update_manifest_flips_status_and_persists(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)
         m = client.get(f"/batches/{batch_id}/manifest").json()
@@ -1299,7 +1324,7 @@ def test_update_manifest_flips_status_and_persists(tmp_path):
 
 def test_export_before_manifest_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.post(f"/batches/{batch_id}/export")
         assert r.status_code == 404
@@ -1309,7 +1334,7 @@ def test_auto_chain_export_runs_automatically_after_detect(tmp_path):
     """The point of the Stage 7 auto-chain: a single trigger-processing
     call ends with a completed export, no separate POST /export needed."""
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         detect_job = post_process(client, batch_id).json()
         assert detect_job["status"] == "completed"
@@ -1326,7 +1351,7 @@ def test_auto_chain_skips_export_when_detect_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline_runner, "process_video", failing_process_video)
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         detect_job = post_process(client, batch_id).json()
         assert detect_job["status"] == "failed"
@@ -1337,7 +1362,7 @@ def test_export_can_be_retriggered_after_completion(tmp_path):
     # unlike detect, export is safe (and meant) to re-trigger once idle —
     # this is what a future restore-then-re-export flow will rely on
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)  # auto-chain already exported once
 
@@ -1375,7 +1400,7 @@ def test_export_persists_real_output_offsets_onto_manifest(tmp_path, monkeypatch
                         fake_run_stitch_with_offsets)
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)
 
@@ -1416,11 +1441,11 @@ def test_export_rejected_while_still_in_progress(tmp_path):
     from backend import jobs
 
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)
 
-        bdir = tmp_path / "uploads" / batch_id
+        bdir = tmp_path / "uploads" / client.test_org_id / batch_id
         existing = jobs.load_job(bdir, "export")
         existing["status"] = "in_progress"
         jobs.save_job(bdir, existing)
@@ -1433,7 +1458,7 @@ def test_export_rejected_while_still_in_progress(tmp_path):
 
 def test_get_output_before_export_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.get(f"/batches/{batch_id}/output")
         assert r.status_code == 404
@@ -1441,7 +1466,7 @@ def test_get_output_before_export_404(tmp_path):
 
 def test_get_output_serves_the_exported_file(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)  # auto-chain exports too
 
@@ -1453,7 +1478,7 @@ def test_get_output_serves_the_exported_file(tmp_path):
 
 def test_get_output_unknown_batch_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/batches/does-not-exist/output")
         assert r.status_code == 404
 
@@ -1462,7 +1487,7 @@ def test_get_output_unknown_batch_404(tmp_path):
 
 def test_get_source_serves_original_upload(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"original bytes")])
         r = client.get(f"/batches/{batch_id}/source/clip.mkv")
         assert r.status_code == 200
@@ -1471,7 +1496,7 @@ def test_get_source_serves_original_upload(tmp_path):
 
 def test_get_source_unknown_batch_404(tmp_path):
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/batches/does-not-exist/source/clip.mkv")
         assert r.status_code == 404
 
@@ -1480,7 +1505,7 @@ def test_get_source_filename_not_in_batch_404(tmp_path):
     # a real filename, just not one this batch actually has -- must not
     # fall back to trying to read it off disk anyway
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.get(f"/batches/{batch_id}/source/other.mkv")
         assert r.status_code == 404
@@ -1497,7 +1522,7 @@ def test_get_source_rejects_traversal_filename_404(tmp_path):
     # endpoint's own allowlist check is the real defense, not an
     # accident of how the test client builds URLs.
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         r = client.get(f"/batches/{batch_id}/source/%2e%2e")
         assert r.status_code == 404
@@ -1510,7 +1535,7 @@ def test_get_source_does_not_leak_a_same_named_file_outside_the_batch(tmp_path):
     # root), the allowlist is per-batch (files.json), not just "does a
     # file with this name exist somewhere reachable from bdir"
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_a = upload(client, [("shared_name.mkv", b"batch A bytes")])
         batch_b = upload(client, [("shared_name.mkv", b"batch B bytes")])
         r = client.get(f"/batches/{batch_a}/source/shared_name.mkv")
@@ -1525,12 +1550,13 @@ def test_startup_sweep_marks_stale_in_progress_job_interrupted(tmp_path):
     from backend import jobs
 
     uploads_root = tmp_path / "uploads"
-    bdir = uploads_root / "stale-batch"
+    bdir = uploads_root / "org1" / "stale-batch"
     bdir.mkdir(parents=True)
     jobs.create_job(bdir, "stale-batch", "detect", status="in_progress")
 
     app = create_app(uploads_root=uploads_root,
-                     run_in_background=lambda fn, *args: fn(*args))
+                     run_in_background=lambda fn, *args: fn(*args),
+                     auth_root=tmp_path / "auth")
     with TestClient(app):  # entering the context triggers the startup event
         pass
 
@@ -1567,14 +1593,14 @@ def test_review_next_disabled_when_no_training_data_dir(tmp_path):
     # that a real .env exists at the project root (see README's
     # transfer-learning writeup for why that default was added).
     app = make_app(tmp_path, training_data_dir="")
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/next")
     assert r.status_code == 404
 
 
 def test_review_next_done_when_queue_empty(tmp_path):
     app = make_app(tmp_path, training_data_dir=tmp_path / "training_data")
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/next")
     assert r.status_code == 200
     assert r.json() == {"done": True, "remaining": 0}
@@ -1586,7 +1612,7 @@ def test_review_next_returns_lowest_margin_first(tmp_path):
     write_review_record(td, "hc_bbb", margin=1.0)
     write_review_record(td, "hc_ccc", margin=3.0)
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/next")
     assert r.status_code == 200
     body = r.json()
@@ -1605,7 +1631,7 @@ def test_review_next_remaining_shrinks_as_records_are_labeled(tmp_path):
     write_review_record(td, "hc_bbb", margin=2.0)
     write_review_record(td, "hc_ccc", margin=3.0, label="downtime")  # already labeled
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/next")
     # only the 2 unlabeled records count -- an already-labeled one isn't
     # part of "how much is left"
@@ -1617,7 +1643,7 @@ def test_review_next_skips_already_labeled_records(tmp_path):
     write_review_record(td, "hc_aaa", margin=1.0, label="downtime")
     write_review_record(td, "hc_bbb", margin=5.0)
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/next")
     assert r.json()["id"] == "hc_bbb"
 
@@ -1628,7 +1654,7 @@ def test_review_next_control_samples_sort_last(tmp_path):
                         pipeline_decision="kept")
     write_review_record(td, "hc_bbb", margin=100.0)  # a large but real margin
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/next")
     assert r.json()["id"] == "hc_bbb"
 
@@ -1644,7 +1670,7 @@ def test_review_next_xclip_disagreement_outranks_lower_margin(tmp_path):
     write_review_record(td, "hc_disagree", margin=50.0,
                         features_at_label_time={"xclip": {"p_swinging": 0.97}})
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/next")
     body = r.json()
     assert body["id"] == "hc_disagree"
@@ -1655,7 +1681,7 @@ def test_review_clip_serves_the_real_file(tmp_path):
     td = tmp_path / "training_data"
     write_review_record(td, "hc_aaa", margin=1.0)
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/hc_aaa/clip")
     assert r.status_code == 200
     assert r.content == b"fake clip bytes"
@@ -1663,7 +1689,7 @@ def test_review_clip_serves_the_real_file(tmp_path):
 
 def test_review_clip_404_for_unknown_id(tmp_path):
     app = make_app(tmp_path, training_data_dir=tmp_path / "training_data")
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/hc_nope/clip")
     assert r.status_code == 404
 
@@ -1674,7 +1700,7 @@ def test_review_clip_404_for_path_traversal_id(tmp_path):
     # a real secret file OUTSIDE reviews_dir that traversal would target
     (tmp_path / "outside.mp4").write_bytes(b"should never be served")
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.get("/review/..%2f..%2foutside/clip")
     assert r.status_code == 404
 
@@ -1684,7 +1710,7 @@ def test_review_label_writes_and_returns_next(tmp_path):
     write_review_record(td, "hc_aaa", margin=1.0)
     write_review_record(td, "hc_bbb", margin=5.0)
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/review/hc_aaa/label", json={"label": "real_action"})
     assert r.status_code == 200
     assert r.json()["id"] == "hc_bbb"
@@ -1700,7 +1726,7 @@ def test_review_label_with_note(tmp_path):
     td = tmp_path / "training_data"
     write_review_record(td, "hc_aaa", margin=1.0)
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         client.post("/review/hc_aaa/label",
                     json={"label": "downtime", "note": "clearly a lull"})
     record = json.loads((td / "reviews" / "hc_aaa.json").read_text())
@@ -1711,7 +1737,7 @@ def test_review_label_done_when_that_was_the_last_one(tmp_path):
     td = tmp_path / "training_data"
     write_review_record(td, "hc_aaa", margin=1.0)
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/review/hc_aaa/label", json={"label": "downtime"})
     assert r.json() == {"done": True, "remaining": 0}
 
@@ -1720,7 +1746,7 @@ def test_review_label_rejects_invalid_label_value(tmp_path):
     td = tmp_path / "training_data"
     write_review_record(td, "hc_aaa", margin=1.0)
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/review/hc_aaa/label", json={"label": "maybe"})
     assert r.status_code == 400
     record = json.loads((td / "reviews" / "hc_aaa.json").read_text())
@@ -1729,7 +1755,7 @@ def test_review_label_rejects_invalid_label_value(tmp_path):
 
 def test_review_label_404_for_unknown_id(tmp_path):
     app = make_app(tmp_path, training_data_dir=tmp_path / "training_data")
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         r = client.post("/review/hc_nope/label", json={"label": "downtime"})
     assert r.status_code == 404
 
@@ -1753,7 +1779,7 @@ def test_process_threads_training_data_dir_into_process_video(tmp_path, monkeypa
 
     td = tmp_path / "training_data"
     app = make_app(tmp_path, training_data_dir=td)
-    with TestClient(app) as client:
+    with authed_client(app) as client:
         batch_id = upload(client, [("clip.mkv", b"x")])
         post_process(client, batch_id)
 
@@ -1761,3 +1787,114 @@ def test_process_threads_training_data_dir_into_process_video(tmp_path, monkeypa
     training_data_dir, source_info = seen[0]
     assert Path(training_data_dir) == td
     assert source_info == {"batch_id": batch_id}
+
+
+# ---- auth: login/logout, and org isolation (see docs/INVESTIGATION_LOG.md's
+# security review -- org is the real isolation boundary, not individual
+# user) ----
+
+def test_batch_scoped_endpoint_401_when_logged_out(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:  # deliberately NOT authed_client -- no login at all
+        r = client.get("/batches/nonexistent-batch/manifest")
+        assert r.status_code == 401
+
+
+def test_login_wrong_password_401(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        org = auth.create_org(app.state.auth_root, "Org")
+        auth.create_user(app.state.auth_root, org["org_id"], "alice", "correct-pw")
+        r = client.post("/login", json={"username": "alice", "password": "wrong-pw"})
+        assert r.status_code == 401
+
+
+def test_login_sets_a_session_cookie_that_authorizes_requests(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        org = auth.create_org(app.state.auth_root, "Org")
+        auth.create_user(app.state.auth_root, org["org_id"], "alice", "pw")
+        r = client.post("/login", json={"username": "alice", "password": "pw"})
+        assert r.status_code == 200
+        assert auth.SESSION_COOKIE_NAME in r.cookies
+
+        r2 = client.get("/batches")
+        assert r2.status_code == 200
+
+
+def test_logout_invalidates_the_session(tmp_path):
+    with authed_client(make_app(tmp_path)) as client:
+        assert client.get("/batches").status_code == 200
+        r = client.post("/logout")
+        assert r.status_code == 200
+        assert client.get("/batches").status_code == 401
+
+
+def test_cross_org_batch_access_is_a_clean_404_not_a_leak(tmp_path):
+    # same shape as the path-traversal fix's own response -- a batch
+    # that's real, just not this caller's, must be indistinguishable
+    # from a batch that doesn't exist at all
+    app = make_app(tmp_path)
+    with authed_client(app, org_name="Org A", username="alice") as client_a:
+        batch_id = upload(client_a, [("clip.mkv", b"org A's real footage")])
+
+    with authed_client(app, org_name="Org B", username="bob") as client_b:
+        r = client_b.get(f"/batches/{batch_id}/manifest")
+        assert r.status_code == 404
+        assert "org A's real footage" not in r.text
+
+        r2 = client_b.get(f"/batches/{batch_id}/jobs/detect")
+        assert r2.status_code == 404
+
+
+def test_list_batches_only_shows_the_callers_own_org(tmp_path):
+    app = make_app(tmp_path)
+    with authed_client(app, org_name="Org A", username="alice") as client_a:
+        batch_a = upload(client_a, [("clip.mkv", b"x")])
+        r = client_a.get("/batches")
+        assert r.status_code == 200
+        assert [b["batch_id"] for b in r.json()["batches"]] == [batch_a]
+
+    with authed_client(app, org_name="Org B", username="bob") as client_b:
+        batch_b = upload(client_b, [("clip2.mkv", b"y")])
+        r = client_b.get("/batches")
+        ids = [b["batch_id"] for b in r.json()["batches"]]
+        assert ids == [batch_b]
+        assert batch_a not in ids
+
+
+def test_process_lock_is_not_shared_across_orgs(tmp_path):
+    # the per-org lock decision (see backend/jobs.py) at the API level:
+    # org B's in-progress job must never block org A's own trigger
+    from backend import jobs
+
+    app = make_app(tmp_path)
+    with authed_client(app, org_name="Org A", username="alice") as client_a, \
+        authed_client(app, org_name="Org B", username="bob") as client_b:
+        batch_a = upload(client_a, [("clip.mkv", b"x")])
+        batch_b = upload(client_b, [("clip2.mkv", b"y")])
+
+        bdir_b = tmp_path / "uploads" / client_b.test_org_id / batch_b
+        jobs.create_job(bdir_b, batch_b, "detect", status="in_progress")
+
+        r = post_process(client_a, batch_a)
+        assert r.status_code == 200  # org A unaffected by org B's active job
+
+
+def test_full_login_create_list_logout_regression(tmp_path):
+    app = make_app(tmp_path)
+    org = auth.create_org(app.state.auth_root, "Grace Community Church")
+    auth.create_user(app.state.auth_root, org["org_id"], "volunteer", "pw123")
+
+    with TestClient(app) as client:
+        r = client.post("/login", json={"username": "volunteer", "password": "pw123"})
+        assert r.status_code == 200
+
+        batch_id = upload(client, [("clip.mkv", b"real footage")])
+        r = client.get("/batches")
+        assert [b["batch_id"] for b in r.json()["batches"]] == [batch_id]
+
+        r = client.post("/logout")
+        assert r.status_code == 200
+
+        assert client.get("/batches").status_code == 401

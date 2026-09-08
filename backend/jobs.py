@@ -10,6 +10,11 @@ One job file per batch per job type: <batch_dir>/detect_job.json and
 single-job-at-a-time rule — find_active_job() scans the job files
 directly, so there's nothing else that could drift out of sync with what
 actually happened.
+
+The lock is per-organization, not global: uploads_root holds
+<org_id>/<batch_id> subdirectories (see backend/storage.py), and
+find_active_job() only scans one org's subtree, so one organization's
+processing run never blocks a different organization's.
 """
 
 import json
@@ -70,13 +75,17 @@ def load_job(batch_dir, job_type: str) -> dict | None:
     return json.loads(p.read_text())
 
 
-def find_active_job(uploads_root) -> dict | None:
-    """First job anywhere under uploads_root that's pending/in_progress —
-    the single source of truth for the global single-job-at-a-time lock."""
-    uploads_root = Path(uploads_root)
-    if not uploads_root.exists():
+def find_active_job(uploads_root, org_id: str) -> dict | None:
+    """First job anywhere under uploads_root/org_id that's
+    pending/in_progress — the single source of truth for the
+    single-job-at-a-time lock. Scoped per-org (not global): one
+    organization's processing run must not block a different
+    organization's, now that uploads_root holds more than one org's
+    batches (uploads_root/<org_id>/<batch_id>)."""
+    org_root = Path(uploads_root) / org_id
+    if not org_root.exists():
         return None
-    for batch_dir in sorted(p for p in uploads_root.iterdir() if p.is_dir()):
+    for batch_dir in sorted(p for p in org_root.iterdir() if p.is_dir()):
         for job_type in JOB_TYPES:
             job = load_job(batch_dir, job_type)
             if job and job["status"] in RUNNING_STATUSES:
@@ -88,18 +97,23 @@ def sweep_interrupted_jobs(uploads_root) -> list:
     """Startup sweep: a job still marked pending/in_progress from before
     this process started didn't keep running while the server was down —
     it's stale. Mark it interrupted instead of leaving it to silently
-    report "in progress" forever. Returns the jobs that were swept."""
+    report "in progress" forever. Returns the jobs that were swept.
+
+    Unlike find_active_job (scoped to one org's lock), this runs once at
+    startup and must catch every org's interrupted jobs, so it walks two
+    levels: uploads_root/<org_id>/<batch_id>."""
     uploads_root = Path(uploads_root)
     swept = []
     if not uploads_root.exists():
         return swept
-    for batch_dir in sorted(p for p in uploads_root.iterdir() if p.is_dir()):
-        for job_type in JOB_TYPES:
-            job = load_job(batch_dir, job_type)
-            if job and job["status"] in RUNNING_STATUSES:
-                job["status"] = "interrupted"
-                job["error"] = (job.get("error") or
-                                "server restarted while this job was running")
-                save_job(batch_dir, job)
-                swept.append(job)
+    for org_dir in sorted(p for p in uploads_root.iterdir() if p.is_dir()):
+        for batch_dir in sorted(p for p in org_dir.iterdir() if p.is_dir()):
+            for job_type in JOB_TYPES:
+                job = load_job(batch_dir, job_type)
+                if job and job["status"] in RUNNING_STATUSES:
+                    job["status"] = "interrupted"
+                    job["error"] = (job.get("error") or
+                                    "server restarted while this job was running")
+                    save_job(batch_dir, job)
+                    swept.append(job)
     return swept

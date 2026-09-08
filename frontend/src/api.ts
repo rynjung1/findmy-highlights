@@ -17,10 +17,12 @@
 // cross-origin requests to actually succeed.
 import type {
   BaseName,
+  BatchSummary,
   Calibration,
   DemoRunResponse,
   Job,
   JobType,
+  LoginResponse,
   Manifest,
   ReviewNextResponse,
   ReviewLabel,
@@ -50,10 +52,16 @@ export type AppErrorKind = 'network' | 'disk_full' | 'server'
 
 export class AppError extends Error {
   kind: AppErrorKind
-  constructor(message: string, kind: AppErrorKind) {
+  // The real HTTP status, when this came from a real response (absent
+  // for a 'network' error, which never got one) -- lets a caller tell a
+  // 401 (session expired/never logged in, see App.tsx's login gate)
+  // apart from every other server error without adding a new AppErrorKind.
+  status?: number
+  constructor(message: string, kind: AppErrorKind, status?: number) {
     super(message)
     this.name = 'AppError'
     this.kind = kind
+    this.status = status
   }
 }
 
@@ -83,9 +91,9 @@ const UNREACHABLE_MESSAGE =
   "Can't reach the Find My Highlights server right now. Make sure it's " +
   'running, then try again.'
 
-function throwClassified(raw: string): never {
+function throwClassified(raw: string, status?: number): never {
   const { message, kind } = classifyMessage(raw)
-  throw new AppError(message, kind)
+  throw new AppError(message, kind, status)
 }
 
 // Every request in this module funnels through here or handleErrorResponse
@@ -94,7 +102,13 @@ function throwClassified(raw: string): never {
 // rediscover the same raw TypeError independently.
 async function fetchOrThrow(path: string, options?: RequestInit): Promise<Response> {
   try {
-    return await fetch(apiUrl(path), options)
+    // credentials: 'include' -- every endpoint now requires the session
+    // cookie (see backend/auth.py); 'same-origin' (fetch's default)
+    // silently drops it for the cross-origin deployment shape this
+    // module's own top comment already documents (VITE_API_BASE_URL
+    // pointed at a separately-hosted backend). Harmless for local dev,
+    // where frontend and backend are same-origin via the Vite proxy.
+    return await fetch(apiUrl(path), { ...options, credentials: 'include' })
   } catch {
     // fetch() rejects (not a 4xx/5xx response -- an actual rejection)
     // when the request never reached ANY server at all: offline, DNS
@@ -127,13 +141,39 @@ async function handleErrorResponse(res: Response): Promise<never> {
   } catch {
     throw new AppError(UNREACHABLE_MESSAGE, 'network')
   }
-  throwClassified(detail || `HTTP ${res.status}`)
+  throwClassified(detail || `HTTP ${res.status}`, res.status)
 }
 
 async function request(path: string, options: RequestInit = {}): Promise<Response> {
   const res = await fetchOrThrow(path, options)
   if (!res.ok) await handleErrorResponse(res)
   return res
+}
+
+// Login is the one endpoint an unauthenticated caller can reach --
+// don't route a wrong-password 401 through handleErrorResponse's normal
+// "server problem" classification, since that's an expected, actionable
+// user-facing outcome, not an infrastructure failure. Callers show
+// `false` as "check your username/password" and let a real network/
+// server failure still throw normally.
+export async function login(username: string, password: string): Promise<LoginResponse | false> {
+  const res = await fetchOrThrow('/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (res.status === 401) return false
+  if (!res.ok) await handleErrorResponse(res)
+  return res.json()
+}
+
+export async function logout(): Promise<void> {
+  await request('/logout', { method: 'POST' })
+}
+
+export async function listBatches(): Promise<BatchSummary[]> {
+  const res = await request('/batches')
+  return (await res.json()).batches
 }
 
 export async function uploadBatch(files: File[]): Promise<UploadResponse> {

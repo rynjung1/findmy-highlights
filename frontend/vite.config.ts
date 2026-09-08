@@ -15,6 +15,8 @@ export default defineConfig({
       '/batches': 'http://127.0.0.1:8420',
       '/demo': 'http://127.0.0.1:8420',
       '/review': 'http://127.0.0.1:8420',
+      '/login': 'http://127.0.0.1:8420',
+      '/logout': 'http://127.0.0.1:8420',
     },
   },
 })

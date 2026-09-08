@@ -121,3 +121,17 @@ export interface ReviewRecord {
 export type ReviewNextResponse = ReviewRecord | { done: true; remaining: number }
 
 export type ReviewLabel = 'downtime' | 'real_action'
+
+// backend/app.py's POST /login response.
+export interface LoginResponse {
+  username: string
+  org_id: string
+}
+
+// backend/app.py's GET /batches response -- one entry per batch in the
+// caller's own org (org isolation is enforced server-side, see
+// backend/auth.py's require_login).
+export interface BatchSummary {
+  batch_id: string
+  files: string[]
+}

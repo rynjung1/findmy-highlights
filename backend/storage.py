@@ -27,8 +27,19 @@ def new_batch_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def batch_dir(uploads_root, batch_id: str) -> Path:
-    return Path(uploads_root) / batch_id
+def org_dir(uploads_root, org_id: str) -> Path:
+    return Path(uploads_root) / org_id
+
+
+def batch_dir(uploads_root, org_id: str, batch_id: str) -> Path:
+    """Org-scoped: uploads/<org_id>/<batch_id>/. org_id is always resolved
+    server-side from the caller's session (see backend/auth.py), never
+    taken from a URL path parameter the way batch_id is — so, unlike
+    batch_id, it's never attacker-controlled input that needs its own
+    containment check here. app.py's _batch_dir() still does the real
+    containment check (batch_id could still traverse) rooted one level
+    deeper, at uploads_root/org_id."""
+    return Path(uploads_root) / org_id / batch_id
 
 
 def save_upload(dest_path, file_obj) -> int:
