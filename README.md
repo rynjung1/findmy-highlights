@@ -341,17 +341,24 @@ talk over plain HTTP with CORS, not a shared origin.
 ```sh
 docker build -t findmy-highlights-backend .
 
-docker volume create fmh-data   # real user data + the detection cache
+docker volume create fmh-data   # real user data, accounts, and the detection cache
 docker run -d --name fmh-backend -p 8420:8420 \
   -v fmh-data:/data \
   -e FMH_CORS_ORIGINS="https://your-frontend-domain.example.com" \
+  -e FMH_COOKIE_SECURE=true \
   findmy-highlights-backend
 ```
 
-`/data` is where `FMH_UPLOADS_ROOT`/`FMH_DETECTION_CACHE_DIR` already point
-(baked in as image `ENV` defaults) — mounting a volume there is what makes
-uploads, manifests, and `output.mp4` survive a container restart. RF-DETR's
-weights and the bundled demo clip's detection cache are downloaded and
+`FMH_COOKIE_SECURE=true` is required here, not optional, the moment frontend
+and backend are on different domains (exactly this example) — see the
+callout under the environment variable table below for why leaving it unset
+looks fine at login and silently breaks every request after.
+
+`/data` is where `FMH_UPLOADS_ROOT`/`FMH_AUTH_ROOT`/`FMH_DETECTION_CACHE_DIR`
+already point (baked in as image `ENV` defaults) — mounting a volume there
+is what makes uploads, manifests, `output.mp4`, AND every org/user account
+survive a container restart. RF-DETR's weights and the bundled demo clip's
+detection cache are downloaded and
 warmed up at **build time**, not on a visitor's first request. Measured
 build time ~3 min; image size **4.66 GB** (`torch`/`torchvision` installed
 from the CPU-only wheel index to avoid unused CUDA runtime libraries).
@@ -365,12 +372,18 @@ design — see the log). No GPU required.
 | Variable | Default | Purpose |
 |---|---|---|
 | `FMH_UPLOADS_ROOT` | `./uploads` | Batch uploads, job state, manifests, `output.mp4`. Point at a mounted persistent volume. |
+| `FMH_AUTH_ROOT` | `./auth` (baked to `/data/auth` in the image) | Org/user/session records and password hashes (see `backend/auth.py`). **Must** be on the mounted persistent volume — unlike the detection cache, this is NOT safe to lose: without it, every account is silently wiped on the next container restart/redeploy. |
 | `FMH_DETECTION_CACHE_DIR` | `./.cache/detections` | RF-DETR result cache, keyed by file mtime+size+config. Safe to lose. |
 | `FMH_CORS_ORIGINS` | *(unset — no cross-origin access)* | Comma-separated allowed origins for the deployed frontend. **Required** whenever frontend and backend are on different domains. Never defaults to `*` — this API accepts real file uploads. |
+| `FMH_COOKIE_SECURE` | *(unset — cookie is `SameSite=Lax`, not `Secure`)* | **Required** whenever frontend and backend are on different domains (the documented Vercel + GCP topology) — see the callout right after this table for why leaving it unset silently breaks login on that exact setup. |
+| `FMH_MAX_UPLOAD_BYTES` | `21474836480` (20 GiB) | Hard per-request upload size ceiling, enforced before any file is written to disk (see `backend/app.py`'s `MaxUploadSizeMiddleware`). Sized for a raw ~90min 1080p phone recording with real headroom — see the investigation log for the real per-minute figures behind this number. |
+| `FMH_PROCESSING_TIMEOUT_S` | `10800` (3 hours) | Hard wall-clock ceiling on one detect/export job (see `backend/jobs.py`'s `run_with_timeout`) — past it, the job is killed (SIGTERM then SIGKILL) and marked failed so the single-job lock releases. Raise this if real games on this deployment legitimately run longer, or if the host is meaningfully slower than the hardware this default was sized against. |
 | `FMH_TRAINING_DATA_DIR` | *(unset — review queue off)* | Opts real detect jobs into Tier 1 review-queue instrumentation. Off by default on the public deployment (see Decisions below). |
 | `FMH_POSE_MODEL_PATH` | `./.cache/models/pose_landmarker_full.task` | Only read if `FMH_TRAINING_DATA_DIR` is set. Not baked into the Docker image — mount it manually if the review queue is enabled in production. |
 | `RF_HOME` | `~/.roboflow` (baked to `/data/cache/roboflow` in the image) | RF-DETR's weight cache. Pre-warmed at build time. |
 | `HF_HOME` | HuggingFace's default (`~/.cache/huggingface`) | Only relevant if `FMH_TRAINING_DATA_DIR` is set — X-CLIP instrumentation downloads `microsoft/xclip-base-patch32` (~600 MB) on first use. |
+
+**`FMH_COOKIE_SECURE` is not optional on the documented deployment shape.** The session cookie (`backend/auth.py`) defaults to `SameSite=Lax`, which browsers only send on top-level navigations, never on a cross-site `fetch()` — and the documented topology (Vercel frontend, GCP+Caddy backend, different domains) talks entirely over `fetch()`. Leaving this unset does NOT look broken at first glance: `POST /login` still returns a clean `200`, because setting the cookie doesn't depend on it working — the break only shows up as every subsequent request coming back `401`, since the browser silently never sends the cookie back. Setting `FMH_COOKIE_SECURE=true` flips the cookie to `SameSite=None; Secure` (the only combination a cross-site `fetch()` can actually use — `SameSite=None` requires `Secure` per spec, which is why this is one flag, not two), and requires the deployment actually be served over HTTPS, which the documented Caddy setup already provides. Leave it unset only for same-origin local dev, where it's correctly irrelevant.
 
 ### Frontend: build and deploy
 
@@ -469,13 +482,25 @@ curl -fsSL https://get.docker.com | sudo sh
 sudo docker run -d --name fmh-backend --restart unless-stopped \
   -p 8420:8420 -v /mnt/data:/data \
   -e FMH_CORS_ORIGINS="https://your-vercel-app.vercel.app" \
+  -e FMH_COOKIE_SECURE=true \
   ghcr.io/your-org/findmy-highlights-backend:latest
 ```
+
+`FMH_COOKIE_SECURE=true` is required here (Vercel frontend, GCP backend —
+different domains) — see the callout under the environment variable table
+above for why skipping it looks fine at login and silently breaks every
+request after.
 
 (`--restart unless-stopped` is the Docker-level "stays warm" mechanism here
 — no platform-level always-on setting the way Railway had.) Building the
 image directly on the VM instead of pulling from a registry works
 identically — `git clone`, then `docker build`.
+
+Don't test login yet, against the raw VM IP on port 8420 — with
+`FMH_COOKIE_SECURE=true` set above, the session cookie is `Secure`, which
+browsers silently refuse to store over plain HTTP. It'll look identical to
+a broken login at this point in the walkthrough; it's just untested until
+step 6's TLS is actually in place.
 
 **6. TLS via Caddy**, once the VM has an external IP:
 
@@ -488,6 +513,30 @@ sudo docker run -d --name fmh-caddy --restart unless-stopped \
 
 Then `FMH_CORS_ORIGINS` and `VITE_API_BASE_URL` both use
 `https://your-vm-ip.sslip.io`, not the raw IP or port 8420 directly.
+
+**7. Create the first real org and account.** No self-service signup
+exists (deliberate — see `backend/auth.py`), so this is the only way in.
+`scripts/create_org.py`/`scripts/create_user.py` are baked into the image
+(`COPY scripts/ scripts/`) specifically so this works via `docker exec`
+against the running container, and `FMH_AUTH_ROOT=/data/auth` (baked in,
+same as `FMH_UPLOADS_ROOT`) is what makes the result actually survive a
+restart instead of vanishing:
+
+```sh
+sudo docker exec -it fmh-backend python scripts/create_org.py --name "Your Church Name"
+# note the org_id it prints, then:
+sudo docker exec -it fmh-backend python scripts/create_user.py --org <org_id> --username <name>
+# prompts for a password interactively -- never pass one as a flag/env var,
+# it would land in shell history and `docker inspect`'s recorded command
+```
+
+Both scripts default to `backend.auth.DEFAULT_AUTH_ROOT`, which already
+resolves to `FMH_AUTH_ROOT` (`/data/auth`) inside the container — no
+`--auth-root` flag needed here. Repeat the `create_user.py` line for every
+additional volunteer/staff account at the same church; they all share
+`org_id` and see the same batches (see the per-organization auth entry in
+the [investigation log](docs/INVESTIGATION_LOG.md) for why org, not
+individual user, is the isolation boundary).
 
 ### Instance sizing
 
@@ -609,7 +658,10 @@ What follows is what's still actually true today:
   the data model supports it, it's just not built.
 - v1 targets **one sport at a time** (softball first); basketball comes
   later as a separate modular ruleset.
-- No login, accounts, or user profiles. No team features, sharing, or
+- Per-organization login/accounts shipped (see the investigation log) —
+  CLI-only account creation, no self-service signup or password reset, no
+  per-user profiles within an org (everyone at the same org shares access
+  to that org's batches). No team features beyond that, sharing, or
   recruiting/scouting layer. No personalization or per-user learning; no
   model training/fine-tuning shipped. No voice commands or
   natural-language editing. No native mobile app — v1 is a local web app.

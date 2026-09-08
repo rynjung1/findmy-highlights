@@ -43,6 +43,15 @@ RUN grep -E "^torch==|^torchvision==" requirements.txt > /tmp/torch-pins.txt \
 COPY pipeline/ pipeline/
 COPY backend/ backend/
 COPY demo_assets/ demo_assets/
+# scripts/: the only way to create a real account
+# (scripts/create_org.py, scripts/create_user.py -- deliberately
+# CLI-only, no self-service endpoint, see backend/auth.py) is
+# `docker exec` into the running container, which needs these actually
+# present in the image. Copies the whole directory rather than
+# cherry-picking the two files -- simpler, and every other script here
+# is a plain, dependency-light CLI tool (no reference_clips/-only or
+# venv-only assumptions baked into what gets copied).
+COPY scripts/ scripts/
 
 # RF-DETR's Apache-2.0 pretrained weights (~355MB, see README's Setup
 # step 5) are baked into the image at build time rather than downloaded
@@ -54,19 +63,24 @@ COPY demo_assets/ demo_assets/
 # detect_persons() call path a real request uses -- if this step fails,
 # the image fails to build, not a visitor's first click.
 ENV RF_HOME=/data/cache/roboflow
-RUN mkdir -p /data/cache/roboflow /data/uploads /data/cache/detections \
+RUN mkdir -p /data/cache/roboflow /data/uploads /data/cache/detections /data/auth \
     && python -c "from pipeline.detection import DetectionConfig, detect_persons; \
 detect_persons('demo_assets/clip_whiff1.mkv', DetectionConfig(), cache_dir=None)"
 
-# Real persistent-volume mount point for uploads (real user data) and
-# the detection cache (a performance cache, safe to lose but nice to
-# keep warm across restarts) -- see README's Deployment section for the
-# `docker run -v` example. A deployment with no volume mounted here
-# still works, it just starts from a cold cache and loses uploads/
-# output on every container restart, same tradeoff any ephemeral
-# container filesystem has.
+# Real persistent-volume mount point for uploads (real user data), the
+# detection cache (a performance cache, safe to lose but nice to keep
+# warm across restarts), and the auth store (org/user/session records
+# and password hashes, see backend/auth.py -- NOT safe to lose: without
+# this ENV line auth/ defaults to ROOT/"auth", i.e. /app/auth, which
+# sits outside this volume and gets wiped on every container
+# restart/redeploy, silently deleting every account) -- see README's
+# Deployment section for the `docker run -v` example. A deployment with
+# no volume mounted here still works, it just starts from a cold cache
+# and loses uploads/output/accounts on every container restart, same
+# tradeoff any ephemeral container filesystem has.
 ENV FMH_UPLOADS_ROOT=/data/uploads
 ENV FMH_DETECTION_CACHE_DIR=/data/cache/detections
+ENV FMH_AUTH_ROOT=/data/auth
 VOLUME ["/data"]
 
 # Non-root: defense in depth, not because anything here is known to be
