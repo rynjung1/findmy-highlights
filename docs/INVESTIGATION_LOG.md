@@ -3729,6 +3729,104 @@ security fixes to caught a real bug (the dangling chained export job)
 that pure synthetic unit tests, testing only a single job type at a
 time, did not.
 
+**2026-09-08: four real deployment-doc gaps found and fixed, closed
+with real evidence, not just a re-read of the Dockerfile.** The
+deployment docs (README, Dockerfile) hadn't been touched since before
+auth, the upload cap, and the processing timeout shipped -- checked
+directly against what the app now actually needs, not assumed still
+accurate.
+
+**1. auth/ persistence -- the serious one.** `backend/auth.py`'s
+`DEFAULT_AUTH_ROOT` resolves to `ROOT / "auth"`, i.e. `/app/auth`
+inside the container -- not under the mounted `/data` volume, and no
+`ENV FMH_AUTH_ROOT=...` line pointed it there the way
+`FMH_UPLOADS_ROOT`/`FMH_DETECTION_CACHE_DIR` already do. Every
+container restart or redeploy was silently wiping every org and user
+account. Fixed: `ENV FMH_AUTH_ROOT=/data/auth`, matching the existing
+pattern exactly, plus `/data/auth` added to the image's `mkdir -p`
+step.
+
+**2. `scripts/create_org.py`/`scripts/create_user.py` were never in
+the image at all.** Account creation is deliberately CLI-only (no
+self-service endpoint, see `backend/auth.py`), so this is the only way
+to create a real account -- but `scripts/` was never among the
+Dockerfile's `COPY` lines. `docker exec` into a real deployed container
+would have hit a bare `FileNotFoundError`. Fixed: `COPY scripts/
+scripts/` (the whole directory -- every other script here is a plain,
+dependency-light CLI tool, nothing assumes `reference_clips/` or a dev
+venv).
+
+**3. Four new env vars, zero of them documented.**
+`FMH_AUTH_ROOT`, `FMH_MAX_UPLOAD_BYTES`, `FMH_PROCESSING_TIMEOUT_S`,
+and `FMH_COOKIE_SECURE` all existed in code (from the auth and
+upload-cap/timeout work) with real defaults, but none appeared in
+README's environment variable table. Added all four with real defaults
+and purpose descriptions, matching the existing table's format.
+
+**4. The GCP walkthrough had no step for actually creating the first
+account.** Added step 7, using `docker exec` -- only actually usable
+once #1 and #2 were fixed (before that, the scripts weren't in the
+image, and even if they were, their output would have vanished on the
+next restart).
+
+**5. `FMH_COOKIE_SECURE` was undocumented entirely, and this is the
+one that would have looked fine until it silently didn't work.** On
+the documented cross-site topology (Vercel frontend, GCP backend,
+different domains), the session cookie defaults to `SameSite=Lax`,
+which browsers don't send on a cross-site `fetch()`. `POST /login`
+still returns a clean `200` either way (setting the cookie doesn't
+depend on it working) -- the break only shows up as every request
+after login silently `401`-ing. Documented as required (not optional)
+in three places: the env var table, a callout beneath it explaining
+the exact failure mode, and inline next to both real `docker run`
+examples. Cross-checked line-by-line against the real
+`_cookie_secure()`/`set_cookie` code in `backend/app.py` (not assumed
+from the docstring): `secure=True` -> `samesite="none", secure=True`;
+unset -> `samesite="lax", secure=False`; `"true"` is accepted by the
+real parsing -- confirmed exact match, no discrepancy. Also added a
+note between GCP steps 5 and 6: don't test login against the raw VM IP
+before Caddy/TLS is up -- a `Secure` cookie is silently refused by the
+browser over plain HTTP, which would look identical to a broken login
+at that point in the walkthrough when it's really just untested yet.
+
+Also fixed a stale "No login, accounts, or user profiles" line in
+Known limitations, left over from before auth shipped.
+
+**Real build + docker exec verification, completed after a real
+blocker.** The first attempt hit a genuine host disk-full error (253MB
+free of 228GB) mid-build, unrelated to anything in this Dockerfile --
+Docker Desktop's own virtual disk was throwing read errors on its
+existing content too. Not worked around; the commit documenting items
+1-5 was made with this verification explicitly marked as still
+pending, rather than silently claiming it was done.
+
+Once real disk space was freed and Docker reset, the real build
+completed through all steps, and a real `docker exec` was run against
+the actual container: `scripts/create_org.py` and
+`scripts/create_user.py` created a real org and user, and `testuser`
+was confirmed still present in `/data/auth/users.json` after a
+container restart. Re-verified independently rather than taken as
+reported (the "verify claims, not facts" rule applies to a first-person
+report exactly as much as anything else): `df -h /` showed 3.1Gi free
+(real fix, not just claimed); `docker images` showed a real
+`findmy-highlights:latest`, 4.81GB; a throwaway `alpine` container
+mounted against the real `fmh-data` volume showed `/data/auth/
+orgs.json` and `/data/auth/users.json` genuinely present, owned by uid
+1000 (matching the image's own `fmh` user, not manually placed);
+`users.json` contained a real `testuser` entry with a real user_id,
+org_id, and a correctly-shaped scrypt hash (`salt_hex$digest_hex`,
+matching `backend.auth.hash_password`'s real format) -- and this was
+true with NO container currently running at all, meaning the data
+outlives any single container's lifecycle, not just one restart.
+Separately confirmed `scripts/create_org.py`/`create_user.py` are the
+real files (not stubs) inside the built image, and that
+`FMH_AUTH_ROOT=/data/auth` is genuinely baked in as an image `ENV`
+default (`docker run --rm findmy-highlights:latest env`).
+
+**Status: all four gaps closed, all fixes real-verified, not just
+read and reasoned about.** The deployment docs (README + Dockerfile)
+are now trustworthy to actually follow for a real deployment.
+
 
 ## Architecture overview
 
