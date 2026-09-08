@@ -35,6 +35,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
+from starlette.datastructures import Headers
 
 from pipeline.calibration import (build_calibration, grab_preview_frame,
                                   probe_frame_size, save_calibration)
@@ -93,6 +94,112 @@ def _cors_origins() -> list[str]:
 # a real deployment sets it" pattern as FMH_CORS_ORIGINS.
 def _cookie_secure() -> bool:
     return os.environ.get("FMH_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes")
+
+
+# Real ceiling, not a guess: a raw iPhone 1080p30 recording (this app's
+# own ALLOWED_VIDEO_EXTENSIONS includes .mov, the native format a church
+# volunteer's phone would actually produce, unedited) runs roughly
+# 65MB/min on HEVC ("High Efficiency", the modern default) up to
+# ~125-150MB/min on H.264 ("Most Compatible", still common on older
+# phones/Android) -- Apple's own documented per-minute figures. At the
+# high end of that real range, a ~90min game (this project's own sizing
+# target) lands around 13.5GB; a longer game with extra innings, or a
+# doubleheader mistakenly uploaded as one file, pushes further. 20 GiB
+# gives real, comfortable headroom (~1.5x) over that realistic worst
+# case for a LEGITIMATE full-length recording, while still being a
+# real, finite, enforced ceiling -- not "whatever fits on disk" -- for a
+# single upload request. Overridable via FMH_MAX_UPLOAD_BYTES.
+DEFAULT_MAX_UPLOAD_BYTES = int(
+    os.environ.get("FMH_MAX_UPLOAD_BYTES", 20 * 1024 * 1024 * 1024))
+
+
+class _UploadTooLarge(Exception):
+    pass
+
+
+class MaxUploadSizeMiddleware:
+    """Pure ASGI middleware (not Starlette's BaseHTTPMiddleware, which
+    buffers the whole request body via request.body()/request.form() --
+    exactly what this exists to avoid), added first so it's the
+    OUTERMOST layer and runs before any other middleware or routing.
+
+    Real, confirmed reason an in-endpoint check (e.g. inside
+    upload_batch, or inside storage.save_upload) is too late: this
+    project's installed starlette/python-multipart versions were checked
+    directly (not assumed) -- MultiPartParser.on_part_data has a real
+    max_part_size check for non-file FORM FIELDS, but NONE for file
+    parts, which instead spool straight to a real temp file on disk
+    (SpooledTemporaryFile, spilling past a 1MB in-memory threshold) with
+    no size limit at all. That spooling happens during FastAPI's own
+    File(...) dependency resolution, BEFORE this app's endpoint function
+    body ever runs -- so by the time upload_batch() could inspect
+    anything, an arbitrarily large file has already been written to
+    disk. This middleware intercepts at the raw ASGI layer, before
+    Starlette's router or its multipart parser ever sees the body.
+
+    Two real, layered checks, not just one: (1) reads Content-Length up
+    front and rejects immediately, before consuming ANY body bytes at
+    all -- covers this app's actual real client (browser fetch() with a
+    FormData body always sends an accurate Content-Length, confirmed:
+    frontend/src/api.ts's uploadBatch never streams a body without one).
+    (2) wraps receive() to count real bytes as they arrive regardless of
+    what Content-Length claimed, as defense in depth against a raw
+    client that lies about it or uses chunked transfer-encoding with no
+    Content-Length at all -- a logged-in user is still real,
+    authenticated access, and this project's own security review
+    treats "trust the client's own header" as insufficient on its own.
+    """
+
+    def __init__(self, app, max_bytes: int = DEFAULT_MAX_UPLOAD_BYTES):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def _reject(self, send) -> None:
+        body = json.dumps({
+            "detail": f"upload too large: exceeds the "
+                      f"{self.max_bytes // (1024 * 1024)}MB limit for a single "
+                      f"request"}).encode()
+        await send({
+            "type": "http.response.start", "status": 413,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = Headers(scope=scope).get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > self.max_bytes:
+                    await self._reject(send)
+                    return
+            except ValueError:
+                pass  # malformed header -- let normal request handling reject it
+
+        total = 0
+        exceeded = False
+
+        async def limited_receive():
+            nonlocal total, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > self.max_bytes:
+                    exceeded = True
+                    raise _UploadTooLarge()
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _UploadTooLarge:
+            # Only reachable while the request body is still being read
+            # (dependency resolution, before any endpoint handler starts
+            # -- see this class's own docstring), so no response has
+            # been sent yet; safe to send the real one here.
+            await self._reject(send)
 
 
 VALID_REVIEW_LABELS = ("downtime", "real_action")
@@ -162,17 +269,29 @@ class LoginBody(BaseModel):
 
 
 def _default_run_in_background(fn, *args):
-    """Real dispatch: a daemon thread, so a 30-60+ minute job doesn't
-    block the event loop that serves progress-polling requests. Tests
-    override app.state.run_in_background with a synchronous call so
-    assertions don't race a real thread."""
-    t = threading.Thread(target=fn, args=args, daemon=True)
+    """Real dispatch: a daemon thread supervising fn via
+    jobs.run_with_timeout (see that function's own docstring for why
+    the real work runs in a subprocess, not just this thread, and what
+    "timeout" actually means for the single-job lock) -- the thread
+    itself does no CPU work, just waits on the subprocess, so this still
+    returns to the caller (the HTTP request) immediately. Every real
+    call site here is fn(batch_dir, job, *rest) (see backend/app.py's
+    trigger_process/trigger_export/confirm_order/run_demo), so args[0]
+    and args[1] are always batch_dir and job. Tests override
+    app.state.run_in_background with a synchronous call so assertions
+    don't race a real thread or pay a real subprocess's cost."""
+    batch_dir, job = args[0], args[1]
+    rest = args[2:]
+    t = threading.Thread(
+        target=jobs.run_with_timeout, args=(fn, batch_dir, job, rest),
+        daemon=True)
     t.start()
     return t
 
 
 def create_app(uploads_root=None, run_in_background=None,
-              training_data_dir=None, auth_root=None) -> FastAPI:
+              training_data_dir=None, auth_root=None,
+              max_upload_bytes=None) -> FastAPI:
     """App factory, not a module-level singleton — tests point each app
     instance at its own tmp_path uploads root with a synchronous
     run_in_background, fully isolated from other tests and from a real
@@ -185,7 +304,12 @@ def create_app(uploads_root=None, run_in_background=None,
 
     `auth_root`, if given (or if unset, from backend.auth.DEFAULT_AUTH_ROOT),
     is where orgs.json/users.json/sessions.json live -- separate from
-    uploads_root, see backend/auth.py."""
+    uploads_root, see backend/auth.py.
+
+    `max_upload_bytes`, if given (or if unset, DEFAULT_MAX_UPLOAD_BYTES),
+    is the real per-request body size ceiling -- see
+    MaxUploadSizeMiddleware's own docstring for why this has to be
+    enforced at the ASGI layer, before any endpoint code runs."""
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
         jobs.sweep_interrupted_jobs(app.state.uploads_root)
@@ -204,6 +328,17 @@ def create_app(uploads_root=None, run_in_background=None,
         app.add_middleware(
             CORSMiddleware, allow_origins=origins, allow_credentials=True,
             allow_methods=["*"], allow_headers=["*"])
+    # Added LAST (not first): add_middleware inserts at the front of the
+    # stack, and Starlette builds the middleware chain in reverse (see
+    # Starlette.build_middleware_stack) so the MOST RECENTLY added
+    # middleware ends up OUTERMOST -- confirmed directly against this
+    # project's installed starlette source, not assumed. This has to be
+    # the outermost layer so it can reject an oversized body before CORS
+    # or routing ever touch it.
+    app.add_middleware(
+        MaxUploadSizeMiddleware,
+        max_bytes=(max_upload_bytes if max_upload_bytes is not None
+                  else DEFAULT_MAX_UPLOAD_BYTES))
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception):

@@ -3470,6 +3470,265 @@ catcher return-throws (closed, structural), offense/defense transitions
 untouched real content), non-contact pitches (closed, dissolves into
 the above plus this project's founding scope limit).
 
+**2026-09-01: first real security review of this project -- everything
+tonight before this point was detection safety and features, never a
+dedicated security pass. Given the eventual goal of deploying beyond a
+local dev machine, checked real current state directly against a live
+server rather than reading the code and assuming it's fine. One
+critical, real, demonstrated vulnerability found and fixed same night,
+with real before/after verification.**
+
+**1. Auth: none, confirmed, matches this project's own stated v1 scope**
+("No login, accounts, or user profiles"). Not a surprise on its own --
+what makes it load-bearing is that `Dockerfile`'s actual `CMD` binds
+`--host 0.0.0.0`, and README's own GCP deployment instructions open
+`tcp:8420`/`tcp:80,443` to `0.0.0.0/0`. This project's own documented,
+already-written deployment path puts a fully unauthenticated backend
+directly on the public internet. Not addressed tonight -- a real,
+separate follow-up, deliberately out of scope for this entry (see
+bottom line).
+
+**2. Path traversal via `batch_id`: real, demonstrated, both read and
+write -- found live, not inferred from code.** `_batch_dir()`'s only
+check was "does this path exist," never "does it stay inside
+`uploads_root`." `batch_id=%2e%2e` (URL-encoded `..`) reached the
+handler as a literal `".."` and resolved one directory level above
+`uploads_root` (FastAPI's default single-segment path converter can't
+smuggle a literal "/" through this parameter -- multi-level traversal
+via encoded slashes was already blocked by Starlette's own routing,
+confirmed live: `%2e%2e%2f%2e%2e%2fetc` produced a route-level 404
+distinguishable from this app's own `{"detail": ...}` 404s). Concrete,
+not theoretical:
+- **Read**: planted a file named `output.mp4` one level above
+  `uploads_root`; `GET /batches/%2e%2e/output` returned its exact
+  contents, HTTP 200.
+- **Write**: `POST /batches/%2e%2e/calibration` with a `calibration_file`
+  upload wrote attacker-controlled JSON to `calibration.json` one level
+  above `uploads_root`, HTTP 200, no preconditions -- this branch skips
+  the video-lookup step the x/y-coordinate branch has.
+- The x/y-coordinate calibration branch hit the *same* traversal but
+  crashed with an unhandled `FileNotFoundError` -> 500 instead of
+  writing cleanly, because it calls `_batch_file_names()` (reads a
+  `files.json` that never exists at an attacker-chosen path) before
+  `_batch_dir()` had any containment check to stop it first.
+
+In the real Docker deployment (`FMH_UPLOADS_ROOT=/data/uploads`), one
+level up lands in `/data` -- the same directory the detection cache
+lives under.
+
+**Correction to my own report from earlier tonight, made explicitly
+rather than left standing:** I described the 500 above as "leaking a
+full server stack trace (real file paths included) to an unauthenticated
+caller." Re-verified before writing the fix: the client-facing response
+body was the bare, stock Starlette text `"Internal Server Error"` --
+`debug=False` (this app's default, never overridden anywhere) already
+kept the traceback out of the HTTP response; only this process's own
+log saw it (which is where I read it from, conflating "visible to me
+via `tail server.log`" with "visible to the caller"). The overstatement
+is corrected here, not quietly dropped -- the real gap section 4 below
+fixes is real (removing reliance on a default staying that way, and
+making the response shape consistent with the rest of this API), just
+not the specific claim I made about what the pre-fix response body
+actually contained.
+
+**3. Fix: `_batch_dir()` now resolves both paths to their real,
+symlink-free absolute form and requires the batch directory to actually
+be `uploads_root` or a real descendant of it** (`Path.is_relative_to()`)
+**-- rejecting with a clean 404 otherwise, before anything else touches
+the filesystem.** `batch_id` resolving to `uploads_root` itself (a bare
+`.`) is rejected too -- every real batch is a subdirectory of it, never
+the root. This is the single, correct, centralized fix point: all 11
+real batch-scoped endpoints in `backend/app.py` funnel through this one
+function (confirmed by grep before writing the fix, not assumed), and
+everything downstream (`backend/jobs.py`, `backend/pipeline_runner.py`)
+only ever receives an already-validated directory, never re-derives a
+path from the raw `batch_id` itself. `get_source`'s own existing
+resolved-parent check (validating the *filename* segment doesn't escape
+`bdir`) and `_safe_review_path`'s existing allowlist-regex-plus-
+containment check (`review_id`, an entirely separate namespace from
+`batch_id`) were both re-checked and already sound on their own terms --
+neither needed changing, both are real defense-in-depth on top of the
+one fix that mattered.
+
+**4. Fix: a general unhandled-exception handler** (`@app.exception_handler
+(Exception)`) **returning `{"detail": "internal server error"}`,
+defense in depth as the task framed it, not a fix for an observed
+client-facing leak** (see the correction above -- there wasn't one).
+Confirmed it doesn't shadow FastAPI's own more-specific `HTTPException`
+handling: Starlette's handler lookup matches the exact exception type
+before falling back to a registered ancestor-class handler, so every
+existing `{"detail": ...}` response in this app is unchanged (real
+regression test below, not just reasoned about). The real traceback is
+still logged server-side (`logger.exception(...)`), exactly as visible
+as before to the one place that should see it.
+
+**5. Real verification, same live-server method used to find the bug,
+not just re-reading the fixed code.** Fresh server, fresh
+`FMH_UPLOADS_ROOT`, the exact same three requests as the original
+finding:
+- `GET /batches/%2e%2e/output` (with the same secret file re-planted
+  one level up) -> `{"detail": "no such batch: .."}`, HTTP 404, no file
+  content in the response.
+- `POST /batches/%2e%2e/calibration` with a `calibration_file` upload ->
+  same clean 404; confirmed via `ls` that no file was written outside
+  `uploads_root`.
+- The x/y-coordinate branch that previously 500'd -> now the same clean
+  404, before ever reaching `_batch_file_names()`.
+- Sanity check: a real, legitimate upload and batch_id still work
+  normally end to end.
+
+**6. Full test suite, plus 8 new regression tests** (matching this
+project's own established pattern for a proven-real vulnerability --
+see the upload-filename-traversal tests this same file already had: a
+"would have escaped pre-fix" proof test demonstrating the underlying
+primitive is real, then real endpoint-level tests of the actual fix).
+New tests cover: the pre-fix escape proven directly against
+`storage.batch_dir()`'s own join (not simulated), a real planted-file
+read attempt rejected with the file content asserted absent from the
+response, a real write attempt rejected with the file asserted absent
+from disk afterward, the specific x/y-coordinate crash path now clean,
+a bare `.` batch_id also rejected, a real legitimate batch_id
+unaffected, the new exception handler returning a clean response with
+the real tmp path/exception name/`"Traceback"` all asserted absent from
+the body, and existing `HTTPException` responses confirmed unshadowed.
+**509 passed** (was 501 before this entry), **23/23 vitest unaffected**
+(frontend untouched, backend-only fix).
+
+**Explicitly out of scope for this entry, real separate follow-ups, not
+silently rolled in:** authentication, upload size caps, and processing
+timeouts -- all three remain real, unaddressed findings from section 1
+and from tonight's earlier full review. This entry closes exactly the
+two most severe items (the traversal and its direct crash/response-
+shape consequence), verified cleanly on their own, deliberately not
+entangled with the larger, still-open "is this safe to expose beyond
+one machine" question.
+
+**2026-09-08: closes the last two open items from the security review
+above -- no upload size cap, no processing timeout.** Per-organization
+auth (see the migration to `uploads/<org_id>/<batch_id>/`, done earlier
+this session) already gates who can reach these endpoints at all; this
+entry is about what a real, authenticated, but careless-or-malicious
+upload can still do to the server itself.
+
+**1. Upload size cap: real ceiling, not a guess, and a real finding
+about where it actually had to be enforced.** Checked Apple's own
+documented per-minute figures rather than assuming: a raw iPhone
+1080p30 recording (this app's own `ALLOWED_VIDEO_EXTENSIONS` includes
+`.mov`, the native unedited format a volunteer's phone would actually
+produce) runs ~65MB/min on HEVC up to ~125-150MB/min on H.264 --
+at the high end, a 90min game (this project's own sizing target) lands
+around 13.5GB. Set `MAX_UPLOAD_BYTES` = 20 GiB, ~1.5x headroom over
+that realistic worst case for a LEGITIMATE recording, overridable via
+`FMH_MAX_UPLOAD_BYTES`.
+
+Real, checked-not-assumed finding on where enforcement had to live:
+read this project's own installed `python-multipart` (0.0.32) source
+directly -- `MultiPartParser.on_part_data` has a real size check for
+non-file form FIELDS, but none at all for file PARTS, which spool
+straight to a real temp file on disk (`SpooledTemporaryFile`, past a
+1MB in-memory threshold) with no limit. That spooling happens during
+FastAPI's own `File(...)` dependency resolution, before this app's
+`upload_batch()` handler body ever runs -- so a check inside the
+endpoint, or inside `storage.save_upload()`, would already be too late;
+an arbitrarily large file would already be on disk. Fixed with a raw
+ASGI middleware (`MaxUploadSizeMiddleware`, not Starlette's
+`BaseHTTPMiddleware`, which itself buffers the body), added as the
+outermost layer (confirmed against this project's installed Starlette
+source that `add_middleware`'s most-recently-added call ends up
+outermost, not assumed): a fast Content-Length pre-check rejects before
+reading any body bytes at all (this app's real client, `fetch()` with a
+`FormData` body, always sends an honest one -- confirmed in
+`frontend/src/api.ts`), plus a streaming receive-wrapping fallback that
+counts real bytes regardless of what Content-Length claims, defense in
+depth against a raw client using chunked transfer-encoding to bypass
+the header check.
+
+**Real, live verification, same method as the path-traversal fix.**
+Fresh server, `FMH_MAX_UPLOAD_BYTES=10485760` (10MB): a real 15MB file
+-> clean `413 {"detail": "upload too large: exceeds the 10MB limit..."}`,
+confirmed via `find` that `uploads_root` wasn't even created (rejected
+before any write); a real 8MB file (under the cap) -> normal `200`,
+written to the correct org-scoped path; server's own health check and
+log confirmed clean afterward, no crash. Also drove the streaming
+(no-Content-Length) path directly against the middleware with a
+synthetic ASGI scope/receive/send, since TestClient/httpx can't
+construct a request without an honest Content-Length on its own.
+**4 new tests**, all passing.
+
+**2. Processing timeout: a real subprocess with a real kill, not a
+best-effort thread.** A Python thread can't be forcibly stopped, and
+the real threat here (a pathological/corrupt file hanging cv2/ffmpeg
+decoding indefinitely) needs an actual kill, not just "stop watching
+it" -- `jobs.run_with_timeout` now runs each real job function
+(`run_detect_job`/`run_export_job`/`run_detect_then_export_job`) in a
+genuine `multiprocessing.Process`, joined with a wall-clock timeout;
+past it, SIGTERM then (if still alive after a 5s grace period) SIGKILL.
+Checked first, not assumed: `pipeline/detection.py`'s `detect_persons`
+already constructs a fresh model on every single call with no
+cross-call cached instance, so moving dispatch from a thread to a
+subprocess adds no NEW per-job model-reload cost -- the real added cost
+is one-time Python/ML-library import overhead per job, not per-frame
+work.
+
+Default timeout: 3 hours (`FMH_PROCESSING_TIMEOUT_S`), sized against
+the real current extrapolated worst case from the RFDETRSmall-default
+entry above (~34min detect + ~13min export, ~47min, for a 67.5min
+game -- itself flagged there as an extrapolation, not yet directly
+re-measured), scaled to a 90min upload and given real margin (2.5x+)
+rather than cut close.
+
+Releasing the single-job lock is what "fail cleanly, don't leave the
+service stuck" means in this codebase specifically: `find_active_job`
+only ever reads job status files, never checks whether a process is
+alive, so writing `status="failed"` to the job file IS what frees the
+lock, independent of whether the killed process's OS resources have
+fully unwound.
+
+**Real bug found by live testing that the synthetic unit tests didn't
+catch, fixed before calling this done.** First implementation only
+reset the ONE job file (`job["type"]`) known at dispatch time. Live run
+against the real bundled demo pipeline (`FMH_PROCESSING_TIMEOUT_S=3`,
+real server, real HTTP) exposed a real, different failure: detect
+finished INSIDE the 3s window, `run_detect_then_export_job` chained
+straight into creating a real, separate export job, which was still
+genuinely `in_progress` when the 3s mark hit and the process was
+killed -- the timeout handler, knowing only about the original detect
+job, left `export_job.json` dangling at `in_progress` forever, a
+permanent lock leak `find_active_job` would report as active
+indefinitely (confirmed: a second `/demo/run` call got a real `409`
+citing that stuck export job's own id). Fixed by sweeping every
+`JOB_TYPES` entry for the batch on timeout, not just the one passed in
+at dispatch, failing whichever are still in a running status. Re-ran
+the identical live scenario after the fix: detect shows `completed`
+(not clobbered), export shows `failed` with the timeout error, and an
+immediate follow-up `/demo/run` call got a real `200`, not a `409` --
+confirmed via `ps` that no orphaned child process was left behind
+either time.
+
+**5 new tests** covering: a quick job finishing normally and
+untouched, a real hung subprocess actually killed within a bounded
+real wall-clock time (verified via a heartbeat file that provably stops
+advancing, not just "the parent gave up waiting"), the lock reading
+free immediately afterward and a subsequent job able to start, real
+progress the child wrote before hanging surviving into the failure
+record (reload-not-overwrite), and the exact chained-job-type bug above
+as a permanent regression test.
+
+**Full suite, both languages: 547 passed (was 538), 0 failed; 23/23
+vitest unaffected** (frontend untouched, backend-only change). No
+detection/pipeline code was touched by either fix -- `scripts/regression.py`
+calls the pipeline directly, never through this app's job-dispatch
+layer, so the 9-clip reference-clip regression suite is structurally
+unable to be affected by either change and wasn't re-run for that
+reason, not skipped by oversight.
+
+**Honest bottom line: both real DoS vectors from the original review
+are closed, verified live end to end, not just read and reasoned
+about** -- and the live-testing standard this project already holds
+security fixes to caught a real bug (the dangling chained export job)
+that pure synthetic unit tests, testing only a single job type at a
+time, did not.
+
 
 ## Architecture overview
 

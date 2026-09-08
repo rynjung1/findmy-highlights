@@ -38,3 +38,8 @@ uploads/
 
 # Environment / secrets
 .env
+
+# Auth store: real org/user records and password hashes (see
+# backend/auth.py), same treatment as uploads/ -- real runtime data,
+# never source.
+auth/

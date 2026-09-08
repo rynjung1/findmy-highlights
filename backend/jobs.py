@@ -18,9 +18,28 @@ processing run never blocks a different organization's.
 """
 
 import json
+import multiprocessing
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Real, current worst-case legitimate runtime this must never fire under
+# (see docs/INVESTIGATION_LOG.md's RFDETRSmall-default entry): a full
+# ~67.5min game's detect stage extrapolated at ~34min (down from ~45min
+# pre-optimization, RFDETRSmall now shipped as the default) plus ~13min
+# export, ~47min total -- flagged in that entry as an extrapolation, not
+# yet directly re-measured against full_game.mkv post-flip. A 90min
+# upload (backend/app.py's own MAX_UPLOAD_BYTES sizing target) scales
+# roughly linearly with duration, landing a realistic worst case around
+# 60-75 minutes. 3 hours gives real, generous headroom (2.5x+) over
+# that worst case while still bounding a truly pathological hang (e.g. a
+# corrupt file causing an infinite decode loop, unbounded by any real
+# video's actual duration) to a finite wait. Overridable via
+# FMH_PROCESSING_TIMEOUT_S for a deployment that needs to tune it
+# (slower hardware, or games that legitimately run longer than 90min).
+DEFAULT_PROCESSING_TIMEOUT_S = int(
+    os.environ.get("FMH_PROCESSING_TIMEOUT_S", 3 * 60 * 60))
 
 JOB_TYPES = ("detect", "export")
 STATUSES = ("pending", "in_progress", "needs_order_confirmation",
@@ -73,6 +92,68 @@ def load_job(batch_dir, job_type: str) -> dict | None:
     if not p.exists():
         return None
     return json.loads(p.read_text())
+
+
+def run_with_timeout(fn, batch_dir, job: dict, args: tuple,
+                     timeout_s: int | None = None) -> None:
+    """Runs fn(batch_dir, job, *args) -- one of backend.pipeline_runner's
+    real job functions -- in a genuinely separate OS process, not just a
+    thread: a Python thread can't be forcibly stopped, and the real
+    threat this defends against (a pathological or corrupt file causing
+    cv2/ffmpeg decoding to hang indefinitely) needs an actual kill, not
+    just "give up watching it."
+
+    Releasing the single-job lock is what "on timeout, fail cleanly and
+    don't leave the service stuck" actually means here: find_active_job
+    only ever reads job status files, never checks whether a real
+    process is still alive, so once every RUNNING job file for this
+    batch reads "failed", a subsequent job can start immediately --
+    independent of whether the killed process's own OS resources have
+    fully unwound yet.
+
+    Sweeps every JOB_TYPE for this batch on timeout, not just the one
+    `job` passed in at dispatch time -- real, found live (not
+    theoretical): run_detect_then_export_job can finish detect INSIDE
+    the timeout window and chain straight into creating a real, separate
+    export job, which was still genuinely in_progress when the timeout
+    fired. Failing only the original detect job left that export job
+    file dangling at in_progress forever, a permanent lock leak
+    find_active_job would report as active indefinitely -- confirmed via
+    a real live run (FMH_PROCESSING_TIMEOUT_S=3 against the real demo
+    pipeline) before this sweep was added, and confirmed fixed by the
+    same live scenario afterward.
+
+    fn's own real per-model-instance-per-call cost (see
+    pipeline/detection.py's detect_persons, which already constructs a
+    fresh model on every call, no cross-call cached instance) means
+    running it in a fresh process pays no NEW per-job model-reload cost
+    beyond what already happened in-thread before this change -- the
+    real added cost is one-time Python/ML-library import overhead per
+    job, not per-frame work.
+    """
+    if timeout_s is None:
+        timeout_s = DEFAULT_PROCESSING_TIMEOUT_S
+    process = multiprocessing.Process(target=fn, args=(batch_dir, job, *args))
+    process.start()
+    process.join(timeout_s)
+    if not process.is_alive():
+        return  # finished (successfully or not) within the timeout --
+                # fn's own save_job calls already recorded the real outcome
+
+    process.terminate()  # SIGTERM first: a real chance to exit cleanly
+    process.join(5)
+    if process.is_alive():
+        process.kill()  # SIGKILL: it ignored SIGTERM
+        process.join()
+
+    error = f"processing timed out after {timeout_s}s and was stopped"
+    for job_type in JOB_TYPES:
+        current = load_job(batch_dir, job_type)
+        if current and current["status"] in RUNNING_STATUSES:
+            current["status"] = "failed"
+            current["stage"] = None
+            current["error"] = error
+            save_job(batch_dir, current)
 
 
 def find_active_job(uploads_root, org_id: str) -> dict | None:

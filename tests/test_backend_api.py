@@ -33,11 +33,12 @@ from backend.app import create_app
 from pipeline.manifest import build_manifest, save_manifest
 
 
-def make_app(tmp_path, training_data_dir=None):
+def make_app(tmp_path, training_data_dir=None, max_upload_bytes=None):
     app = create_app(uploads_root=tmp_path / "uploads",
                      run_in_background=lambda fn, *args: fn(*args),
                      training_data_dir=training_data_dir,
-                     auth_root=tmp_path / "auth")
+                     auth_root=tmp_path / "auth",
+                     max_upload_bytes=max_upload_bytes)
     return app
 
 
@@ -219,6 +220,90 @@ def test_upload_extension_check_is_case_insensitive(tmp_path):
         r = client.post("/batches", files=[
             ("files", ("CLIP.MP4", b"video bytes", "video/mp4"))])
         assert r.status_code == 200
+
+
+def test_upload_rejected_when_exceeds_size_cap(tmp_path):
+    # real cap, real oversized body -- a small cap here stands in for
+    # the real 20GiB default (see backend/app.py's DEFAULT_MAX_UPLOAD_BYTES)
+    # so this test doesn't need to actually generate gigabytes of data
+    app = make_app(tmp_path, max_upload_bytes=1000)
+    with authed_client(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("clip.mkv", b"x" * 2000, "video/x-matroska"))])
+        assert r.status_code == 413
+        assert "too large" in r.json()["detail"]
+        # nothing should have been written to disk at all
+        assert not (tmp_path / "uploads" / client.test_org_id).exists() or \
+            list((tmp_path / "uploads" / client.test_org_id).iterdir()) == []
+
+
+def test_upload_allowed_under_size_cap(tmp_path):
+    # the cap must never reject a real, legitimate upload that's
+    # actually under it
+    app = make_app(tmp_path, max_upload_bytes=10_000)
+    with authed_client(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("clip.mkv", b"x" * 500, "video/x-matroska"))])
+        assert r.status_code == 200
+
+
+def test_upload_size_cap_rejects_via_content_length_before_reading_body(tmp_path, monkeypatch):
+    # confirms the FAST path: a request whose declared Content-Length
+    # alone exceeds the cap gets rejected without ever touching
+    # backend.storage.save_upload -- real proof, not just a
+    # same-outcome coincidence
+    import backend.storage as storage_module
+    app = make_app(tmp_path, max_upload_bytes=1000)
+    called = []
+    original = storage_module.save_upload
+    monkeypatch.setattr(storage_module, "save_upload",
+                        lambda *a, **kw: called.append(True) or original(*a, **kw))
+    with authed_client(app) as client:
+        r = client.post("/batches", files=[
+            ("files", ("clip.mkv", b"x" * 2000, "video/x-matroska"))])
+        assert r.status_code == 413
+    assert called == []  # save_upload was never even reached
+
+
+def test_max_upload_middleware_rejects_via_streaming_count_without_content_length():
+    # defense-in-depth path: a raw ASGI request that never declares
+    # Content-Length at all (e.g. chunked transfer-encoding) must still
+    # be caught by counting real bytes as they stream in -- driven
+    # directly against the middleware with a synthetic scope/receive/send,
+    # since TestClient/httpx always sends an honest Content-Length and
+    # can't exercise this path on its own.
+    import asyncio
+    from backend.app import MaxUploadSizeMiddleware
+
+    async def inner_app(scope, receive, send):
+        # a real inner app that actually reads the body, same as
+        # FastAPI's own multipart parser would
+        while True:
+            message = await receive()
+            if not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"should never get here"})
+
+    middleware = MaxUploadSizeMiddleware(inner_app, max_bytes=100)
+    scope = {"type": "http", "headers": []}  # no content-length header at all
+
+    chunks = [b"x" * 60, b"x" * 60, b"x" * 60]  # 180 bytes total, over the 100 cap
+
+    async def receive():
+        if chunks:
+            return {"type": "http.request", "body": chunks.pop(0), "more_body": bool(chunks)}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent = []
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(middleware(scope, receive, send))
+
+    assert sent[0]["status"] == 413
+    body = b"".join(m["body"] for m in sent if m["type"] == "http.response.body")
+    assert b"too large" in body
 
 
 def test_upload_disk_full_gives_clear_507_not_generic_500(tmp_path, monkeypatch):
